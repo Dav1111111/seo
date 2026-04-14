@@ -17,9 +17,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+import os
+
+_allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost",
+    "http://c6b32ea267b.vps.myjino.ru",
+]
+# Add custom origin from env if set
+_extra = os.getenv("CORS_ORIGINS", "")
+if _extra:
+    _allowed_origins.extend(o.strip() for o in _extra.split(",") if o.strip())
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost", "https://*.ngrok-free.app"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
