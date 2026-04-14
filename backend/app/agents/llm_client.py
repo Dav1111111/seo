@@ -46,7 +46,11 @@ PRICING = {
 def get_client() -> anthropic.Anthropic:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        kwargs: dict[str, Any] = {"api_key": settings.ANTHROPIC_API_KEY}
+        # Use Cloudflare Worker proxy if configured (bypasses geo-block)
+        if settings.ANTHROPIC_BASE_URL:
+            kwargs["base_url"] = settings.ANTHROPIC_BASE_URL
+        _client = anthropic.Anthropic(**kwargs)
     return _client
 
 
