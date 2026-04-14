@@ -109,13 +109,13 @@ class ValidatorAgent:
         return self._apply_decisions(agent_output.issues, raw)
 
     def _build_system_prompt(self, season_info: dict[str, Any]) -> str:
-        return f"""Ты — Агент-Валидатор, контролёр качества системы SEO-мониторинга.
+        return f"""Ты — фильтр качества. Проверяешь найденные проблемы и отсеиваешь ложные.
 
-ВАЖНО: Все reason и summary — ТОЛЬКО на русском языке.
+ПРАВИЛО: Пиши reason ПРОСТЫМ РУССКИМ ЯЗЫКОМ. Без жаргона.
 
-ТЕКУЩИЙ СЕЗОН:
+СЕЙЧАС:
   Сезон: {season_info['season']}
-  Множитель трафика: {season_info['traffic_multiplier']}
+  Активность: {season_info['traffic_multiplier']} (1.0 = пик сезона)
   Праздник: {season_info['holiday_name'] or 'Нет'}
   Примечание: {season_info['note']}
 
