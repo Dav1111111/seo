@@ -73,8 +73,6 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: /api/v1
       NEXT_PUBLIC_SITE_ID: "1e11339f-c87e-4742-9d38-6f79463b0d16"
-      NODE_ENV: production
-      PORT: "3000"
       HOSTNAME: "0.0.0.0"
     depends_on:
       - backend
