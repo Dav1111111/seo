@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { SiteSwitcher } from "@/components/layout/site-switcher";
 import {
   LayoutDashboard,
+  Search,
   AlertTriangle,
   Workflow,
   Settings,
@@ -14,6 +15,7 @@ import {
 
 const nav = [
   { href: "/",         label: "Обзор",    icon: LayoutDashboard },
+  { href: "/queries",  label: "Запросы",  icon: Search },
   { href: "/issues",   label: "Проблемы", icon: AlertTriangle },
   { href: "/pipeline", label: "Pipeline", icon: Workflow },
   { href: "/settings", label: "Настройки",icon: Settings },

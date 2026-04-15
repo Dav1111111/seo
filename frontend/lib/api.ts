@@ -58,6 +58,16 @@ export const api = {
   triggerCollect: (siteId = SITE_ID) =>
     apiFetch<any>(`/sites/${siteId}/collect/webmaster`, { method: "POST" }),
 
+  // Queries
+  queries: (siteId = SITE_ID, params: Record<string, string | number> = {}) => {
+    const qs = new URLSearchParams(params as any).toString();
+    return apiFetch<any>(`/sites/${siteId}/queries${qs ? `?${qs}` : ""}`);
+  },
+  queryHistory: (siteId = SITE_ID, queryId: string, days = 30) =>
+    apiFetch<any>(`/sites/${siteId}/queries/${queryId}/history?days=${days}`),
+  queryClusters: (siteId = SITE_ID, days = 7) =>
+    apiFetch<any>(`/sites/${siteId}/queries/clusters?days=${days}`),
+
   // Chat
   chat: (siteId = SITE_ID, message: string, history: any[] = [], issueId?: string) =>
     apiFetch<{ reply: string; cost_usd: number }>(`/sites/${siteId}/chat`, {
