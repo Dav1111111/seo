@@ -16,7 +16,7 @@ class SiteCreate(BaseModel):
     def validate_domain(cls, v: str) -> str:
         v = v.strip().lower()
         v = v.removeprefix("https://").removeprefix("http://").rstrip("/")
-        if not re.match(r"^[a-z0-9\-\.а-яё]+\.[a-zа-яё]{2,}$", v) and not re.match(r"^xn--[a-z0-9\-\.]+\.[a-z]{2,}$", v):
+        if not re.match(r"^[a-z0-9\-\.а-яё]+\.[a-z0-9а-яё\-]{2,}$", v):
             raise ValueError("Некорректный домен")
         return v
 
