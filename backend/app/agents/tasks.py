@@ -16,10 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 def _run(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
+    """Run async coroutine from sync Celery task with proper cleanup."""
+    return asyncio.run(coro)
         loop.close()
 
 
@@ -92,14 +90,17 @@ def run_agent_for_site(agent_name: str, site_id: str, trigger: str = "manual"):
     return _run(_run_agent_for_site(agent_name, UUID(site_id), trigger))
 
 
+async def _pipeline_for_site(site_id: str, trigger: str) -> dict:
+    from app.services.issue_pipeline import IssuePipeline
+    pipeline = IssuePipeline()
+    async with async_session() as db:
+        return await pipeline.run(db, UUID(site_id), trigger=trigger)
+
+
 @celery_app.task(name="run_full_pipeline", bind=True, max_retries=0)
 def run_full_pipeline(self, site_id: str, trigger: str = "scheduled"):
     """Run full issue pipeline: detect → validate → store."""
-    async def _pipeline():
-        from app.services.issue_pipeline import IssuePipeline
-        pipeline = IssuePipeline()
-        async with async_session() as db:
-            return await pipeline.run(db, UUID(site_id), trigger=trigger)
+    return _run(_pipeline_for_site(site_id, trigger))
 
     return _run(_pipeline())
 
@@ -111,7 +112,7 @@ def run_daily_pipeline_all(self):
     results = {}
     for sid in site_ids:
         try:
-            result = run_full_pipeline(str(sid), "scheduled")
+            result = _run(_pipeline_for_site(str(sid), "scheduled"))
             results[str(sid)] = result
         except Exception as exc:
             logger.error("Pipeline failed for %s: %s", sid, exc)

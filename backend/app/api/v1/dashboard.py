@@ -285,7 +285,7 @@ async def update_issue(
         if body.get("resolution_note"):
             issue.resolution_note = body["resolution_note"]
 
-    await db.commit()
+    await db.flush()  # get_db() dependency handles commit
     return {"id": str(issue.id), "status": issue.status}
 
 

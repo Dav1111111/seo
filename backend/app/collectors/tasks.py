@@ -19,12 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 def _run_async(coro):
-    """Run async coroutine from sync Celery task."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    """Run async coroutine from sync Celery task with proper cleanup."""
+    return asyncio.run(coro)
 
 
 async def _collect_webmaster_for_site(site: dict) -> dict:

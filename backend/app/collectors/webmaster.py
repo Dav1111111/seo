@@ -157,7 +157,10 @@ class WebmasterCollector(BaseCollector):
                     SearchQuery.query_text == query_text,
                 )
             )
-            sq_id = sq_row.scalar_one()
+            sq_id = sq_row.scalar_one_or_none()
+            if not sq_id:
+                logger.warning("SearchQuery not found after upsert: %s", query_text)
+                continue
 
             # Extract indicator values — API returns either:
             # - Aggregated numbers: {"TOTAL_SHOWS": 5.0, "TOTAL_CLICKS": 1.0}
