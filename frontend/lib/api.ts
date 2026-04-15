@@ -57,4 +57,11 @@ export const api = {
     apiFetch<any>(`/sites/${siteId}/analyse/${agent}`, { method: "POST" }),
   triggerCollect: (siteId = SITE_ID) =>
     apiFetch<any>(`/sites/${siteId}/collect/webmaster`, { method: "POST" }),
+
+  // Chat
+  chat: (siteId = SITE_ID, message: string, history: any[] = [], issueId?: string) =>
+    apiFetch<{ reply: string; cost_usd: number }>(`/sites/${siteId}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ message, history, issue_id: issueId }),
+    }),
 };
