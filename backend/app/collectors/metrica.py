@@ -89,12 +89,26 @@ class MetricaCollector(BaseCollector):
         # 1. Site-level daily traffic
         logger.info("Fetching Metrica traffic %s → %s", start_date, end_date)
         try:
-            traffic_data = await self.fetch_site_traffic(start_date, end_date)
-            # bytime returns one row with time_intervals array
-            for row in traffic_data:
-                time_intervals = row.get("dimensions", [])
-                metrics_list = row.get("metrics", [])
-                # metrics_list is [[visits_per_day], [pageviews_per_day], ...]
+            raw_data = await self.get(
+                "/stat/v1/data/bytime",
+                params={
+                    "id": self.counter_id,
+                    "metrics": "ym:s:visits,ym:s:pageviews,ym:s:bounceRate,ym:s:avgVisitDurationSeconds",
+                    "date1": start_date.isoformat(),
+                    "date2": end_date.isoformat(),
+                    "group": "day",
+                },
+            )
+
+            # bytime response structure:
+            #   time_intervals: [["2026-04-12","2026-04-12"], ...]  ← top-level
+            #   data: [{ dimensions: [], metrics: [[visits...], [pv...], [bounce...], [dur...]] }]
+            time_intervals = raw_data.get("time_intervals", [])
+            data_rows = raw_data.get("data", [])
+
+            if data_rows and time_intervals:
+                metrics_list = data_rows[0].get("metrics", [])
+                # metrics_list: [[visits_day1, visits_day2, ...], [pv_day1, pv_day2, ...], ...]
                 if len(metrics_list) >= 4:
                     visits_arr = metrics_list[0]
                     pv_arr = metrics_list[1]
@@ -102,34 +116,34 @@ class MetricaCollector(BaseCollector):
                     dur_arr = metrics_list[3]
 
                     for i, interval in enumerate(time_intervals):
-                        # interval is like [{"from": "2026-04-10", "to": "2026-04-11"}]
-                        if isinstance(interval, list) and interval:
-                            date_str = interval[0].get("from", "")
-                        elif isinstance(interval, dict):
-                            date_str = interval.get("from", "")
+                        # interval is ["2026-04-12", "2026-04-12"]
+                        if isinstance(interval, list) and len(interval) >= 1:
+                            date_str = interval[0]
                         else:
                             continue
 
-                        if not date_str:
-                            continue
-
                         metric_date = date.fromisoformat(date_str[:10])
+                        visits = int(visits_arr[i]) if i < len(visits_arr) else 0
+                        pvs = int(pv_arr[i]) if i < len(pv_arr) else 0
+                        bounce = round(bounce_arr[i] / 100, 4) if i < len(bounce_arr) and bounce_arr[i] else None
+                        dur = round(dur_arr[i], 2) if i < len(dur_arr) and dur_arr[i] else None
+
                         stmt = pg_insert(DailyMetric).values(
                             site_id=site_id,
                             date=metric_date,
                             metric_type="site_traffic",
                             dimension_id=None,
-                            visits=int(visits_arr[i]) if i < len(visits_arr) else 0,
-                            pageviews=int(pv_arr[i]) if i < len(pv_arr) else 0,
-                            bounce_rate=round(bounce_arr[i] / 100, 4) if i < len(bounce_arr) else None,
-                            avg_duration=round(dur_arr[i], 2) if i < len(dur_arr) else None,
+                            visits=visits,
+                            pageviews=pvs,
+                            bounce_rate=bounce,
+                            avg_duration=dur,
                         ).on_conflict_do_update(
                             index_elements=["site_id", "date", "metric_type", "dimension_id"],
                             set_={
-                                "visits": int(visits_arr[i]) if i < len(visits_arr) else 0,
-                                "pageviews": int(pv_arr[i]) if i < len(pv_arr) else 0,
-                                "bounce_rate": round(bounce_arr[i] / 100, 4) if i < len(bounce_arr) else None,
-                                "avg_duration": round(dur_arr[i], 2) if i < len(dur_arr) else None,
+                                "visits": visits,
+                                "pageviews": pvs,
+                                "bounce_rate": bounce,
+                                "avg_duration": dur,
                             },
                         )
                         await db.execute(stmt)

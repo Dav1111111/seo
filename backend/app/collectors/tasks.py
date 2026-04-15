@@ -147,3 +147,31 @@ def collect_site_webmaster(site_id: str):
                 await collector.close()
 
     return _run_async(_run())
+
+
+@celery_app.task(name="collect_site_metrica")
+def collect_site_metrica(site_id: str):
+    """Collect Metrica data for a specific site (for manual trigger)."""
+    from app.config import settings
+
+    async def _run():
+        async with async_session() as db:
+            result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
+            site = result.scalar_one_or_none()
+            if not site:
+                return {"error": "Site not found"}
+
+            counter_id = site.yandex_metrica_counter_id or settings.YANDEX_METRICA_COUNTER_ID
+            if not counter_id:
+                return {"status": "skipped", "reason": "no counter_id"}
+
+            collector = MetricaCollector(
+                oauth_token=site.yandex_oauth_token or settings.YANDEX_OAUTH_TOKEN,
+                counter_id=counter_id,
+            )
+            try:
+                return await collector.collect_and_store(db, site.id, days_back=7)
+            finally:
+                await collector.close()
+
+    return _run_async(_run())

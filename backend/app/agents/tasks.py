@@ -106,8 +106,6 @@ def run_full_pipeline(self, site_id: str, trigger: str = "scheduled"):
     """Run full issue pipeline: detect → validate → store."""
     return _run(_pipeline_for_site(site_id, trigger))
 
-    return _run(_pipeline())
-
 
 @celery_app.task(name="run_daily_pipeline_all", bind=True, max_retries=1)
 def run_daily_pipeline_all(self):

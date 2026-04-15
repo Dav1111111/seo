@@ -20,6 +20,11 @@ class CollectorError(Exception):
     pass
 
 
+class HostNotLoadedError(CollectorError):
+    """Yandex Webmaster returns this when a host is verified but data isn't loaded yet."""
+    pass
+
+
 class RateLimitError(CollectorError):
     pass
 
@@ -58,10 +63,13 @@ class BaseCollector:
         self,
         method: str,
         path: str,
-        params: dict[str, Any] | None = None,
+        params: Any = None,
         json: dict[str, Any] | None = None,
     ) -> dict:
-        """HTTP request with semaphore rate limiting + exponential backoff retry."""
+        """HTTP request with semaphore rate limiting + exponential backoff retry.
+
+        params can be dict or list[tuple] (for repeated keys like query_indicator).
+        """
         client = await self._get_client()
         last_error: Exception | None = None
 
@@ -82,8 +90,22 @@ class BaseCollector:
                         await asyncio.sleep(wait)
                         continue
 
+                    # Detect Yandex Webmaster HOST_NOT_LOADED (404 with specific error_code)
+                    if resp.status_code == 404:
+                        try:
+                            body = resp.json()
+                            if body.get("error_code") == "HOST_NOT_LOADED":
+                                raise HostNotLoadedError(
+                                    f"Host not loaded in Yandex Webmaster: {body.get('error_message', '')}"
+                                )
+                        except (ValueError, KeyError):
+                            pass
+
                     resp.raise_for_status()
                     return resp.json()
+
+                except HostNotLoadedError:
+                    raise  # don't retry, propagate immediately
 
                 except httpx.TimeoutException as exc:
                     last_error = exc
@@ -100,7 +122,7 @@ class BaseCollector:
 
         raise CollectorError(f"Failed after {self.max_retries} retries: {last_error}")
 
-    async def get(self, path: str, params: dict[str, Any] | None = None) -> dict:
+    async def get(self, path: str, params: Any = None) -> dict:
         return await self._request("GET", path, params=params)
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> dict:

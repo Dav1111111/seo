@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.collectors.base import BaseCollector
+from app.collectors.base import BaseCollector, HostNotLoadedError
 from app.models.search_query import SearchQuery
 from app.models.daily_metric import DailyMetric
 from app.models.page import Page
@@ -63,13 +63,16 @@ class WebmasterCollector(BaseCollector):
         date_to: date,
     ) -> dict:
         """Fetch daily history for a specific query."""
+        params = [
+            ("date_from", date_from.isoformat()),
+            ("date_to", date_to.isoformat()),
+            ("query_indicator", "TOTAL_SHOWS"),
+            ("query_indicator", "TOTAL_CLICKS"),
+            ("query_indicator", "AVG_SHOW_POSITION"),
+        ]
         return await self.get(
             f"{self._host_prefix}/search-queries/{query_id}/history",
-            params={
-                "date_from": date_from.isoformat(),
-                "date_to": date_to.isoformat(),
-                "query_indicator": "TOTAL_SHOWS,TOTAL_CLICKS,AVG_SHOW_POSITION",
-            },
+            params=params,
         )
 
     # ── Indexing ───────────────────────────────────────────────────────
@@ -79,14 +82,19 @@ class WebmasterCollector(BaseCollector):
         date_from: date,
         date_to: date,
     ) -> dict:
-        """Fetch indexing status history (2xx, 3xx, 4xx, 5xx counts)."""
-        return await self.get(
+        """Fetch indexing status history (2xx, 3xx, 4xx, 5xx counts).
+
+        API returns: {"indicators": {"HTTP_2XX": [{"date": "..T..", "value": N}], ...}}
+        We unwrap "indicators" so callers get {"HTTP_2XX": [...], ...} directly.
+        """
+        data = await self.get(
             f"{self._host_prefix}/indexing/history",
             params={
                 "date_from": date_from.isoformat(),
                 "date_to": date_to.isoformat(),
             },
         )
+        return data.get("indicators", data)
 
     # ── Search Events ──────────────────────────────────────────────────
 
@@ -95,14 +103,19 @@ class WebmasterCollector(BaseCollector):
         date_from: date,
         date_to: date,
     ) -> dict:
-        """Fetch appeared/removed from search events."""
-        return await self.get(
+        """Fetch appeared/removed from search events.
+
+        API returns: {"indicators": {"APPEARED_IN_SEARCH": [...], "REMOVED_FROM_SEARCH": [...]}}
+        We unwrap "indicators" so callers get the inner dict directly.
+        """
+        data = await self.get(
             f"{self._host_prefix}/search-urls/events/history",
             params={
                 "date_from": date_from.isoformat(),
                 "date_to": date_to.isoformat(),
             },
         )
+        return data.get("indicators", data)
 
     # ── Sitemaps ───────────────────────────────────────────────────────
 
@@ -129,7 +142,15 @@ class WebmasterCollector(BaseCollector):
 
         # 1. Popular queries
         logger.info("Fetching popular queries %s → %s", start_date, end_date)
-        queries = await self.fetch_popular_queries(start_date, end_date)
+        try:
+            queries = await self.fetch_popular_queries(start_date, end_date)
+        except HostNotLoadedError:
+            logger.warning(
+                "Host %s not loaded in Yandex Webmaster — skipping collection. "
+                "Open Webmaster UI and load this host first.",
+                self.host_id,
+            )
+            return {"status": "host_not_loaded", "host_id": self.host_id}
         stats["queries"] = len(queries)
 
         for q in queries:
@@ -171,10 +192,10 @@ class WebmasterCollector(BaseCollector):
             pos_raw = indicators.get("AVG_SHOW_POSITION", 0)
 
             if isinstance(shows_raw, list):
-                # Daily breakdown
-                shows_map = {d["date"]: d["value"] for d in shows_raw}
-                clicks_map = {d["date"]: d["value"] for d in (clicks_raw if isinstance(clicks_raw, list) else [])}
-                pos_map = {d["date"]: d["value"] for d in (pos_raw if isinstance(pos_raw, list) else [])}
+                # Daily breakdown — dates may be full ISO timestamps, extract date part
+                shows_map = {d["date"][:10]: d["value"] for d in shows_raw}
+                clicks_map = {d["date"][:10]: d["value"] for d in (clicks_raw if isinstance(clicks_raw, list) else [])}
+                pos_map = {d["date"][:10]: d["value"] for d in (pos_raw if isinstance(pos_raw, list) else [])}
 
                 for date_str in shows_map:
                     impressions = int(shows_map.get(date_str, 0))
@@ -182,7 +203,7 @@ class WebmasterCollector(BaseCollector):
                     position = pos_map.get(date_str)
                     ctr = (clicks / impressions) if impressions > 0 else 0
 
-                    metric_date = date.fromisoformat(date_str)
+                    metric_date = date.fromisoformat(date_str[:10])
                     stmt = pg_insert(DailyMetric).values(
                         site_id=site_id,
                         date=metric_date,
@@ -239,18 +260,18 @@ class WebmasterCollector(BaseCollector):
             http_4xx = indexing.get("HTTP_4XX", [])
             http_5xx = indexing.get("HTTP_5XX", [])
 
-            # Build per-date index data
+            # Build per-date index data (API dates are full ISO timestamps, extract date part)
             dates_seen: set[str] = set()
             for series in [http_2xx, http_4xx, http_5xx]:
                 for point in series:
-                    dates_seen.add(point["date"])
+                    dates_seen.add(point["date"][:10])
 
-            idx_2xx = {d["date"]: d["value"] for d in http_2xx}
-            idx_4xx = {d["date"]: d["value"] for d in http_4xx}
-            idx_5xx = {d["date"]: d["value"] for d in http_5xx}
+            idx_2xx = {d["date"][:10]: d["value"] for d in http_2xx}
+            idx_4xx = {d["date"][:10]: d["value"] for d in http_4xx}
+            idx_5xx = {d["date"][:10]: d["value"] for d in http_5xx}
 
             for date_str in dates_seen:
-                metric_date = date.fromisoformat(date_str)
+                metric_date = date.fromisoformat(date_str[:10])
                 pages_ok = idx_2xx.get(date_str, 0)
                 pages_4xx = idx_4xx.get(date_str, 0)
                 pages_5xx = idx_5xx.get(date_str, 0)
@@ -281,10 +302,15 @@ class WebmasterCollector(BaseCollector):
             appeared = events.get("APPEARED_IN_SEARCH", [])
             removed = events.get("REMOVED_FROM_SEARCH", [])
 
-            for date_str in set(d["date"] for d in appeared + removed):
+            # API dates are full ISO timestamps — extract date part and deduplicate
+            app_by_date = {d["date"][:10]: d["value"] for d in appeared}
+            rem_by_date = {d["date"][:10]: d["value"] for d in removed}
+            all_dates = set(app_by_date) | set(rem_by_date)
+
+            for date_str in all_dates:
                 metric_date = date.fromisoformat(date_str)
-                app_count = next((d["value"] for d in appeared if d["date"] == date_str), 0)
-                rem_count = next((d["value"] for d in removed if d["date"] == date_str), 0)
+                app_count = app_by_date.get(date_str, 0)
+                rem_count = rem_by_date.get(date_str, 0)
 
                 stmt = pg_insert(DailyMetric).values(
                     site_id=site_id,
