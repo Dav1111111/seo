@@ -16,8 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 def _run(coro):
-    """Run async coroutine from sync Celery task with proper cleanup."""
-    return asyncio.run(coro)
+    """Run async coroutine from sync Celery task."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 async def _run_agent_for_site(agent_name: str, site_id: UUID, trigger: str) -> dict:
