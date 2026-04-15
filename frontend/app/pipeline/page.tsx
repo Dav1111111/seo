@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { api, SITE_ID } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useCurrentSiteId } from "@/lib/site-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,9 +22,10 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "
 };
 
 export default function PipelinePage() {
+  const siteId = useCurrentSiteId();
   const { data, isLoading, mutate } = useSWR(
-    `runs-${SITE_ID}`,
-    () => api.agentRuns(SITE_ID, 30),
+    `runs-${siteId}`,
+    () => api.agentRuns(siteId, 30),
     { refreshInterval: 15_000 }
   );
 
@@ -59,7 +61,7 @@ export default function PipelinePage() {
         <Button
           size="sm"
           disabled={triggering !== null}
-          onClick={() => trigger("pipeline", () => api.triggerPipeline(SITE_ID))}
+          onClick={() => trigger("pipeline", () => api.triggerPipeline(siteId))}
         >
           <Play className="mr-2 h-4 w-4" />
           {triggering === "pipeline" ? "Запускаю..." : "Полный пайплайн"}
@@ -67,7 +69,7 @@ export default function PipelinePage() {
         <Button
           size="sm" variant="outline"
           disabled={triggering !== null}
-          onClick={() => trigger("collect", () => api.triggerCollect(SITE_ID))}
+          onClick={() => trigger("collect", () => api.triggerCollect(siteId))}
         >
           <RefreshCw className="mr-2 h-4 w-4" />
           Собрать данные
@@ -75,14 +77,14 @@ export default function PipelinePage() {
         <Button
           size="sm" variant="outline"
           disabled={triggering !== null}
-          onClick={() => trigger("visibility", () => api.triggerAgent(SITE_ID, "search_visibility"))}
+          onClick={() => trigger("visibility", () => api.triggerAgent(siteId, "search_visibility"))}
         >
           Search Visibility
         </Button>
         <Button
           size="sm" variant="outline"
           disabled={triggering !== null}
-          onClick={() => trigger("indexing", () => api.triggerAgent(SITE_ID, "technical_indexing"))}
+          onClick={() => trigger("indexing", () => api.triggerAgent(siteId, "technical_indexing"))}
         >
           Technical Indexing
         </Button>

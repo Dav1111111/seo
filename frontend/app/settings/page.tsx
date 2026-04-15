@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from "react";
 import useSWR from "swr";
-import { api, SITE_ID } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useCurrentSiteId } from "@/lib/site-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -37,11 +38,12 @@ const MODES = [
 ];
 
 export default function SettingsPage() {
+  const siteId = useCurrentSiteId();
   const { data: site, isLoading, mutate } = useSWR(
     `sites`,
     async () => {
       const sites = await api.sites();
-      return sites.find((s: any) => s.id === SITE_ID) || sites[0];
+      return sites.find((s: any) => s.id === siteId) || sites[0];
     }
   );
 
@@ -59,7 +61,7 @@ export default function SettingsPage() {
     if (!mode) return;
     setSaving(true);
     try {
-      await api.updateSite(SITE_ID, { operating_mode: mode });
+      await api.updateSite(siteId, { operating_mode: mode });
       mutate();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);

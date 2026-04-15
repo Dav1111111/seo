@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { api, SITE_ID } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useCurrentSiteId } from "@/lib/site-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 export default function IssuesPage() {
+  const siteId = useCurrentSiteId();
   const [status, setStatus] = useState<string>("all");
   const [severity, setSeverity] = useState<string>("all");
 
@@ -43,8 +45,8 @@ export default function IssuesPage() {
   if (severity !== "all") params.severity = severity;
 
   const { data, isLoading, mutate } = useSWR(
-    `issues-${SITE_ID}-${status}-${severity}`,
-    () => api.issues(SITE_ID, params),
+    `issues-${siteId}-${status}-${severity}`,
+    () => api.issues(siteId, params),
     { refreshInterval: 30_000 }
   );
 
@@ -53,7 +55,7 @@ export default function IssuesPage() {
   async function changeStatus(issueId: string, newStatus: string) {
     setUpdating(issueId);
     try {
-      await api.updateIssue(SITE_ID, issueId, { status: newStatus });
+      await api.updateIssue(siteId, issueId, { status: newStatus });
       mutate();
     } finally {
       setUpdating(null);

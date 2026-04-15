@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { api, SITE_ID } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useCurrentSiteId } from "@/lib/site-context";
 import { Button } from "@/components/ui/button";
 import { MessageCircle, X, Send, Loader2 } from "lucide-react";
 
@@ -11,6 +12,7 @@ interface Message {
 }
 
 export function ChatPanel() {
+  const siteId = useCurrentSiteId();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -32,7 +34,7 @@ export function ChatPanel() {
 
     try {
       const history = messages.map((m) => ({ role: m.role, content: m.content }));
-      const res = await api.chat(SITE_ID, text, history);
+      const res = await api.chat(siteId, text, history);
       setMessages((prev) => [...prev, { role: "assistant", content: res.reply }]);
     } catch (err) {
       setMessages((prev) => [

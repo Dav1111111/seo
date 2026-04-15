@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { SiteSwitcher } from "@/components/layout/site-switcher";
 import {
   LayoutDashboard,
   AlertTriangle,
@@ -43,8 +44,8 @@ export function Sidebar() {
           </Link>
         ))}
       </nav>
-      <div className="p-3 border-t">
-        <p className="text-xs text-muted-foreground">grandtourspirit.ru</p>
+      <div className="border-t">
+        <SiteSwitcher />
       </div>
     </aside>
   );

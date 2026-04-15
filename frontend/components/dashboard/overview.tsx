@@ -1,7 +1,8 @@
 "use client";
 
 import useSWR from "swr";
-import { api, SITE_ID } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useSite } from "@/lib/site-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -56,9 +57,12 @@ function SeasonBadge({ season, note }: { season: string; note: string }) {
 }
 
 export function OverviewPage() {
+  const { currentSite } = useSite();
+  const siteId = currentSite?.id || "";
+
   const { data: dash, isLoading } = useSWR(
-    `dashboard-${SITE_ID}`,
-    () => api.dashboard(SITE_ID),
+    siteId ? `dashboard-${siteId}` : null,
+    () => api.dashboard(siteId),
     { refreshInterval: 60_000 }
   );
 
@@ -84,7 +88,7 @@ export function OverviewPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Обзор</h1>
-          <p className="text-sm text-muted-foreground">grandtourspirit.ru</p>
+          <p className="text-sm text-muted-foreground">{currentSite?.domain ?? "—"}</p>
         </div>
         {season && <SeasonBadge season={season.season} note={season.note} />}
       </div>
@@ -135,7 +139,7 @@ export function OverviewPage() {
       </div>
 
       {/* Traffic chart */}
-      <TrafficChart siteId={SITE_ID} />
+      <TrafficChart siteId={siteId} />
 
       {/* Last run */}
       {dash?.last_run?.agent && (
