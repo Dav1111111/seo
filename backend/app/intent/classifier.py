@@ -1,157 +1,52 @@
-"""Query intent classifier — regex-first with confidence score.
+"""Back-compat shim — forwards to the profile-driven core classifier.
 
-Algorithm:
-  1. For each query, run all regex rules across all intents.
-  2. Pick the intent with the highest weight match.
-  3. Also detect brand (separate axis — TRANS_BRAND can coexist but overrides when clear).
-  4. Emit (intent, confidence, matched_pattern, brand_detected).
-  5. If max confidence < 0.5 → mark "ambiguous" for LLM fallback in Phase 2B.
-
-No LLM calls here — deterministic, fast, cacheable.
+Kept for callers that haven't migrated. Defaults to the tourism/tour_operator
+profile. New code should call `app.core_audit.classifier` directly with the
+profile resolved from `registry.get_profile(site.vertical, site.business_model)`.
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from app.core_audit.classifier import (
+    AMBIGUOUS_THRESHOLD,
+    BRAND_SHORT_QUERY_MAX_TOKENS,
+    ClassificationResult,
+    classify_batch as _classify_batch_core,
+    classify_query as _classify_core,
+    detect_brand as _detect_brand_core,
+)
+from app.profiles.tourism import TOURISM_TOUR_OPERATOR
 
-from app.intent.enums import IntentCode
-from app.intent.taxonomy import INTENT_DEFINITIONS, TAXONOMY
-
-
-@dataclass(frozen=True)
-class ClassificationResult:
-    intent: IntentCode
-    confidence: float            # 0.0-1.0
-    matched_pattern: str | None  # regex that matched (for explainability)
-    is_brand: bool               # brand token detected independently
-    is_ambiguous: bool           # confidence < threshold — candidate for LLM
-
-
-AMBIGUOUS_THRESHOLD = 0.5
-
-# Brand detection — add company names to this list per site
-# In production this comes from Site.display_name and variations.
+# Legacy export — some tests read BRAND_TOKENS directly.
 BRAND_TOKENS: dict[str, set[str]] = {
-    "южный континент": {"южный континент", "южный-континент", "ЮК", "ук"},
-    "grand tour spirit": {"grand tour spirit", "grand tour", "гранд тур", "гранд тур спирит", "гтс", "gts"},
+    "_flattened": set(TOURISM_TOUR_OPERATOR.brand_tokens),
 }
 
 
 def detect_brand(query: str, known_brands: list[str] | None = None) -> bool:
-    """Detect if query contains a brand token.
-
-    Short tokens (<=3 chars) are matched with word boundaries to avoid
-    matching substrings like "ук" inside "рука" or "наука". Longer tokens
-    also use word boundaries for safety. Per-site ``known_brands`` are used
-    IN ADDITION to the global BRAND_TOKENS.
-
-    Args:
-        query: normalized query text (lowercase expected)
-        known_brands: site-specific brand tokens, combined with global.
-    """
-    q = query.lower().strip()
-    tokens_to_check: set[str] = set()
-    # Global brand tokens — always included
-    for tokens in BRAND_TOKENS.values():
-        for t in tokens:
-            tokens_to_check.add(t.lower())
-    # Per-site brand tokens — added on top of global
-    if known_brands:
-        for b in known_brands:
-            tokens_to_check.add(b.lower())
-
-    for token in tokens_to_check:
-        if not token:
-            continue
-        # Word-boundary match for all tokens (critical for short ones like "ук")
-        pattern = r"(?<!\w)" + re.escape(token) + r"(?!\w)"
-        if re.search(pattern, q, flags=re.IGNORECASE | re.UNICODE):
-            return True
-    return False
+    return _detect_brand_core(query, TOURISM_TOUR_OPERATOR, known_brands)
 
 
-def classify_query(query: str, known_brands: list[str] | None = None) -> ClassificationResult:
-    """Classify a single query into one of the intent categories.
-
-    Order of precedence:
-      1. Brand detected AND query is just brand+minor → TRANS_BRAND
-      2. Highest weight regex match
-      3. Fallback to COMM_CATEGORY if nothing matches but query mentions geo+service
-      4. Otherwise INFO_DEST as weakest fallback with low confidence
-    """
-    if not query or not query.strip():
-        return ClassificationResult(
-            intent=IntentCode.INFO_DEST,
-            confidence=0.0,
-            matched_pattern=None,
-            is_brand=False,
-            is_ambiguous=True,
-        )
-
-    q = query.strip().lower()
-    is_brand = detect_brand(q, known_brands)
-
-    # Brand override: if query is mostly brand (brand + 1-2 extra words)
-    # short queries with a brand token → TRANS_BRAND
-    if is_brand and len(q.split()) <= 4:
-        return ClassificationResult(
-            intent=IntentCode.TRANS_BRAND,
-            confidence=0.9,
-            matched_pattern="brand_token",
-            is_brand=True,
-            is_ambiguous=False,
-        )
-
-    # Run all regex rules, collect best match
-    best_weight = 0.0
-    best_intent: IntentCode | None = None
-    best_pattern: str | None = None
-
-    for definition in INTENT_DEFINITIONS:
-        for rule in definition.rules:
-            m = rule.pattern.search(q)
-            if m and rule.weight > best_weight:
-                best_weight = rule.weight
-                best_intent = definition.code
-                best_pattern = rule.pattern.pattern
-
-    if best_intent is not None:
-        return ClassificationResult(
-            intent=best_intent,
-            confidence=best_weight,
-            matched_pattern=best_pattern,
-            is_brand=is_brand,
-            is_ambiguous=best_weight < AMBIGUOUS_THRESHOLD,
-        )
-
-    # Fallback heuristic: "экскурс|тур" + geo → COMM_CATEGORY
-    service_geo = re.search(
-        r"(экскурс|тур|джиппинг).*(сочи|абхази|красная\s+поляна|адлер)",
-        q,
-        re.IGNORECASE,
-    )
-    if service_geo:
-        return ClassificationResult(
-            intent=IntentCode.COMM_CATEGORY,
-            confidence=0.45,
-            matched_pattern="fallback_service_geo",
-            is_brand=is_brand,
-            is_ambiguous=True,
-        )
-
-    # Unknown — mark as info/ambiguous for LLM follow-up
-    return ClassificationResult(
-        intent=IntentCode.INFO_DEST,
-        confidence=0.15,
-        matched_pattern=None,
-        is_brand=is_brand,
-        is_ambiguous=True,
-    )
+def classify_query(
+    query: str,
+    known_brands: list[str] | None = None,
+) -> ClassificationResult:
+    return _classify_core(query, TOURISM_TOUR_OPERATOR, known_brands)
 
 
 def classify_batch(
-    queries: list[str], known_brands: list[str] | None = None
+    queries: list[str],
+    known_brands: list[str] | None = None,
 ) -> list[ClassificationResult]:
-    """Batch classification — convenience wrapper."""
-    return [classify_query(q, known_brands) for q in queries]
+    return _classify_batch_core(queries, TOURISM_TOUR_OPERATOR, known_brands)
+
+
+__all__ = [
+    "AMBIGUOUS_THRESHOLD",
+    "BRAND_SHORT_QUERY_MAX_TOKENS",
+    "BRAND_TOKENS",
+    "ClassificationResult",
+    "classify_batch",
+    "classify_query",
+    "detect_brand",
+]

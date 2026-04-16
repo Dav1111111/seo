@@ -1,0 +1,649 @@
+{
+  "pages": [
+    {
+      "name": "tour_detail_rica",
+      "scores": {
+        "comm_category": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.9,
+          "s5": 1.0,
+          "s6": 0.3,
+          "score": 1.4
+        },
+        "comm_compare": {
+          "s1": 0.0,
+          "s2": 0.6,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.5,
+          "s6": 0.3,
+          "score": 1.52
+        },
+        "comm_modified": {
+          "s1": 0.0,
+          "s2": 1.0,
+          "s3": 1.0,
+          "s4": 1.0,
+          "s5": 1.0,
+          "s6": 0.3,
+          "score": 3.48
+        },
+        "info_dest": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.5,
+          "s6": 0.3,
+          "score": 0.7
+        },
+        "info_logistics": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.5,
+          "s6": 0.3,
+          "score": 0.7
+        },
+        "info_prep": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.5,
+          "s6": 0.3,
+          "score": 0.7
+        },
+        "local_geo": {
+          "s1": 0.0,
+          "s2": 1.0,
+          "s3": 0.0,
+          "s4": 1.0,
+          "s5": 0.5,
+          "s6": 0.3,
+          "score": 2.48
+        },
+        "trans_book": {
+          "s1": 0.75,
+          "s2": 1.0,
+          "s3": 0.0,
+          "s4": 1.0,
+          "s5": 1.0,
+          "s6": 0.3,
+          "score": 3.0
+        },
+        "trans_brand": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.5,
+          "s6": 0.3,
+          "score": 0.78
+        },
+        "trust_legal": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.5,
+          "s6": 0.3,
+          "score": 0.78
+        }
+      }
+    },
+    {
+      "name": "category_tours",
+      "scores": {
+        "comm_category": {
+          "s1": 0.85,
+          "s2": 0.0,
+          "s3": 0.8,
+          "s4": 0.9,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 2.12
+        },
+        "comm_compare": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.3
+        },
+        "comm_modified": {
+          "s1": 0.0,
+          "s2": 1.0,
+          "s3": 0.0,
+          "s4": 1.0,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 2.0
+        },
+        "info_dest": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "info_logistics": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "info_prep": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "local_geo": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 1.0,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.75
+        },
+        "trans_book": {
+          "s1": 0.0,
+          "s2": 1.0,
+          "s3": 0.0,
+          "s4": 1.0,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 2.0
+        },
+        "trans_brand": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.3
+        },
+        "trust_legal": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.3
+        }
+      }
+    },
+    {
+      "name": "info_guide_abkhazia",
+      "scores": {
+        "comm_category": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.5,
+          "s5": 1.0,
+          "s6": 1.0,
+          "score": 1.62
+        },
+        "comm_compare": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.5,
+          "s6": 1.0,
+          "score": 1.3
+        },
+        "comm_modified": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 1.0,
+          "s6": 1.0,
+          "score": 1.48
+        },
+        "info_dest": {
+          "s1": 0.9,
+          "s2": 1.0,
+          "s3": 1.0,
+          "s4": 0.8,
+          "s5": 0.5,
+          "s6": 1.0,
+          "score": 4.5
+        },
+        "info_logistics": {
+          "s1": 0.0,
+          "s2": 1.0,
+          "s3": 0.0,
+          "s4": 0.8,
+          "s5": 0.5,
+          "s6": 1.0,
+          "score": 2.85
+        },
+        "info_prep": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.8,
+          "s5": 0.5,
+          "s6": 1.0,
+          "score": 1.6
+        },
+        "local_geo": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.5,
+          "s6": 1.0,
+          "score": 1.23
+        },
+        "trans_book": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 1.0,
+          "s6": 1.0,
+          "score": 1.48
+        },
+        "trans_brand": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.5,
+          "s6": 1.0,
+          "score": 1.3
+        },
+        "trust_legal": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.5,
+          "s6": 1.0,
+          "score": 1.3
+        }
+      }
+    },
+    {
+      "name": "thin_about",
+      "scores": {
+        "comm_category": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.5,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.38
+        },
+        "comm_compare": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.3
+        },
+        "comm_modified": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "info_dest": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "info_logistics": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "info_prep": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "local_geo": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "trans_book": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.3,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.22
+        },
+        "trans_brand": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.0,
+          "s4": 0.4,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.3
+        },
+        "trust_legal": {
+          "s1": 0.0,
+          "s2": 0.0,
+          "s3": 0.8,
+          "s4": 0.4,
+          "s5": 0.0,
+          "s6": 0.0,
+          "score": 0.9
+        }
+      }
+    }
+  ],
+  "queries": [
+    {
+      "confidence": 0.85,
+      "intent": "comm_modified",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(экскурс|тур)\\w*.{0,40}\\b(с\\s+детьми|недорог\\w*|на\\s+\\d+\\s+(день|дня|дней)|групп\\w*|индивидуальн\\w*|с\\s+трансфером)\\b",
+      "query": "экскурсии в сочи недорого"
+    },
+    {
+      "confidence": 0.85,
+      "intent": "comm_category",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(экскурс|тур|джиппинг|морские\\s+прогулки)\\w*\\s+(в|по|из)?\\s*(сочи|абхази|красная\\s+поляна|адлер)\\w*",
+      "query": "туры абхазия"
+    },
+    {
+      "confidence": 0.95,
+      "intent": "info_logistics",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\bкак\\s+добраться|как\\s+доехать",
+      "query": "как добраться до красной поляны"
+    },
+    {
+      "confidence": 0.9,
+      "intent": "info_prep",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\bчто\\s+(взять|одеть|надеть)",
+      "query": "что взять на экскурсию в горы"
+    },
+    {
+      "confidence": 0.9,
+      "intent": "info_dest",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\bчто\\s+посмотреть",
+      "query": "что посмотреть в сочи"
+    },
+    {
+      "confidence": 0.15,
+      "intent": "info_dest",
+      "is_ambiguous": true,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": null,
+      "query": "отзывы туроператор"
+    },
+    {
+      "confidence": 0.95,
+      "intent": "trans_book",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(забронир|заказать|оформить|купить\\s*тур|купить\\s*экскурс)\\w*",
+      "query": "забронировать тур рица"
+    },
+    {
+      "confidence": 0.9,
+      "intent": "trans_brand",
+      "is_ambiguous": false,
+      "is_brand": true,
+      "known_brands": [
+        "южный континент"
+      ],
+      "matched_pattern": "brand_token",
+      "query": "официальный сайт южный континент"
+    },
+    {
+      "confidence": 0.7,
+      "intent": "comm_compare",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b\\w+\\s+или\\s+\\w+",
+      "query": "рица или гагра"
+    },
+    {
+      "confidence": 0.9,
+      "intent": "local_geo",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(экскурс|тур|джиппинг)\\w*\\s+(из\\s+)?(лоо|адлер|хост|кудепст|лазаревск|дагомыс|мацест|красная\\s+поляна|эсто-садок|сочи\\s+центр)\\w*",
+      "query": "экскурсии из лоо"
+    },
+    {
+      "confidence": 0.15,
+      "intent": "info_dest",
+      "is_ambiguous": true,
+      "is_brand": false,
+      "known_brands": [
+        "южный континент"
+      ],
+      "matched_pattern": null,
+      "query": "рука массаж"
+    },
+    {
+      "confidence": 0.75,
+      "intent": "trans_book",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(цен[аы]|прайс)\\b",
+      "query": "цена канатка газпром лаура"
+    },
+    {
+      "confidence": 0.95,
+      "intent": "trans_book",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(забронир|заказать|оформить|купить\\s*тур|купить\\s*экскурс)\\w*",
+      "query": "купить тур в абхазию"
+    },
+    {
+      "confidence": 0.7,
+      "intent": "comm_modified",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(скидк\\w*|акци[яию]|промокод\\w*)\\b",
+      "query": "скидки на туры"
+    },
+    {
+      "confidence": 0.85,
+      "intent": "comm_category",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(экскурс|тур|джиппинг|морские\\s+прогулки)\\w*\\s+(в|по|из)?\\s*(сочи|абхази|красная\\s+поляна|адлер)\\w*",
+      "query": "джиппинг сочи"
+    },
+    {
+      "confidence": 0.8,
+      "intent": "trans_book",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\bстоимост\\w*|сколько\\s+стоит",
+      "query": "сколько стоит экскурсия на рицу"
+    },
+    {
+      "confidence": 0.15,
+      "intent": "info_dest",
+      "is_ambiguous": true,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": null,
+      "query": "индивидуальные экскурсии в красную поляну"
+    },
+    {
+      "confidence": 0.7,
+      "intent": "info_prep",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\bпогода\\s+в\\s+\\w+",
+      "query": "погода в абхазии"
+    },
+    {
+      "confidence": 0.85,
+      "intent": "comm_category",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\b(экскурс|тур|джиппинг|морские\\s+прогулки)\\w*\\s+(в|по|из)?\\s*(сочи|абхази|красная\\s+поляна|адлер)\\w*",
+      "query": "морские прогулки адлер"
+    },
+    {
+      "confidence": 0.8,
+      "intent": "trust_legal",
+      "is_ambiguous": false,
+      "is_brand": false,
+      "known_brands": null,
+      "matched_pattern": "\\bлицензи\\w*|договор|оферт\\w+|возврат",
+      "query": "лицензия туроператора"
+    }
+  ],
+  "schema_version": 1,
+  "standalone": [
+    {
+      "c1": {
+        "pass": true,
+        "reason": "unique entity present in title/query"
+      },
+      "c2": {
+        "pass": true,
+        "reason": "intent local_geo typically supports 400+ unique words"
+      },
+      "c3": {
+        "pass": true,
+        "reason": "funnel stage differs (mofu → bofu)"
+      },
+      "c4": {
+        "pass": null,
+        "reason": "SERP check skipped (Yandex XML Search API not configured)"
+      },
+      "name": "tour_to_rica_from_loo"
+    },
+    {
+      "c1": {
+        "pass": false,
+        "reason": "only generic modifier, no unique entity"
+      },
+      "c2": {
+        "pass": true,
+        "reason": "intent comm_modified typically supports 400+ unique words"
+      },
+      "c3": {
+        "pass": true,
+        "reason": "different intent, likely distinct task"
+      },
+      "c4": {
+        "pass": null,
+        "reason": "SERP check skipped (Yandex XML Search API not configured)"
+      },
+      "name": "generic_modifier_only"
+    },
+    {
+      "c1": {
+        "pass": true,
+        "reason": "unique entity present in title/query"
+      },
+      "c2": {
+        "pass": true,
+        "reason": "intent info_dest typically supports 400+ unique words"
+      },
+      "c3": {
+        "pass": true,
+        "reason": "no parent to overlap with"
+      },
+      "c4": {
+        "pass": null,
+        "reason": "SERP check skipped (Yandex XML Search API not configured)"
+      },
+      "name": "info_guide"
+    },
+    {
+      "c1": {
+        "pass": true,
+        "reason": "no generic modifier detected (assumed unique)"
+      },
+      "c2": {
+        "pass": false,
+        "reason": "intent trust_legal better fits as section of parent"
+      },
+      "c3": {
+        "pass": true,
+        "reason": "no parent to overlap with"
+      },
+      "c4": {
+        "pass": null,
+        "reason": "SERP check skipped (Yandex XML Search API not configured)"
+      },
+      "name": "trust_page"
+    }
+  ]
+}

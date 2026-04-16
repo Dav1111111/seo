@@ -20,9 +20,11 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.profiles  # noqa: F401 — triggers profile registration
+from app.core_audit.decision_tree import DecisionTree
+from app.core_audit.registry import get_profile
 from app.intent.classifier import classify_query
 from app.intent.coverage import CoverageAnalyzer
-from app.intent.decision_tree import DecisionTree
 from app.intent.enums import IntentCode
 from app.intent.llm_classifier import classify_ambiguous_batch
 from app.intent.models import CoverageDecision, QueryIntent
@@ -48,6 +50,15 @@ class Decisioner:
     ) -> dict:
         t0 = time.monotonic()
         stats = {"site_id": str(site_id)}
+
+        # Resolve per-site audit profile (vertical + business_model). Fallback
+        # to tourism/tour_operator inside get_profile if unknown.
+        site_row = await db.execute(select(Site).where(Site.id == site_id))
+        site = site_row.scalar_one_or_none()
+        vertical = site.vertical if site else "tourism"
+        business_model = site.business_model if site else "tour_operator"
+        profile = get_profile(vertical, business_model)
+        stats["profile"] = {"vertical": vertical, "business_model": business_model}
 
         # 1. Classify queries
         svc = IntentService()
@@ -84,7 +95,7 @@ class Decisioner:
         for report in reports:
             # Phase 1: compute decision
             try:
-                decision = await tree.decide(db, report, site_id)
+                decision = await tree.decide(db, report, site_id, profile)
             except Exception as exc:
                 logger.warning("decide failed for intent %s: %s", report.intent_code.value, exc)
                 try:

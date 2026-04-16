@@ -22,4 +22,7 @@ class Site(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     settings: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
 
+    vertical: Mapped[str] = mapped_column(String(32), nullable=False, default="tourism", server_default="tourism")
+    business_model: Mapped[str] = mapped_column(String(48), nullable=False, default="tour_operator", server_default="tour_operator")
+
     tenant = relationship("Tenant", back_populates="sites")
