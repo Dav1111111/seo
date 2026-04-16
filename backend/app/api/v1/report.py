@@ -45,7 +45,7 @@ async def get_report(report_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -
     return _row_dto(row)
 
 
-@router.get("/reports/{report_id}.md", response_class=Response)
+@router.get("/reports/{report_id}/markdown", response_class=Response)
 async def get_report_markdown(report_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     row = await ReportService().get(db, report_id)
     if row is None:
