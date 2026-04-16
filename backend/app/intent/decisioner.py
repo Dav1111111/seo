@@ -62,7 +62,7 @@ class Decisioner:
 
         # 1. Classify queries
         svc = IntentService()
-        classify_stats = await svc.classify_site_queries(db, site_id)
+        classify_stats = await svc.classify_site_queries(db, site_id, profile)
         stats["query_classification"] = classify_stats
 
         # 2. LLM fallback for ambiguous (if enabled)
@@ -71,7 +71,7 @@ class Decisioner:
             stats["llm_fallback"] = llm_stats
 
         # 3. Score pages
-        score_stats = await svc.score_site_pages(db, site_id)
+        score_stats = await svc.score_site_pages(db, site_id, profile)
         stats["page_scoring"] = score_stats
 
         # 4. Build coverage reports

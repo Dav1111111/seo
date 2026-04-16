@@ -10,7 +10,7 @@ Two tables:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     DateTime,
@@ -78,7 +78,7 @@ class PageReview(Base, TimestampMixin):
     reviewed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=lambda: datetime.now(tz=None),
+        default=lambda: datetime.now(timezone.utc),
     )
 
 

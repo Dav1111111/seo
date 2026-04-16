@@ -11,10 +11,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.intent.classifier import classify_query
+from app.core_audit.classifier import classify_query as _classify_with_profile
+from app.core_audit.page_classifier import (
+    score_page_all_intents as _score_page_all_with_profile,
+)
+from app.core_audit.profile_protocol import SiteProfile
 from app.intent.enums import IntentCode
 from app.intent.models import PageIntentScore, QueryIntent
-from app.intent.page_classifier import score_page_all_intents
 from app.models.page import Page
 from app.models.search_query import SearchQuery
 from app.models.site import Site
@@ -27,9 +30,9 @@ SCORER_VERSION = "1.0.0"
 
 class IntentService:
     async def classify_site_queries(
-        self, db: AsyncSession, site_id: uuid.UUID
+        self, db: AsyncSession, site_id: uuid.UUID, profile: SiteProfile
     ) -> dict:
-        """Classify all queries of a site by intent.
+        """Classify all queries of a site by intent using the supplied profile.
 
         Idempotent — upserts into query_intents. Returns stats.
         """
@@ -61,7 +64,7 @@ class IntentService:
         }
 
         for query_id, query_text in queries:
-            result = classify_query(query_text, known_brands=known_brands)
+            result = _classify_with_profile(query_text, profile, known_brands=known_brands)
             try:
                 await db.execute(
                     pg_insert(QueryIntent).values(
@@ -103,9 +106,9 @@ class IntentService:
         return stats
 
     async def score_site_pages(
-        self, db: AsyncSession, site_id: uuid.UUID
+        self, db: AsyncSession, site_id: uuid.UUID, profile: SiteProfile
     ) -> dict:
-        """Score all pages of a site against all intents (N × 10 rows)."""
+        """Score all pages of a site against all intents (N × 10 rows) using the supplied profile."""
         t0 = time.monotonic()
         now = datetime.now(timezone.utc)
 
@@ -126,7 +129,8 @@ class IntentService:
         }
 
         for p in pages:
-            scores = score_page_all_intents(
+            scores = _score_page_all_with_profile(
+                profile,
                 path=p["path"],
                 title=p["title"],
                 h1=p["h1"],

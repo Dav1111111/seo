@@ -5,13 +5,14 @@ import logging
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.config import settings
+import app.profiles  # noqa: F401 — triggers profile registration
+from app.core_audit.registry import get_profile
 from app.intent.coverage import CoverageAnalyzer
 from app.intent.service import IntentService
 from app.models.site import Site
 from app.workers.celery_app import celery_app
+from app.workers.db_session import task_session, task_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -25,21 +26,28 @@ def _run(coro):
         loop.close()
 
 
-def _make_session() -> async_sessionmaker[AsyncSession]:
-    eng = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=0)
-    return async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
-
-
 async def _classify_and_score(site_id: UUID) -> dict:
-    """Full intent pipeline for a site: classify queries + score pages."""
-    session_factory = _make_session()
+    """Full intent pipeline for a site: classify queries + score pages.
+
+    Uses a factory because the pipeline spans two independent sessions (we
+    intentionally do not hold one open across the LLM-bound classify stage).
+    """
     svc = IntentService()
+    async with task_session_factory() as session_factory:
+        # Resolve per-site profile (vertical + business_model); get_profile
+        # falls back to tourism/tour_operator on miss.
+        async with session_factory() as db:
+            site_row = await db.execute(select(Site).where(Site.id == site_id))
+            site = site_row.scalar_one_or_none()
+        vertical = site.vertical if site else "tourism"
+        business_model = site.business_model if site else "tour_operator"
+        profile = get_profile(vertical, business_model)
 
-    async with session_factory() as db:
-        query_stats = await svc.classify_site_queries(db, site_id)
+        async with session_factory() as db:
+            query_stats = await svc.classify_site_queries(db, site_id, profile)
 
-    async with session_factory() as db:
-        page_stats = await svc.score_site_pages(db, site_id)
+        async with session_factory() as db:
+            page_stats = await svc.score_site_pages(db, site_id, profile)
 
     return {
         "site_id": str(site_id),
@@ -59,8 +67,7 @@ def intent_classify_all(self):
     """Nightly: intent classification for all active sites."""
 
     async def _run_all():
-        session_factory = _make_session()
-        async with session_factory() as db:
+        async with task_session() as db:
             rows = await db.execute(
                 select(Site.id).where(Site.is_active == True)  # noqa: E712
             )
@@ -84,9 +91,8 @@ def intent_decide(self, site_id: str, use_llm: bool = True):
 
     async def _run_decisioner():
         from app.intent.decisioner import Decisioner
-        session_factory = _make_session()
         d = Decisioner()
-        async with session_factory() as db:
+        async with task_session() as db:
             return await d.run_for_site(db, UUID(site_id), use_llm_fallback=use_llm)
 
     return _run(_run_decisioner())
@@ -97,9 +103,8 @@ def intent_analyze_coverage(site_id: str):
     """Run coverage analysis for a site (read-only, returns reports)."""
 
     async def _analyze():
-        session_factory = _make_session()
         analyzer = CoverageAnalyzer()
-        async with session_factory() as db:
+        async with task_session() as db:
             reports = await analyzer.analyze_site(db, UUID(site_id))
             return {
                 "site_id": site_id,

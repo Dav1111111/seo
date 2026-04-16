@@ -20,7 +20,7 @@ TOURISM_EEAT_SIGNALS: tuple[EEATSignal, ...] = (
     ),
     EEATSignal(
         name="inn",
-        pattern=re.compile(r"\bИНН\s*:?\s*\d{10,12}\b", re.I),
+        pattern=re.compile(r"\bИНН\s*:?\s*(?:\d{10}|\d{12})\b", re.I),
         weight=0.25,
         priority="high",
     ),

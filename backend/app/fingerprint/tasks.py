@@ -7,9 +7,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.config import settings
 from app.fingerprint.dto import FingerprintInput
 from app.fingerprint.enums import FingerprintStatus
 from app.fingerprint.models import PageFingerprint
@@ -17,6 +15,7 @@ from app.fingerprint.service import FingerprintService
 from app.models.page import Page
 from app.models.site import Site
 from app.workers.celery_app import celery_app
+from app.workers.db_session import task_session, task_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +29,9 @@ def _run(coro):
         loop.close()
 
 
-def _make_session() -> async_sessionmaker[AsyncSession]:
-    eng = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=0)
-    return async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
-
-
 async def _fingerprint_site_async(site_id: UUID, force: bool = False) -> dict:
     """Fingerprint all pages of one site (incremental)."""
     t0 = time.monotonic()
-    session_factory = _make_session()
     svc = FingerprintService()
 
     stats = {
@@ -51,50 +44,51 @@ async def _fingerprint_site_async(site_id: UUID, force: bool = False) -> dict:
         "db_errors": 0,
     }
 
-    async with session_factory() as db:
-        pages = await db.execute(
-            select(
-                Page.id, Page.site_id, Page.url, Page.title, Page.h1,
-                Page.content_text, Page.last_crawled_at,
-            ).where(Page.site_id == site_id)
-        )
-        page_list = [dict(r._mapping) for r in pages]
-        stats["pages_total"] = len(page_list)
+    async with task_session_factory() as session_factory:
+        async with session_factory() as db:
+            pages = await db.execute(
+                select(
+                    Page.id, Page.site_id, Page.url, Page.title, Page.h1,
+                    Page.content_text, Page.last_crawled_at,
+                ).where(Page.site_id == site_id)
+            )
+            page_list = [dict(r._mapping) for r in pages]
+            stats["pages_total"] = len(page_list)
 
-    sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(8)
 
-    async def process(p: dict) -> None:
-        async with sem:
-            async with session_factory() as db:
-                try:
-                    inp = FingerprintInput(
-                        page_id=p["id"],
-                        site_id=p["site_id"],
-                        url=p["url"],
-                        title=p.get("title"),
-                        h1=p.get("h1"),
-                        content_text=p.get("content_text"),
-                        last_crawled_at=p.get("last_crawled_at") or datetime.now(timezone.utc),
-                        force=force,
-                    )
-                    result = await svc.compute_one(db, inp)
-                    await db.commit()
+        async def process(p: dict) -> None:
+            async with sem:
+                async with session_factory() as db:
+                    try:
+                        inp = FingerprintInput(
+                            page_id=p["id"],
+                            site_id=p["site_id"],
+                            url=p["url"],
+                            title=p.get("title"),
+                            h1=p.get("h1"),
+                            content_text=p.get("content_text"),
+                            last_crawled_at=p.get("last_crawled_at") or datetime.now(timezone.utc),
+                            force=force,
+                        )
+                        result = await svc.compute_one(db, inp)
+                        await db.commit()
 
-                    if result.status == FingerprintStatus.fingerprinted:
-                        stats["pages_computed"] += 1
-                    elif result.status == FingerprintStatus.skipped_unchanged:
-                        stats["pages_skipped_unchanged"] += 1
-                    elif result.status == FingerprintStatus.skipped_thin:
-                        stats["pages_skipped_thin"] += 1
-                    else:
+                        if result.status == FingerprintStatus.fingerprinted:
+                            stats["pages_computed"] += 1
+                        elif result.status == FingerprintStatus.skipped_unchanged:
+                            stats["pages_skipped_unchanged"] += 1
+                        elif result.status == FingerprintStatus.skipped_thin:
+                            stats["pages_skipped_thin"] += 1
+                        else:
+                            stats["pages_errored"] += 1
+
+                    except Exception as exc:
+                        logger.warning("fingerprint failed page=%s: %s", p["id"], exc)
                         stats["pages_errored"] += 1
+                        stats["db_errors"] += 1
 
-                except Exception as exc:
-                    logger.warning("fingerprint failed page=%s: %s", p["id"], exc)
-                    stats["pages_errored"] += 1
-                    stats["db_errors"] += 1
-
-    await asyncio.gather(*(process(p) for p in page_list), return_exceptions=True)
+        await asyncio.gather(*(process(p) for p in page_list), return_exceptions=True)
 
     stats["duration_ms"] = int((time.monotonic() - t0) * 1000)
     logger.info("fingerprint_site done: %s", stats)
@@ -118,9 +112,8 @@ def fingerprint_page(page_id: str, force: bool = False):
     """Fingerprint a single page by id."""
 
     async def _run_one() -> dict:
-        session_factory = _make_session()
         svc = FingerprintService()
-        async with session_factory() as db:
+        async with task_session() as db:
             row = await db.execute(
                 select(
                     Page.id, Page.site_id, Page.url, Page.title, Page.h1,
@@ -157,8 +150,7 @@ def fingerprint_all_sites(self):
     """Scheduled sweep — run fingerprinting for all active sites."""
 
     async def _run_all() -> dict:
-        session_factory = _make_session()
-        async with session_factory() as db:
+        async with task_session() as db:
             rows = await db.execute(
                 select(Site.id).where(Site.is_active == True)  # noqa: E712
             )
@@ -181,9 +173,8 @@ def fingerprint_gc_stale():
     """Weekly GC — delete fingerprints of pages not seen in 90 days."""
 
     async def _gc() -> dict:
-        session_factory = _make_session()
         cutoff = datetime.now(timezone.utc) - timedelta(days=90)
-        async with session_factory() as db:
+        async with task_session() as db:
             # Find pages with last_seen_at < cutoff
             rows = await db.execute(
                 select(Page.id).where(Page.last_seen_at < cutoff)

@@ -3,7 +3,7 @@
 Hard rules enforced:
   - `finding_id` in rewrites must be present in the set we actually sent.
   - `target_url` in link_proposals must be in ri.link_candidates URL set.
-  - Phone/price/ИНН/РТО regex hits in after_text must exist in
+  - Phone/price/ИНН/РТО/ОГРН regex hits in after_text must exist in
     ri.content_text (otherwise the LLM made them up — drop the rewrite).
   - City tokens (Лоо/Адлер/Хоста/Дагомыс/Красная Поляна) in after_text
     must appear in ri.content_text or top_queries.
@@ -27,10 +27,11 @@ from app.core_audit.review.llm.base import (
 
 logger = logging.getLogger(__name__)
 
-_PHONE_RE = re.compile(r"\+?7[\s\-\(\)]*\d{3}[\s\-\(\)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}")
+_PHONE_RE = re.compile(r"(?:\+?7|\b8)[\s\-\(\)]*\d{3}[\s\-\(\)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}")
 _PRICE_RE = re.compile(r"\b\d{3,}\s*(?:руб|₽|р\.|rub)\b", re.I)
-_INN_RE = re.compile(r"\bИНН\s*:?\s*\d{10,12}\b", re.I)
+_INN_RE = re.compile(r"\bИНН\s*:?\s*(?:\d{10}|\d{12})\b", re.I)
 _RTO_RE = re.compile(r"\b(?:РТО|ТТ)\s*[-:]?\s*\d{4,}\b", re.I)
+_OGRN_RE = re.compile(r"\bОГРН(?:ИП)?\s*:?\s*\d{13}(?!\d)", re.I)   # 13 digits for юрлицо
 
 _CITY_TOKENS = frozenset({
     "лоо", "адлер", "хоста", "кудепста", "лазаревское", "дагомыс",
@@ -94,6 +95,9 @@ def verify(
         if _fact_leaked(rw.after_text, source_text, _RTO_RE):
             logger.warning("llm: РТО hallucination in rewrite %s dropped", rw.finding_id)
             continue
+        if _fact_leaked(rw.after_text, source_text, _OGRN_RE):
+            logger.warning("llm: ОГРН hallucination in rewrite %s dropped", rw.finding_id)
+            continue
         if _city_leaked(rw.after_text, source_text):
             logger.warning("llm: city hallucination in rewrite %s dropped", rw.finding_id)
             continue
@@ -109,7 +113,8 @@ def verify(
         if _fact_leaked(d.draft_ru, source_text, _PHONE_RE) or \
            _fact_leaked(d.draft_ru, source_text, _PRICE_RE) or \
            _fact_leaked(d.draft_ru, source_text, _INN_RE) or \
-           _fact_leaked(d.draft_ru, source_text, _RTO_RE):
+           _fact_leaked(d.draft_ru, source_text, _RTO_RE) or \
+           _fact_leaked(d.draft_ru, source_text, _OGRN_RE):
             logger.warning("llm: fact hallucination in H2 draft %r dropped", d.block_title)
             continue
         if _city_leaked(d.draft_ru, source_text):

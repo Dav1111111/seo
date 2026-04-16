@@ -31,6 +31,7 @@ from app.core_audit.review.llm import enrich_with_llm
 from app.core_audit.review.models import PageReview, PageReviewRecommendation
 from app.core_audit.review.run_python_checks import run_python_checks_with_findings
 from app.intent.models import CoverageDecision
+from app.models.page import Page
 from app.models.site import Site
 
 logger = logging.getLogger(__name__)
@@ -178,8 +179,38 @@ class Reviewer:
         skip_reason: SkipReason,
         t0: float,
     ) -> ReviewResult:
-        """Write a single PageReview row with status='skipped'."""
-        site_id, intent_code, composite_hash = self._identity(ri, page_id, skip_reason)
+        """Write a single PageReview row with status='skipped'.
+
+        When `ri` is available we use its identity (real site_id + hash).
+        Otherwise we resolve site_id by loading the Page row. If the page
+        itself doesn't exist, we skip the DB write entirely — there is no
+        valid FK target for `site_id`, and a row with page_id that doesn't
+        exist in `pages` would fail the FK as well.
+
+        The placeholder composite_hash is STABLE per (page, skip_reason) so
+        repeated early-skips collapse into a single row via the unique
+        constraint (page_id, composite_hash, reviewer_version).
+        """
+        if ri is not None:
+            site_id = ri.site_id
+            intent_code = ri.target_intent.value
+            composite_hash = ri.composite_hash
+        else:
+            res = await db.execute(select(Page.site_id).where(Page.id == page_id))
+            site_id = res.scalar_one_or_none()
+            if site_id is None:
+                logger.warning(
+                    "skip page=%s reason=%s: page not found, no row persisted",
+                    page_id, skip_reason.value,
+                )
+                return _result_for_skip(
+                    page_id, page_id, "unknown",
+                    f"skipped:{skip_reason.value}", skip_reason,
+                )
+            intent_code = "unknown"
+            # Stable placeholder — retries collapse into one row.
+            composite_hash = f"skipped:{skip_reason.value}"[:64]
+
         row = PageReview(
             id=uuid4(),
             page_id=page_id,
@@ -203,8 +234,10 @@ class Reviewer:
         try:
             await db.commit()
         except IntegrityError:
-            # unique-key collision — another writer recorded a skip/complete for
-            # same (page, hash, version). Drop silently.
+            # Unique-key collision — already recorded a skip/complete for
+            # same (page, hash, version). Safe to swallow because hash is
+            # stable-per-reason, so this means "already skipped for this
+            # reason".
             await db.rollback()
             logger.info("skip row collision page=%s reason=%s", page_id, skip_reason.value)
         logger.info("review skipped page=%s reason=%s", page_id, skip_reason.value)
@@ -299,25 +332,6 @@ class Reviewer:
         return replace(enriched, duration_ms=duration_ms)
 
     # ── Helpers ────────────────────────────────────────────────────
-
-    @staticmethod
-    def _identity(
-        ri: ReviewInput | None,
-        page_id: UUID,
-        skip_reason: SkipReason,
-    ) -> tuple[UUID, str, str]:
-        """Supply (site_id, intent_code, composite_hash) for the skip row.
-
-        When ri is None (ContextBuilder failed early), we have no intent and
-        no hash. Fabricate a placeholder hash so the unique constraint doesn't
-        fire on multiple early-skip rows for the same page.
-        """
-        if ri is not None:
-            return ri.site_id, ri.target_intent.value, ri.composite_hash
-        placeholder = f"skipped:{skip_reason.value}:{uuid4().hex}"
-        # site_id is None in this path — callers that expect it should resolve
-        # via the page. Keep as dummy UUID by loading when needed.
-        return page_id, "unknown", placeholder[:64]
 
     @staticmethod
     def _queries_snapshot(ri: ReviewInput | None) -> dict | None:

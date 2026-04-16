@@ -21,7 +21,7 @@ TOURISM_COMMERCIAL_FACTORS: tuple[CommercialFactor, ...] = (
     ),
     CommercialFactor(
         name="phone_in_header",
-        detection_pattern=re.compile(r"\+7\s*\(?\d{3}\)?\s*\d{3}[\s-]?\d{2}[\s-]?\d{2}", re.I),
+        detection_pattern=re.compile(r"(?:\+?7|\b8)\s*\(?\d{3}\)?\s*\d{3}[\s-]?\d{2}[\s-]?\d{2}", re.I),
         priority="critical",
         description_ru="Телефон в формате +7 (XXX) в шапке сайта",
     ),

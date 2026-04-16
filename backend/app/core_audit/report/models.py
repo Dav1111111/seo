@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -38,6 +38,6 @@ class WeeklyReport(Base):
     generation_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
-        default=lambda: datetime.now(tz=None),
+        default=lambda: datetime.now(timezone.utc),
     )
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

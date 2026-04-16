@@ -176,6 +176,52 @@ def test_verify_cargo_cult_enum_filter():
     assert v.detected_cargo_cult_schemas == ("TouristTrip",)
 
 
+def test_inn_exactly_10_or_12_only():
+    """ИНН must match strictly 10 (юрлицо) or 12 (физлицо/ИП) digits — not 11."""
+    from app.core_audit.review.llm.verify import _INN_RE
+
+    # 10 digits → match
+    assert _INN_RE.search("ИНН: 1234567890") is not None
+    # 12 digits → match
+    assert _INN_RE.search("ИНН 123456789012") is not None
+    # 11 digits → NO match (false positive prevention)
+    assert _INN_RE.search("ИНН: 12345678901") is None
+    # 9 digits → NO match
+    assert _INN_RE.search("ИНН 123456789") is None
+    # 13 digits → NO match
+    assert _INN_RE.search("ИНН 1234567890123") is None
+
+
+def test_phone_catches_8_prefix():
+    """Phone regex must catch both +7 and 8 prefixes; fake 8-phone must be dropped."""
+    ri = _ri(content_text="Тур на Рицу без телефонов в тексте.")
+    en = LLMEnrichment(rewrites=(
+        LLMRewrite(
+            finding_id="title_length",
+            before_text=None,
+            after_text="Звоните 8 (999) 123-45-67",
+            reasoning_ru="added 8-prefix phone",
+        ),
+    ))
+    v = verify(en, ri, sent_finding_ids={"title_length"})
+    assert v.rewrites == ()
+
+
+def test_ogrn_hallucination_dropped():
+    """Fake 13-digit ОГРН in after_text but not in source → drop rewrite."""
+    ri = _ri(content_text="Тур на Рицу. Никаких реквизитов здесь нет.")
+    en = LLMEnrichment(rewrites=(
+        LLMRewrite(
+            finding_id="title_length",
+            before_text=None,
+            after_text="Наш ОГРН 1234567890123 гарантирует надёжность",
+            reasoning_ru="made-up ОГРН",
+        ),
+    ))
+    v = verify(en, ri, sent_finding_ids={"title_length"})
+    assert v.rewrites == ()
+
+
 def test_verify_h2_draft_hallucination():
     ri = _ri(content_text="Короткий текст страницы про Рицу.")
     en = LLMEnrichment(h2_drafts=(

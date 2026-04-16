@@ -1,7 +1,8 @@
 """Celery tasks for Page Review (Module 3).
 
-Follows the `_run`/`_make_session` pattern from app.intent.tasks so each
-task has its own async engine (prevents asyncpg session conflicts).
+Each task uses `task_session()` which owns an ephemeral AsyncEngine scoped to
+the invocation and disposes it on exit — prevents connection-pool leaks that
+would otherwise pile up over worker_max_tasks_per_child cycles.
 """
 
 from __future__ import annotations
@@ -11,12 +12,11 @@ import logging
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.config import settings
 from app.core_audit.review.reviewer import DEFAULT_TOP_N, Reviewer
 from app.models.site import Site
 from app.workers.celery_app import celery_app
+from app.workers.db_session import task_session
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +30,10 @@ def _run(coro):
         loop.close()
 
 
-def _make_session() -> async_sessionmaker[AsyncSession]:
-    eng = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=0)
-    return async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
-
-
 @celery_app.task(name="review_page", bind=True, max_retries=1)
 def review_page_task(self, page_id: str, decision_id: str | None = None):
     async def _inner():
-        session_factory = _make_session()
-        async with session_factory() as db:
+        async with task_session() as db:
             result = await Reviewer().review_page(
                 db,
                 UUID(page_id),
@@ -63,8 +57,7 @@ def review_site_decisions_task(self, site_id: str, top_n: int = DEFAULT_TOP_N):
     priority_rescore_site so fresh recs get scored immediately."""
 
     async def _inner():
-        session_factory = _make_session()
-        async with session_factory() as db:
+        async with task_session() as db:
             return await Reviewer().review_site(db, UUID(site_id), top_n=top_n)
 
     result = _run(_inner())
@@ -82,8 +75,7 @@ def review_all_nightly_task(self, top_n: int = DEFAULT_TOP_N):
     """Nightly: iterate active sites, fire one review_site_decisions per site."""
 
     async def _inner():
-        session_factory = _make_session()
-        async with session_factory() as db:
+        async with task_session() as db:
             rows = await db.execute(
                 select(Site.id, Site.vertical).where(Site.is_active == True)  # noqa: E712
             )
