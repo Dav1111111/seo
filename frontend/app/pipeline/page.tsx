@@ -12,7 +12,7 @@ import {
   Table, TableBody, TableCell, TableHead,
   TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Play, RefreshCw } from "lucide-react";
+import { Play, RefreshCw, Layers } from "lucide-react";
 
 const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   completed: "default",
@@ -87,6 +87,14 @@ export default function PipelinePage() {
           onClick={() => trigger("indexing", () => api.triggerAgent(siteId, "technical_indexing"))}
         >
           Technical Indexing
+        </Button>
+        <Button
+          size="sm" variant="outline"
+          disabled={triggering !== null}
+          onClick={() => trigger("clustering", () => api.triggerClustering(siteId))}
+        >
+          <Layers className="mr-2 h-4 w-4" />
+          {triggering === "clustering" ? "Кластеризую..." : "Кластеризация"}
         </Button>
       </div>
 

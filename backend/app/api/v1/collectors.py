@@ -70,6 +70,14 @@ async def trigger_metrica_collection(site_id: uuid.UUID):
     return CollectResponse(task_id=task.id, status="queued")
 
 
+@router.post("/sites/{site_id}/cluster-queries", response_model=CollectResponse)
+async def trigger_query_clustering(site_id: uuid.UUID):
+    """Trigger AI query clustering for a site."""
+    from app.agents.tasks import run_query_clustering_site
+    task = run_query_clustering_site.delay(str(site_id), True)
+    return CollectResponse(task_id=task.id, status="queued")
+
+
 @router.post("/sites/{site_id}/pipeline", response_model=CollectResponse)
 async def trigger_full_pipeline(site_id: uuid.UUID):
     """Run full issue pipeline: collect → detect → validate → store."""

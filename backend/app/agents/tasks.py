@@ -120,3 +120,35 @@ def run_daily_pipeline_all(self):
             logger.error("Pipeline failed for %s: %s", sid, exc)
             results[str(sid)] = {"error": str(exc)}
     return results
+
+
+# ── Query Clustering ──────────────────────────────────────────────────────
+
+async def _cluster_queries_for_site(site_id: UUID, force: bool = False) -> dict:
+    from app.agents.query_clustering import QueryClusteringAgent
+    agent = QueryClusteringAgent()
+    async with async_session() as db:
+        result = await agent.run(db, site_id, force_recluster=force)
+        await db.commit()
+        return result
+
+
+@celery_app.task(name="run_query_clustering_all", bind=True, max_retries=1)
+def run_query_clustering_all(self):
+    """Cluster queries for all active sites (weekly scheduled)."""
+    site_ids = _run(_get_active_site_ids())
+    results = {}
+    for sid in site_ids:
+        try:
+            result = _run(_cluster_queries_for_site(sid, force=True))
+            results[str(sid)] = result
+        except Exception as exc:
+            logger.error("Clustering failed for %s: %s", sid, exc)
+            results[str(sid)] = {"error": str(exc)}
+    return results
+
+
+@celery_app.task(name="run_query_clustering_site")
+def run_query_clustering_site(site_id: str, force: bool = False):
+    """Cluster queries for a specific site (manual trigger)."""
+    return _run(_cluster_queries_for_site(UUID(site_id), force=force))

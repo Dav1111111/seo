@@ -67,6 +67,13 @@ export const api = {
     apiFetch<any>(`/sites/${siteId}/queries/${queryId}/history?days=${days}`),
   queryClusters: (siteId = SITE_ID, days = 7) =>
     apiFetch<any>(`/sites/${siteId}/queries/clusters?days=${days}`),
+  renameCluster: (siteId = SITE_ID, oldName: string, newName: string) =>
+    apiFetch<any>(`/sites/${siteId}/queries/clusters/${encodeURIComponent(oldName)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ new_name: newName }),
+    }),
+  triggerClustering: (siteId = SITE_ID) =>
+    apiFetch<any>(`/sites/${siteId}/cluster-queries`, { method: "POST" }),
 
   // Chat
   chat: (siteId = SITE_ID, message: string, history: any[] = [], issueId?: string) =>

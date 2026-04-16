@@ -13,6 +13,7 @@ import {
   TableHeader, TableRow,
 } from "@/components/ui/table";
 import { QueryDetailDialog } from "@/components/queries/query-detail";
+import { ClusterOverview } from "@/components/queries/cluster-overview";
 import {
   Search, TrendingUp, TrendingDown, Minus,
   ArrowUpDown, ChevronLeft, ChevronRight,
@@ -108,6 +109,12 @@ export function QueryTable() {
           </p>
         </div>
       </div>
+
+      {/* Cluster overview cards */}
+      <ClusterOverview
+        activeCluster={cluster}
+        onSelectCluster={(name) => { setCluster(name); setPage(0); }}
+      />
 
       {/* Search */}
       <div className="flex gap-3">

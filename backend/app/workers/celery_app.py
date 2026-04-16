@@ -38,6 +38,11 @@ celery_app.conf.beat_schedule = {
         "task": "run_technical_indexing_all",
         "schedule": crontab(hour=5, minute=15),  # 08:15 MSK
     },
+    # Query clustering (weekly, Monday 09:00 MSK)
+    "cluster-queries-weekly": {
+        "task": "run_query_clustering_all",
+        "schedule": crontab(hour=6, minute=0, day_of_week=1),
+    },
 }
 
 celery_app.autodiscover_tasks(["app.collectors", "app.agents"])

@@ -6,8 +6,9 @@ import uuid
 from datetime import date, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, case, literal
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -294,3 +295,31 @@ async def list_clusters(
         })
 
     return {"clusters": clusters, "unclustered_count": unclustered_count}
+
+
+class ClusterRenameBody(BaseModel):
+    new_name: str
+
+
+@router.patch("/sites/{site_id}/queries/clusters/{cluster_name}")
+async def rename_cluster(
+    site_id: uuid.UUID,
+    cluster_name: str,
+    body: ClusterRenameBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Rename or merge a cluster. All queries with old name get the new name."""
+    new_name = body.new_name.strip().lower().replace(" ", "_")
+    if not new_name:
+        raise HTTPException(status_code=400, detail="new_name is required")
+
+    result = await db.execute(
+        update(SearchQuery)
+        .where(SearchQuery.site_id == site_id, SearchQuery.cluster == cluster_name)
+        .values(cluster=new_name)
+    )
+    count = result.rowcount
+    if count == 0:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    return {"old_name": cluster_name, "new_name": new_name, "queries_updated": count}
