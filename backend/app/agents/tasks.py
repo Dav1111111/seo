@@ -28,10 +28,13 @@ def _run(coro):
 async def _run_agent_for_site(agent_name: str, site_id: UUID, trigger: str) -> dict:
     from app.agents.search_visibility import SearchVisibilityAgent
     from app.agents.technical_indexing import TechnicalIndexingAgent
+    from app.agents.query_recommendations import TacticalQueryAgent, StrategicQueryAgent
 
     AGENTS = {
         "search_visibility": SearchVisibilityAgent,
         "technical_indexing": TechnicalIndexingAgent,
+        "query_tactical": TacticalQueryAgent,
+        "query_strategic": StrategicQueryAgent,
     }
 
     cls = AGENTS.get(agent_name)
@@ -152,3 +155,35 @@ def run_query_clustering_all(self):
 def run_query_clustering_site(site_id: str, force: bool = False):
     """Cluster queries for a specific site (manual trigger)."""
     return _run(_cluster_queries_for_site(UUID(site_id), force=force))
+
+
+# ── Query Recommendations ────────────────────────────────────────────────
+
+@celery_app.task(name="run_query_tactical_all", bind=True, max_retries=1)
+def run_query_tactical_all(self):
+    """Run tactical query recommendations for all active sites (daily)."""
+    site_ids = _run(_get_active_site_ids())
+    results = {}
+    for site_id in site_ids:
+        try:
+            result = _run(_run_agent_for_site("query_tactical", site_id, "scheduled"))
+            results[str(site_id)] = result
+        except Exception as exc:
+            logger.error("query_tactical failed for %s: %s", site_id, exc)
+            results[str(site_id)] = {"error": str(exc)}
+    return results
+
+
+@celery_app.task(name="run_query_strategic_all", bind=True, max_retries=1)
+def run_query_strategic_all(self):
+    """Run strategic query recommendations for all active sites (weekly)."""
+    site_ids = _run(_get_active_site_ids())
+    results = {}
+    for site_id in site_ids:
+        try:
+            result = _run(_run_agent_for_site("query_strategic", site_id, "scheduled"))
+            results[str(site_id)] = result
+        except Exception as exc:
+            logger.error("query_strategic failed for %s: %s", site_id, exc)
+            results[str(site_id)] = {"error": str(exc)}
+    return results

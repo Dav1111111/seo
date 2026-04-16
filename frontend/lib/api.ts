@@ -74,6 +74,8 @@ export const api = {
     }),
   triggerClustering: (siteId = SITE_ID) =>
     apiFetch<any>(`/sites/${siteId}/cluster-queries`, { method: "POST" }),
+  triggerQueryRecommendations: (siteId = SITE_ID) =>
+    apiFetch<any>(`/sites/${siteId}/analyse/query-recommendations`, { method: "POST" }),
 
   // Chat
   chat: (siteId = SITE_ID, message: string, history: any[] = [], issueId?: string) =>

@@ -43,6 +43,16 @@ celery_app.conf.beat_schedule = {
         "task": "run_query_clustering_all",
         "schedule": crontab(hour=6, minute=0, day_of_week=1),
     },
+    # Query recommendations — tactical daily (08:30 MSK)
+    "recommend-queries-tactical-daily": {
+        "task": "run_query_tactical_all",
+        "schedule": crontab(hour=5, minute=30),
+    },
+    # Query recommendations — strategic weekly (Monday 09:30 MSK)
+    "recommend-queries-strategic-weekly": {
+        "task": "run_query_strategic_all",
+        "schedule": crontab(hour=6, minute=30, day_of_week=1),
+    },
 }
 
 celery_app.autodiscover_tasks(["app.collectors", "app.agents"])

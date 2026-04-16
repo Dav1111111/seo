@@ -78,6 +78,18 @@ async def trigger_query_clustering(site_id: uuid.UUID):
     return CollectResponse(task_id=task.id, status="queued")
 
 
+@router.post("/sites/{site_id}/analyse/query-recommendations", response_model=CollectResponse)
+async def trigger_query_recommendations(site_id: uuid.UUID):
+    """Trigger both tactical and strategic query recommendations."""
+    from app.agents.tasks import run_agent_for_site
+    # Run tactical first, strategic with delay
+    t1 = run_agent_for_site.delay("query_tactical", str(site_id), "manual")
+    run_agent_for_site.apply_async(
+        args=["query_strategic", str(site_id), "manual"], countdown=5
+    )
+    return CollectResponse(task_id=t1.id, status="queued")
+
+
 @router.post("/sites/{site_id}/pipeline", response_model=CollectResponse)
 async def trigger_full_pipeline(site_id: uuid.UUID):
     """Run full issue pipeline: collect → detect → validate → store."""

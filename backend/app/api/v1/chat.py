@@ -124,6 +124,23 @@ async def _build_context(
     if q_list:
         parts.append(f"\nТоп запросы: {', '.join(q_list[:10])}")
 
+    # Cluster summary
+    cluster_rows = await db.execute(
+        select(
+            SearchQuery.cluster,
+            func.count(SearchQuery.id).label("cnt"),
+        )
+        .where(SearchQuery.site_id == site_id, SearchQuery.cluster.isnot(None))
+        .group_by(SearchQuery.cluster)
+        .order_by(func.count(SearchQuery.id).desc())
+        .limit(10)
+    )
+    cl_list = cluster_rows.fetchall()
+    if cl_list:
+        parts.append("\nКластеры запросов: " + ", ".join(
+            f"{c.cluster} ({c.cnt})" for c in cl_list
+        ))
+
     return "\n".join(parts)
 
 

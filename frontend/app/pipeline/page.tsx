@@ -12,7 +12,7 @@ import {
   Table, TableBody, TableCell, TableHead,
   TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Play, RefreshCw, Layers } from "lucide-react";
+import { Play, RefreshCw, Layers, Lightbulb } from "lucide-react";
 
 const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   completed: "default",
@@ -95,6 +95,14 @@ export default function PipelinePage() {
         >
           <Layers className="mr-2 h-4 w-4" />
           {triggering === "clustering" ? "Кластеризую..." : "Кластеризация"}
+        </Button>
+        <Button
+          size="sm" variant="outline"
+          disabled={triggering !== null}
+          onClick={() => trigger("recommendations", () => api.triggerQueryRecommendations(siteId))}
+        >
+          <Lightbulb className="mr-2 h-4 w-4" />
+          {triggering === "recommendations" ? "Анализирую..." : "Рекомендации"}
         </Button>
       </div>
 
