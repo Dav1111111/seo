@@ -255,7 +255,7 @@ async def list_clusters(
 
     rows = await db.execute(
         select(
-            func.coalesce(SearchQuery.cluster, "__unclustered__").label("cluster_name"),
+            SearchQuery.cluster,
             func.count(SearchQuery.id.distinct()).label("query_count"),
             func.coalesce(func.sum(DailyMetric.impressions), 0).label("total_impressions"),
             func.coalesce(func.sum(DailyMetric.clicks), 0).label("total_clicks"),
@@ -268,7 +268,7 @@ async def list_clusters(
             & (DailyMetric.date.between(curr_start, curr_end)),
         )
         .where(SearchQuery.site_id == site_id)
-        .group_by(func.coalesce(SearchQuery.cluster, "__unclustered__"))
+        .group_by(SearchQuery.cluster)
         .order_by(func.coalesce(func.sum(DailyMetric.impressions), 0).desc())
     )
 
@@ -276,12 +276,12 @@ async def list_clusters(
     unclustered_count = 0
 
     for r in rows:
-        name = r.cluster_name
+        name = r.cluster
         total_imp = int(r.total_impressions)
         total_clk = int(r.total_clicks)
         avg_ctr = round(total_clk / total_imp, 4) if total_imp > 0 else 0.0
 
-        if name == "__unclustered__":
+        if name is None:
             unclustered_count = int(r.query_count)
             continue
 
