@@ -8,6 +8,7 @@ engines DB-agnostic.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from uuid import UUID
 
 from app.core_audit.intent_codes import IntentCode
@@ -17,6 +18,14 @@ from app.core_audit.review.enums import (
     ReviewStatus,
     SkipReason,
 )
+
+
+@dataclass(frozen=True)
+class LinkCandidate:
+    """Internal link target the LLM can propose without hallucinating URLs."""
+    url: str
+    anchor_hint: str | None              # existing h1 or title of the target page
+    similarity: float                    # 0-1, hybrid minhash+ngram score
 
 
 @dataclass(frozen=True)
@@ -44,8 +53,18 @@ class ReviewInput:
     content_hash: str
     composite_hash: str                       # sha256(content_hash + title + meta + h1)
 
+    # Structured content signals (context_builder pre-extracts these so
+    # Step 3 checks and Step 4 LLM don't re-parse lossy content_text)
+    h2_blocks: tuple[str, ...] = ()           # existing H2 section titles, in order
+    lemmas: tuple[str, ...] = ()              # lemmatized content tokens (for Russian density)
+    link_candidates: tuple[LinkCandidate, ...] = ()
+
+    # Freshness + language guards
+    last_updated_at: datetime | None = None
+    lang: str = "ru"
+
     # User demand context
-    top_queries: tuple[str, ...] = ()         # up to 5
+    top_queries: tuple[str, ...] = ()         # up to 5 non-brand queries
 
     # Current intent scores (from PageIntentScore for this intent)
     current_score: float = 0.0                # 0-5

@@ -19,6 +19,7 @@ Explicit design constraints (from user, fixed 2026-04-17):
 """
 
 from app.core_audit.review.dto import (
+    LinkCandidate,
     PageLevelSummary,
     Recommendation,
     ReviewInput,
@@ -33,6 +34,7 @@ from app.core_audit.review.enums import (
 )
 
 __all__ = [
+    "LinkCandidate",
     "PageLevelSummary",
     "RecCategory",
     "RecPriority",
