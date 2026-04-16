@@ -37,11 +37,24 @@ class PageRequirements:
 
     Consumed by Module 3 (Page Review) to grade existing pages and by
     decision_tree.propose_title for URL/title shaping.
+
+    H2 blocks are split into two tiers so the review pipeline can emit
+    different severities:
+      - critical_h2_blocks: missing them is a hard gap (commercial intent,
+        blocks the user task). Missing → severity=critical/high.
+      - recommended_h2_blocks: nice-to-have sections that improve coverage
+        and E-E-A-T. Missing → severity=medium/low.
     """
     intent: IntentCode
-    required_h2_blocks: tuple[str, ...] = ()       # titles users must see
-    required_affordances: tuple[str, ...] = ()     # semantic features (booking form, price block)
+    critical_h2_blocks: tuple[str, ...] = ()
+    recommended_h2_blocks: tuple[str, ...] = ()
+    required_affordances: tuple[str, ...] = ()
     minimum_word_count: int = 0
+
+    @property
+    def required_h2_blocks(self) -> tuple[str, ...]:
+        """Back-compat alias — union of critical + recommended."""
+        return self.critical_h2_blocks + self.recommended_h2_blocks
 
 
 @dataclass(frozen=True)
