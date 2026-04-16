@@ -59,14 +59,22 @@ def review_page_task(self, page_id: str, decision_id: str | None = None):
 
 @celery_app.task(name="review_site_decisions", bind=True, max_retries=1)
 def review_site_decisions_task(self, site_id: str, top_n: int = DEFAULT_TOP_N):
-    """Review top-N strengthen decisions for a single site."""
+    """Review top-N strengthen decisions for a single site. Chains
+    priority_rescore_site so fresh recs get scored immediately."""
 
     async def _inner():
         session_factory = _make_session()
         async with session_factory() as db:
             return await Reviewer().review_site(db, UUID(site_id), top_n=top_n)
 
-    return _run(_inner())
+    result = _run(_inner())
+    # Chain rescore so priorities are fresh right after the review batch.
+    try:
+        from app.core_audit.priority.tasks import priority_rescore_site
+        priority_rescore_site.delay(site_id)
+    except Exception as exc:
+        logger.warning("rescore chain dispatch failed site=%s: %s", site_id, exc)
+    return result
 
 
 @celery_app.task(name="review_all_nightly", bind=True, max_retries=1)

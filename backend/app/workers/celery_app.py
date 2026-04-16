@@ -77,5 +77,5 @@ celery_app.conf.beat_schedule = {
 
 celery_app.autodiscover_tasks([
     "app.collectors", "app.agents", "app.fingerprint", "app.intent",
-    "app.core_audit.review",
+    "app.core_audit.review", "app.core_audit.priority",
 ])

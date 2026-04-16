@@ -110,3 +110,11 @@ class PageReviewRecommendation(Base, TimestampMixin):
     user_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     user_status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     user_status_changed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Module 4 — Prioritization scores (nullable until scorer runs)
+    priority_score: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
+    impact_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
+    confidence_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
+    ease_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scorer_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
