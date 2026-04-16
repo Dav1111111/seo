@@ -1,25 +1,23 @@
 """Layer 2 — turn structured findings into Recommendation rows with Russian text.
 
-Separation of concerns (user requirement 3): checks produce facts,
-composer produces prose. Templates are keyed by signal_type and use
-evidence fields for substitution.
+Separation of concerns: checks produce facts, composer produces prose.
+Templates are keyed by signal_type and use evidence fields for substitution.
+
+Every Recommendation carries a `source_finding_id` so the LLM enrichment
+layer (Step 4) can merge rewrites deterministically.
 
 Composer emits ONE Recommendation per fail/warn finding. Passed and
-not_applicable findings are dropped (they show as stats on the summary,
-not as action items).
+not_applicable findings are dropped (they show as summary stats).
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 from app.core_audit.review.dto import Recommendation
 from app.core_audit.review.enums import RecCategory, RecPriority
 from app.core_audit.review.findings import CheckFinding, FindingStatus
+from app.core_audit.review.llm.base import finding_id
 
 
-# Map signal_type → category. Composer uses this to route Recommendations
-# into the UI's category tabs.
 SIGNAL_CATEGORY: dict[str, RecCategory] = {
     "title_length": RecCategory.title,
     "title_keyword_repetition": RecCategory.title,
@@ -75,130 +73,101 @@ def _category(f: CheckFinding) -> RecCategory:
     return SIGNAL_CATEGORY.get(f.signal_type, RecCategory.title)
 
 
+def _rec(f: CheckFinding, reasoning_ru: str, *,
+         before: str | None = None, after: str | None = None) -> Recommendation:
+    return Recommendation(
+        category=_category(f),
+        priority=_priority(f),
+        reasoning_ru=reasoning_ru,
+        before=before,
+        after=after,
+        source_finding_id=finding_id(f),
+    )
+
+
 # ── Per-signal composers ──────────────────────────────────────────────
 
 def _title_length(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    length = ev.get("length", 0)
-    return Recommendation(
-        category=_category(f),
-        priority=_priority(f),
-        reasoning_ru=(
-            f"Длина title {length} символов — Яндекс обрезает сниппет "
-            f"около 70 символов для кириллицы. Сократите до ≤65 символов, "
-            f"оставив ключевую фразу в начале."
-        ),
-        evidence=ev if False else None,  # placeholder
-        before=None, after=None,
-    )
+    length = f.evidence.get("length", 0)
+    return _rec(f, (
+        f"Длина title {length} символов — Яндекс обрезает сниппет около "
+        f"70 символов для кириллицы. Сократите до ≤65 символов, оставив "
+        f"ключевую фразу в начале."
+    ))
 
 
 def _title_keyword_repetition(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    count = ev.get("keyword_count", 0)
-    return Recommendation(
-        category=_category(f),
-        priority=_priority(f),
-        reasoning_ru=(
-            f"Ключевое слово повторяется в title {count} раз(а). "
-            f"Яндекс-фильтр «Баден-Баден» может снизить страницу за переоптимизацию. "
-            f"Оставьте одно упоминание + добавьте модификаторы (длительность, цена, формат)."
-        ),
-        before=None, after=None,
-    )
+    count = f.evidence.get("keyword_count", 0)
+    return _rec(f, (
+        f"Ключевое слово повторяется в title {count} раз(а). "
+        f"Яндекс-фильтр «Баден-Баден» может снизить страницу за переоптимизацию. "
+        f"Оставьте одно упоминание + добавьте модификаторы."
+    ))
 
 
 def _title_missing(f: CheckFinding) -> Recommendation:
-    return Recommendation(
-        category=_category(f), priority=RecPriority.critical,
-        reasoning_ru=(
-            "У страницы нет тега title. Это критично для индексации в Яндексе — "
-            "добавьте title до 65 символов с ключевой фразой в начале и брендом в конце."
-        ),
-        before=None, after=None,
-    )
+    return _rec(f, (
+        "У страницы нет тега title. Это критично для индексации в Яндексе — "
+        "добавьте title до 65 символов с ключевой фразой в начале и брендом в конце."
+    ))
 
 
 def _h1_missing(f: CheckFinding) -> Recommendation:
-    return Recommendation(
-        category=_category(f), priority=_priority(f),
-        reasoning_ru=(
-            "На странице отсутствует H1. H1 обязателен для корректной индексации "
-            "и должен содержать ключевую фразу в естественной формулировке, "
-            "не дублируя title дословно."
-        ),
-        before=None, after=None,
-    )
+    return _rec(f, (
+        "На странице отсутствует H1. H1 обязателен для корректной индексации "
+        "и должен содержать ключевую фразу в естественной формулировке, "
+        "не дублируя title дословно."
+    ))
 
 
 def _h1_equals_title(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    return Recommendation(
-        category=_category(f), priority=_priority(f),
-        reasoning_ru=(
-            "H1 дословно совпадает с title — вы теряете возможность охватить "
-            "дополнительные ключевые слова. Сделайте H1 естественной человеческой "
-            "формулировкой (title — для SERP, H1 — для читателя)."
-        ),
-        before=ev.get("h1"), after=None,
-    )
+    return _rec(f, (
+        "H1 дословно совпадает с title — вы теряете возможность охватить "
+        "дополнительные ключевые слова. Сделайте H1 естественной формулировкой "
+        "(title — для SERP, H1 — для читателя)."
+    ), before=f.evidence.get("h1"))
 
 
 def _density_scope(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    density = ev.get("density", 0.0)
+    density = f.evidence.get("density", 0.0)
     scope = f.signal_type.replace("density_", "")
-    if ev.get("under_optimization"):
+    if f.evidence.get("under_optimization"):
         reasoning = (
             f"Плотность ключевого слова в {scope} всего {density*100:.2f}% — "
             f"под коммерческий интент этого мало. Упомяните ключевую фразу "
-            f"в title, H1 и первом абзаце body естественным образом."
+            f"в title, H1 и первом абзаце естественным образом."
         )
     else:
         reasoning = (
             f"Плотность ключевого слова в {scope} — {density*100:.2f}%. "
             f"Риск фильтра «Баден-Баден». Разбавьте синонимами и уберите повторы."
         )
-    return Recommendation(
-        category=_category(f), priority=_priority(f),
-        reasoning_ru=reasoning, before=None, after=None,
-    )
+    return _rec(f, reasoning)
 
 
 def _missing_h2_block(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    block = ev.get("block", "")
-    tier = ev.get("tier", "recommended")
+    block = f.evidence.get("block", "")
+    tier = f.evidence.get("tier", "recommended")
     tier_ru = "обязательный" if tier == "critical" else "рекомендуемый"
-    return Recommendation(
-        category=_category(f), priority=_priority(f),
-        reasoning_ru=(
-            f"На странице не хватает {tier_ru} H2-раздела «{block}». "
-            f"Для этого типа страницы Яндекс ожидает тематическую полноту — "
-            f"добавьте блок с ответом на соответствующий пользовательский вопрос."
-        ),
-        before=None, after=None,
-    )
+    return _rec(f, (
+        f"На странице не хватает {tier_ru} H2-раздела «{block}». "
+        f"Для этого типа страницы Яндекс ожидает тематическую полноту — "
+        f"добавьте блок с ответом на соответствующий пользовательский вопрос."
+    ))
 
 
 def _schema_missing(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    types = ev.get("recommended_types", [])
+    types = f.evidence.get("recommended_types", [])
     types_str = ", ".join(types)
-    return Recommendation(
-        category=_category(f), priority=_priority(f),
-        reasoning_ru=(
-            f"На странице отсутствует Schema.org разметка. Для текущего интента "
-            f"рекомендуется: {types_str}. Не используйте TouristTrip / "
-            f"TouristAttraction — Яндекс их не парсит в расширенные сниппеты."
-        ),
-        before=None, after=None,
-    )
+    return _rec(f, (
+        f"На странице отсутствует Schema.org разметка. Для текущего интента "
+        f"рекомендуется: {types_str}. Не используйте TouristTrip / "
+        f"TouristAttraction — Яндекс их не парсит в расширенные сниппеты."
+    ))
 
 
 def _eeat_signal_missing(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    name = ev.get("signal_name", "signal")
+    name = f.evidence.get("signal_name", "signal")
     human = {
         "rto_number": "номер в реестре туроператоров (РТО)",
         "inn": "ИНН",
@@ -208,44 +177,31 @@ def _eeat_signal_missing(f: CheckFinding) -> Recommendation:
         "reviews_block": "блок отзывов клиентов",
         "yandex_maps_reviews": "ссылка на отзывы на Яндекс.Картах",
     }.get(name, name)
-    return Recommendation(
-        category=_category(f), priority=_priority(f),
-        reasoning_ru=(
-            f"Детектор не нашёл на странице: {human}. Это E-E-A-T сигнал, важный "
-            f"для Yandex Proksima. Если он действительно отсутствует — добавьте; "
-            f"если есть, но в другой форме — проверьте верстку и формат."
-        ),
-        before=None, after=None,
-    )
+    return _rec(f, (
+        f"Детектор не нашёл на странице: {human}. Это E-E-A-T сигнал для "
+        f"Yandex Proksima. Если он действительно отсутствует — добавьте; "
+        f"если есть, но в другой форме — проверьте вёрстку и формат."
+    ))
 
 
 def _commercial_factor_missing(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    return Recommendation(
-        category=_category(f), priority=_priority(f),
-        reasoning_ru=(
-            f"Не обнаружен коммерческий фактор: {ev.get('description_ru', ev.get('factor_name'))}. "
-            f"Коммерческие факторы — явный сигнал ранжирования в Яндексе. "
-            f"Проверьте, отображается ли фактор на странице и попадает ли в контент-блок."
-        ),
-        before=None, after=None,
-    )
+    return _rec(f, (
+        f"Не обнаружен коммерческий фактор: "
+        f"{f.evidence.get('description_ru', f.evidence.get('factor_name'))}. "
+        f"Коммерческие факторы — явный сигнал ранжирования в Яндексе. "
+        f"Проверьте, отображается ли фактор на странице."
+    ))
 
 
 def _over_optimization_stuffing(f: CheckFinding) -> Recommendation:
-    ev = f.evidence
-    density = ev.get("density_body", 0.0)
-    tkc = ev.get("title_keyword_count", 0)
-    return Recommendation(
-        category=_category(f), priority=_priority(f),
-        reasoning_ru=(
-            f"Переоптимизация: плотность в body {density*100:.2f}% + "
-            f"{tkc} повторов в title. Высокий риск фильтра «Баден-Баден». "
-            f"Перепишите раздел с введением синонимов и нарастанием тематической "
-            f"глубины вместо повторов одной фразы."
-        ),
-        before=None, after=None,
-    )
+    density = f.evidence.get("density_body", 0.0)
+    tkc = f.evidence.get("title_keyword_count", 0)
+    return _rec(f, (
+        f"Переоптимизация: плотность в body {density*100:.2f}% + "
+        f"{tkc} повторов в title. Высокий риск фильтра «Баден-Баден». "
+        f"Перепишите раздел с введением синонимов и нарастанием тематической "
+        f"глубины вместо повторов одной фразы."
+    ))
 
 
 _HANDLERS = {

@@ -33,7 +33,12 @@ from app.core_audit.review.enums import (
     UserStatus,
 )
 from app.core_audit.review.findings import CheckFinding, CheckResult, FindingStatus
-from app.core_audit.review.run_python_checks import run_python_checks
+from app.core_audit.review.llm import enrich_with_llm
+from app.core_audit.review.run_python_checks import (
+    PythonCheckOutput,
+    run_python_checks,
+    run_python_checks_with_findings,
+)
 
 __all__ = [
     "CheckFinding",
@@ -41,6 +46,7 @@ __all__ = [
     "FindingStatus",
     "LinkCandidate",
     "PageLevelSummary",
+    "PythonCheckOutput",
     "RecCategory",
     "RecPriority",
     "Recommendation",
@@ -49,5 +55,7 @@ __all__ = [
     "ReviewStatus",
     "SkipReason",
     "UserStatus",
+    "enrich_with_llm",
     "run_python_checks",
+    "run_python_checks_with_findings",
 ]

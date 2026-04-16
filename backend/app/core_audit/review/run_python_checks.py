@@ -34,12 +34,30 @@ from app.core_audit.review.composer import compose
 from app.core_audit.review.dto import PageLevelSummary, ReviewInput, ReviewResult
 from app.core_audit.review.enums import ReviewStatus
 from app.core_audit.review.findings import CheckFinding, FindingStatus
+from typing import NamedTuple
+
+
+class PythonCheckOutput(NamedTuple):
+    """Dual output — ReviewResult plus the raw findings list for Step 4."""
+    result: ReviewResult
+    findings: list[CheckFinding]
 
 REVIEWER_MODEL = "python-only"
 REVIEWER_VERSION = "1.0.0"
 
 
 def run_python_checks(ri: ReviewInput, profile: SiteProfile) -> ReviewResult:
+    """Convenience entry point — returns ReviewResult only.
+
+    Use `run_python_checks_with_findings` when the caller (e.g. Step 4
+    LLM enricher) also needs the raw findings list for merging.
+    """
+    return run_python_checks_with_findings(ri, profile).result
+
+
+def run_python_checks_with_findings(
+    ri: ReviewInput, profile: SiteProfile,
+) -> PythonCheckOutput:
     t0 = time.monotonic()
     all_findings: list[CheckFinding] = []
     merged_stats: dict = {}
@@ -62,7 +80,7 @@ def run_python_checks(ri: ReviewInput, profile: SiteProfile) -> ReviewResult:
     summary = _build_summary(ri, all_findings, recommendations, merged_stats)
     duration_ms = int((time.monotonic() - t0) * 1000)
 
-    return ReviewResult(
+    result = ReviewResult(
         page_id=ri.page_id,
         site_id=ri.site_id,
         target_intent=ri.target_intent,
@@ -77,6 +95,7 @@ def run_python_checks(ri: ReviewInput, profile: SiteProfile) -> ReviewResult:
         output_tokens=0,
         duration_ms=duration_ms,
     )
+    return PythonCheckOutput(result=result, findings=all_findings)
 
 
 def _build_summary(

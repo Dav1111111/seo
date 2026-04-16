@@ -78,13 +78,20 @@ class ReviewInput:
 
 @dataclass(frozen=True)
 class Recommendation:
-    """Single actionable finding. One Recommendation → one DB row."""
+    """Single actionable finding. One Recommendation → one DB row.
+
+    `source_finding_id` is an in-memory identity key tying this rec back
+    to the structured CheckFinding that produced it. Used by the LLM
+    enrichment layer to merge `after_text`/`reasoning_ru` overrides.
+    Not persisted — reviewer extracts category/priority/text only.
+    """
     category: RecCategory
     priority: RecPriority
     reasoning_ru: str
     before: str | None = None
     after: str | None = None
     estimated_impact: dict | None = None
+    source_finding_id: str | None = None
 
 
 @dataclass(frozen=True)
