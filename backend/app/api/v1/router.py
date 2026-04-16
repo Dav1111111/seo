@@ -9,6 +9,7 @@ from app.api.v1.tasks import router as tasks_router
 from app.api.v1.agent_status import router as agent_status_router
 from app.api.v1.fingerprint import router as fingerprint_router
 from app.api.v1.intent import router as intent_router
+from app.api.v1.review import router as review_router
 
 v1_router = APIRouter()
 v1_router.include_router(health_router, tags=["health"])
@@ -21,3 +22,4 @@ v1_router.include_router(tasks_router, tags=["tasks"])
 v1_router.include_router(agent_status_router, tags=["agent-status"])
 v1_router.include_router(fingerprint_router, tags=["fingerprint"])
 v1_router.include_router(intent_router, tags=["intent"])
+v1_router.include_router(review_router, tags=["review"])

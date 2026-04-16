@@ -68,6 +68,14 @@ celery_app.conf.beat_schedule = {
         "task": "run_query_strategic_all",
         "schedule": crontab(hour=6, minute=30, day_of_week=1),
     },
+    # Module 3 — Page Review (runs 45min after intent_decide to let decisions settle)
+    "review-sites-nightly": {
+        "task": "review_all_nightly",
+        "schedule": crontab(hour=4, minute=45),
+    },
 }
 
-celery_app.autodiscover_tasks(["app.collectors", "app.agents", "app.fingerprint", "app.intent"])
+celery_app.autodiscover_tasks([
+    "app.collectors", "app.agents", "app.fingerprint", "app.intent",
+    "app.core_audit.review",
+])
