@@ -9,7 +9,6 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.workers.celery_app import celery_app
-from app.database import async_session
 from app.models.site import Site
 
 logger = logging.getLogger(__name__)
@@ -23,6 +22,14 @@ def _run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+def _make_session():
+    """Create an isolated async session for Celery tasks."""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app.config import settings
+    eng = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=0)
+    return async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
 
 
 async def _run_agent_for_site(agent_name: str, site_id: UUID, trigger: str) -> dict:
@@ -41,7 +48,8 @@ async def _run_agent_for_site(agent_name: str, site_id: UUID, trigger: str) -> d
     if not cls:
         return {"error": f"Unknown agent: {agent_name}"}
 
-    async with async_session() as db:
+    session_factory = _make_session()
+    async with session_factory() as db:
         agent = cls()
         result = await agent.run(db, site_id, trigger=trigger)
         await db.commit()
@@ -56,7 +64,8 @@ async def _run_agent_for_site(agent_name: str, site_id: UUID, trigger: str) -> d
 
 
 async def _get_active_site_ids() -> list[UUID]:
-    async with async_session() as db:
+    session_factory = _make_session()
+    async with session_factory() as db:
         rows = await db.execute(select(Site.id).where(Site.is_active == True))  # noqa: E712
         return [r[0] for r in rows]
 
@@ -100,7 +109,8 @@ def run_agent_for_site(agent_name: str, site_id: str, trigger: str = "manual"):
 async def _pipeline_for_site(site_id: str, trigger: str) -> dict:
     from app.services.issue_pipeline import IssuePipeline
     pipeline = IssuePipeline()
-    async with async_session() as db:
+    session_factory = _make_session()
+    async with session_factory() as db:
         return await pipeline.run(db, UUID(site_id), trigger=trigger)
 
 
@@ -130,7 +140,8 @@ def run_daily_pipeline_all(self):
 async def _cluster_queries_for_site(site_id: UUID, force: bool = False) -> dict:
     from app.agents.query_clustering import QueryClusteringAgent
     agent = QueryClusteringAgent()
-    async with async_session() as db:
+    session_factory = _make_session()
+    async with session_factory() as db:
         result = await agent.run(db, site_id, force_recluster=force)
         await db.commit()
         return result

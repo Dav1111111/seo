@@ -28,6 +28,14 @@ def _run_async(coro):
         loop.close()
 
 
+def _make_session():
+    """Create an isolated async session for Celery tasks (avoids shared engine conflicts)."""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app.config import settings
+    eng = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=0)
+    return async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
+
+
 async def _collect_webmaster_for_site(site: dict) -> dict:
     """Collect Webmaster data for a single site."""
     collector = WebmasterCollector(
@@ -35,8 +43,9 @@ async def _collect_webmaster_for_site(site: dict) -> dict:
         user_id=site["webmaster_user_id"],
         host_id=site["yandex_webmaster_host_id"],
     )
+    session_factory = _make_session()
     try:
-        async with async_session() as db:
+        async with session_factory() as db:
             result = await collector.collect_and_store(db, site["id"], days_back=7)
         return result
     finally:
@@ -52,8 +61,9 @@ async def _collect_metrica_for_site(site: dict) -> dict:
         oauth_token=site["yandex_oauth_token"],
         counter_id=site["yandex_metrica_counter_id"],
     )
+    session_factory = _make_session()
     try:
-        async with async_session() as db:
+        async with session_factory() as db:
             result = await collector.collect_and_store(db, site["id"], days_back=7)
         return result
     finally:
@@ -64,7 +74,8 @@ async def _get_active_sites() -> list[dict]:
     """Get all active sites with their credentials."""
     from app.config import settings
 
-    async with async_session() as db:
+    session_factory = _make_session()
+    async with session_factory() as db:
         result = await db.execute(
             select(Site).where(Site.is_active == True)  # noqa: E712
         )
@@ -130,7 +141,8 @@ def collect_site_webmaster(site_id: str):
     from app.config import settings
 
     async def _run():
-        async with async_session() as db:
+        session_factory = _make_session()
+        async with session_factory() as db:
             result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
             site = result.scalar_one_or_none()
             if not site:
@@ -155,7 +167,8 @@ def collect_site_metrica(site_id: str):
     from app.config import settings
 
     async def _run():
-        async with async_session() as db:
+        session_factory = _make_session()
+        async with session_factory() as db:
             result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
             site = result.scalar_one_or_none()
             if not site:
