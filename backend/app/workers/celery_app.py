@@ -73,9 +73,14 @@ celery_app.conf.beat_schedule = {
         "task": "review_all_nightly",
         "schedule": crontab(hour=4, minute=45),
     },
+    # Module 5 — Weekly SEO Report (Mondays 07:00 UTC / 10:00 MSK)
+    "reports-weekly-monday": {
+        "task": "report_build_all_weekly",
+        "schedule": crontab(hour=7, minute=0, day_of_week=1),
+    },
 }
 
 celery_app.autodiscover_tasks([
     "app.collectors", "app.agents", "app.fingerprint", "app.intent",
-    "app.core_audit.review", "app.core_audit.priority",
+    "app.core_audit.review", "app.core_audit.priority", "app.core_audit.report",
 ])
