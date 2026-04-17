@@ -82,11 +82,11 @@ class Decisioner:
         decisions_by_action = {a: 0 for a in ["create", "strengthen", "merge", "split", "leave", "block_create"]}
 
         for report in reports:
+            # Phase 1: compute decision
             try:
                 decision = await tree.decide(db, report, site_id)
             except Exception as exc:
                 logger.warning("decide failed for intent %s: %s", report.intent_code.value, exc)
-                # Rollback failed transaction
                 try:
                     await db.rollback()
                 except Exception:
@@ -95,7 +95,8 @@ class Decisioner:
 
             decisions_by_action[decision.action.value] = decisions_by_action.get(decision.action.value, 0) + 1
 
-                # Persist
+            # Phase 2: build evidence + persist
+            try:
                 evidence_dict: dict = {}
                 if decision.standalone_test:
                     evidence_dict["standalone_test"] = {
