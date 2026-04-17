@@ -163,8 +163,12 @@ def collect_site_webmaster(site_id: str):
 
 @celery_app.task(name="crawl_site")
 def crawl_site(site_id: str):
-    """Crawl a site — fetch sitemap + all pages, extract SEO data."""
+    """Crawl a site — fetch sitemap + all pages, extract SEO data.
+
+    After crawl completes, automatically chains fingerprint_site with 10s countdown.
+    """
     from app.collectors.site_crawler import SiteCrawler
+    from app.fingerprint.tasks import fingerprint_site
 
     async def _run():
         session_factory = _make_session()
@@ -180,7 +184,14 @@ def crawl_site(site_id: str):
             crawler = SiteCrawler(domain=domain, base_url=base_url, max_pages=50)
             return await crawler.crawl_and_store(db, site.id)
 
-    return _run_async(_run())
+    result = _run_async(_run())
+
+    # Chain fingerprinting after successful crawl
+    if isinstance(result, dict) and "error" not in result:
+        fingerprint_site.apply_async(args=[site_id], countdown=10)
+        result["fingerprint_queued"] = True
+
+    return result
 
 
 @celery_app.task(name="collect_site_metrica")

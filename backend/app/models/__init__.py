@@ -9,8 +9,10 @@ from app.models.agent_run import AgentRun
 from app.models.task import Task
 from app.models.snapshot import Snapshot
 from app.models.seasonality import SeasonalityPattern
+from app.fingerprint.models import PageFingerprint
 
 __all__ = [
     "Tenant", "Site", "Page", "SearchQuery", "DailyMetric",
     "Issue", "Alert", "AgentRun", "Task", "Snapshot", "SeasonalityPattern",
+    "PageFingerprint",
 ]

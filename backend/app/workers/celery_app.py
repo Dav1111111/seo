@@ -38,6 +38,16 @@ celery_app.conf.beat_schedule = {
         "task": "run_technical_indexing_all",
         "schedule": crontab(hour=5, minute=15),  # 08:15 MSK
     },
+    # Fingerprinting — daily 03:00 UTC (06:00 MSK, before data collection)
+    "fingerprint-all-daily": {
+        "task": "fingerprint_all_sites",
+        "schedule": crontab(hour=3, minute=0),
+    },
+    # Fingerprint GC — weekly Sunday 03:30 UTC
+    "fingerprint-gc-weekly": {
+        "task": "fingerprint_gc_stale",
+        "schedule": crontab(hour=3, minute=30, day_of_week=0),
+    },
     # Query clustering (weekly, Monday 09:00 MSK)
     "cluster-queries-weekly": {
         "task": "run_query_clustering_all",
@@ -55,4 +65,4 @@ celery_app.conf.beat_schedule = {
     },
 }
 
-celery_app.autodiscover_tasks(["app.collectors", "app.agents"])
+celery_app.autodiscover_tasks(["app.collectors", "app.agents", "app.fingerprint"])
