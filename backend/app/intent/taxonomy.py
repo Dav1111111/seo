@@ -42,6 +42,12 @@ INTENT_DEFINITIONS: list[IntentDefinition] = [
         rules=[
             IntentRule(re.compile(r"\b(забронир|заказать|оформить|купить\s*тур|купить\s*экскурс)\w*", _RE_FLAGS), 0.95),
             IntentRule(re.compile(r"\bстоимост\w*|сколько\s+стоит", _RE_FLAGS), 0.80),
+            # Standalone "купить" — commercial intent even without "тур"/"экскурсию"
+            IntentRule(re.compile(r"\bкупить\b", _RE_FLAGS), 0.80),
+            # "заказ" / "заказать"
+            IntentRule(re.compile(r"\bзаказ(ать|а|ы)?\b", _RE_FLAGS), 0.75),
+            # Price signals: "цена", "цены", "прайс"
+            IntentRule(re.compile(r"\b(цен[аы]|прайс)\b", _RE_FLAGS), 0.75),
         ],
         required_affordances=["booking_form", "price_visible", "phone_cta"],
         examples=["забронировать тур в абхазию", "купить экскурсию на 33 водопада", "сколько стоит красная поляна"],
@@ -115,6 +121,11 @@ INTENT_DEFINITIONS: list[IntentDefinition] = [
                 re.compile(r"\b(экскурс|тур)\w*.{0,40}\b(с\s+детьми|недорог\w*|на\s+\d+\s+(день|дня|дней)|групп\w*|индивидуальн\w*|с\s+трансфером)\b", _RE_FLAGS),
                 0.85,
             ),
+            # Discounts / promo signals — "скидка", "акция", "промокод"
+            IntentRule(
+                re.compile(r"\b(скидк\w*|акци[яию]|промокод\w*)\b", _RE_FLAGS),
+                0.70,
+            ),
         ],
         required_affordances=["filtered_listing", "modifier_in_h1"],
         examples=[
@@ -169,10 +180,10 @@ INTENT_DEFINITIONS: list[IntentDefinition] = [
         code=IntentCode.COMM_CATEGORY,
         description_ru="Общий коммерческий запрос: «{услуга} {место}» без модификатора",
         rules=[
-            # "экскурсии в сочи", "туры абхазия" — простые
+            # "экскурсии в сочи", "туры абхазия" — простые (substring match, no full-line anchors)
             IntentRule(
                 re.compile(
-                    r"^\s*(экскурс|тур|джиппинг|морские\s+прогулки)\w*\s+(в|по|из)?\s*(сочи|абхази|красная\s+поляна|адлер)\w*\s*$",
+                    r"\b(экскурс|тур|джиппинг|морские\s+прогулки)\w*\s+(в|по|из)?\s*(сочи|абхази|красная\s+поляна|адлер)\w*",
                     _RE_FLAGS,
                 ),
                 0.85,
@@ -183,13 +194,16 @@ INTENT_DEFINITIONS: list[IntentDefinition] = [
     ),
 
     # TRANS_BRAND — проверяется через site_domain/brand в classifier
-    # (rules здесь пустые — brand detection отдельно)
+    # Regex rules catch explicit nav signals; brand token detection is separate.
     IntentDefinition(
         code=IntentCode.TRANS_BRAND,
         description_ru="Брендовый запрос (содержит имя компании)",
-        rules=[],
+        rules=[
+            # "официальный сайт" — явный навигационный сигнал к бренду
+            IntentRule(re.compile(r"\bофициальн\w+\s+сайт\w*", _RE_FLAGS), 0.85),
+        ],
         required_affordances=["brand_homepage", "contact_info"],
-        examples=["южный континент сочи", "grand tour spirit"],
+        examples=["южный континент сочи", "grand tour spirit", "южный континент официальный сайт"],
     ),
 ]
 

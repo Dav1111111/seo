@@ -2,6 +2,16 @@
 
 Convention: all functions are async, first arg is AsyncSession.
 Similarity primitives are sync (pure bytes → number).
+
+Hybrid similarity weights (roadmap Phase 1D spec):
+    MinHash = 0.2, ngram = 0.3, embeddings = 0.5.
+
+Embeddings are not yet implemented, so when they are absent we renormalize
+the two available components (MinHash + ngram) so their weights sum to 1.0:
+    0.2 / (0.2 + 0.3) = 0.4   for MinHash
+    0.3 / (0.2 + 0.3) = 0.6   for ngram
+Once embeddings land, the full 0.2/0.3/0.5 blend kicks in automatically —
+do NOT hardcode 0.4/0.6; they are derived from MINHASH_WEIGHT/NGRAM_WEIGHT.
 """
 
 from __future__ import annotations
@@ -23,6 +33,12 @@ from app.fingerprint.minhash import jaccard as minhash_jaccard
 from app.fingerprint.models import PageFingerprint
 from app.fingerprint.ngrams import cosine as ngram_cosine_fn
 from app.models.page import Page
+
+
+# Hybrid similarity weights — see module docstring for renormalization rule.
+MINHASH_WEIGHT: float = 0.2
+NGRAM_WEIGHT: float = 0.3
+EMBEDDING_WEIGHT: float = 0.5
 
 
 async def get_fingerprint(db: AsyncSession, page_id: UUID) -> PageFingerprint | None:
@@ -139,8 +155,11 @@ async def find_similar_pages(
         elif algorithm == "ngram":
             score = c if c is not None else 0.0
         else:  # hybrid
+            # Embeddings (Phase 1D) not yet available → renormalize MinHash+ngram
+            # to sum to 1.0. See module docstring for derivation.
             if j is not None and c is not None:
-                score = 0.5 * j + 0.5 * c
+                total = MINHASH_WEIGHT + NGRAM_WEIGHT
+                score = (MINHASH_WEIGHT / total) * j + (NGRAM_WEIGHT / total) * c
             elif j is not None:
                 score = j
             elif c is not None:
@@ -178,10 +197,17 @@ def compute_ngram_cosine(vec_a: bytes, vec_b: bytes) -> float:
 
 
 async def invalidate_fingerprint(db: AsyncSession, page_id: UUID) -> None:
-    """Mark fingerprint as invalid so next run recomputes (sets content_hash to empty)."""
+    """Mark fingerprint as invalid so next run recomputes.
+
+    Clears content_hash AND resets status to `pending` so that
+    `find_similar_pages` / `find_exact_duplicates` (which filter by
+    status == fingerprinted) won't surface a stale/empty row as a
+    candidate and produce false positives.
+    """
     fp = await get_fingerprint(db, page_id)
     if fp:
         fp.content_hash = ""
+        fp.status = FingerprintStatus.pending.value
         await db.flush()
 
 

@@ -106,14 +106,22 @@ class Decisioner:
                         "reasoning": decision.standalone_test.reasoning,
                     }
                 if decision.safety_verdict:
+                    safety_warnings = [
+                        {"reason": w.reason, "evidence": w.evidence}
+                        for w in decision.safety_verdict.warnings
+                    ]
                     evidence_dict["safety"] = {
                         "safe_to_create": decision.safety_verdict.safe_to_create,
                         "blocks": [
                             {"reason": b.reason, "evidence": b.evidence}
                             for b in decision.safety_verdict.blocks
                         ],
+                        "warnings": safety_warnings,
                         "alternative_action": decision.safety_verdict.alternative_action,
                     }
+                    evidence_dict["safety_warnings"] = safety_warnings
+                if decision.evidence:
+                    evidence_dict["decision_reasoning"] = decision.evidence
                 evidence_dict["top_queries"] = report.top_queries
                 evidence_dict["best_page_score"] = report.best_page_score
                 evidence_dict["proposed"] = {

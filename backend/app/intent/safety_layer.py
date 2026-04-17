@@ -260,6 +260,13 @@ async def run_safety_checks(
         blocks.append(r)
         if not alternative_action:
             alternative_action = "REVIEW_URL_PATTERN"
+    elif r.reason == "many_siblings_exists":
+        sibling_count = r.evidence.get("sibling_count", 0)
+        warnings.append(CheckResult(
+            passed=True,
+            reason=f"doorway_risk: {sibling_count} similar sibling pages detected",
+            evidence=r.evidence,
+        ))
 
     # Check 3 — Cannibalization
     r = await check_cannibalization(db, proposed_intent, site_id)
@@ -268,6 +275,18 @@ async def run_safety_checks(
         if not alternative_action:
             alternative_action = "STRENGTHEN"
             alternative_url = r.evidence.get("existing_url")
+    else:
+        existing_score = r.evidence.get("best_existing_score", 0.0) or 0.0
+        if existing_score >= 2.0:
+            warnings.append(CheckResult(
+                passed=True,
+                reason=(
+                    f"cannibalization_risk: existing page scores {existing_score:.2f} "
+                    f"for {proposed_intent.value} (below block threshold "
+                    f"{INTENT_OVERLAP_THRESHOLD} but non-trivial overlap)"
+                ),
+                evidence=r.evidence,
+            ))
 
     # Check 4 — Thin content
     r = await check_thin_content_forecast(
@@ -279,6 +298,36 @@ async def run_safety_checks(
         blocks.append(r)
         if not alternative_action:
             alternative_action = "LEAVE"
+    else:
+        # Borderline-thin forecast: not a hard block, but worth surfacing
+        if proposed_intent in (
+            IntentCode.TRANS_BOOK,
+            IntentCode.COMM_MODIFIED,
+            IntentCode.COMM_CATEGORY,
+            IntentCode.LOCAL_GEO,
+        ):
+            if query_volume_14d < 30 and queries_in_cluster < 5:
+                warnings.append(CheckResult(
+                    passed=True,
+                    reason=(
+                        f"thin_content_forecast: only {queries_in_cluster} queries / "
+                        f"{query_volume_14d} impressions in 14d for commercial niche"
+                    ),
+                    evidence={
+                        "impressions_14d": query_volume_14d,
+                        "queries": queries_in_cluster,
+                    },
+                ))
+        else:
+            if queries_in_cluster < 8:
+                warnings.append(CheckResult(
+                    passed=True,
+                    reason=(
+                        f"thin_content_forecast: only {queries_in_cluster} queries "
+                        f"in informational cluster"
+                    ),
+                    evidence={"queries": queries_in_cluster},
+                ))
 
     return SafetyVerdict(
         safe_to_create=len(blocks) == 0,

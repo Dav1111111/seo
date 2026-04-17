@@ -265,6 +265,44 @@ class DecisionTree:
                 safety_verdict=safety,
             )
 
+        # ── Q7: родительская COMM_CATEGORY, способная поглотить подраздел ──
+        if intent == IntentCode.COMM_MODIFIED:
+            parent = await self._find_parent_category(db, site_id)
+            if parent is not None:
+                parent_page_id, parent_url, parent_score = parent
+                base_justification = (
+                    f"Интент «{intent.value}» не покрыт и прошёл все проверки: "
+                    f"Standalone Value Test {standalone_result.passed_count}"
+                    f"/{standalone_result.applicable_count}, safety layer пропустил."
+                )
+                return DecisionOutput(
+                    intent_code=intent,
+                    cluster_key=cluster_key,
+                    action=CoverageAction.strengthen,
+                    justification_ru=(
+                        f"{base_justification} parent category found: {parent_url}"
+                    ),
+                    target_page_id=parent_page_id,
+                    target_page_url=parent_url,
+                    proposed_title=proposed_title,
+                    proposed_url=proposed_url,
+                    queries_count=report.queries_count,
+                    total_impressions=report.total_impressions_14d,
+                    standalone_test=standalone_result,
+                    safety_verdict=safety,
+                    evidence={
+                        "q7_parent_override": True,
+                        "parent_page_id": str(parent_page_id),
+                        "parent_url": parent_url,
+                        "parent_score": round(parent_score, 2),
+                        "reasoning": (
+                            "Q7: родительская COMM_CATEGORY страница со score "
+                            f"{parent_score:.2f} способна поглотить подраздел — "
+                            "усиление родителя эффективнее создания дочерней."
+                        ),
+                    },
+                )
+
         # ── All gates passed → CREATE ────────────────────────────────
         return DecisionOutput(
             intent_code=intent,
@@ -326,6 +364,27 @@ class DecisionTree:
         stages.add(target_intent.funnel_stage)
 
         return strong_others >= 2 and len(stages) >= 2
+
+    async def _find_parent_category(
+        self, db: AsyncSession, site_id: UUID
+    ) -> tuple[UUID, str, float] | None:
+        """Find a COMM_CATEGORY page on the site with score ≥ WEAK_SCORE_MIN."""
+        rows = await db.execute(
+            select(PageIntentScore.page_id, PageIntentScore.score, Page.url)
+            .join(Page, Page.id == PageIntentScore.page_id)
+            .where(
+                PageIntentScore.site_id == site_id,
+                PageIntentScore.intent_code == IntentCode.COMM_CATEGORY.value,
+                PageIntentScore.score >= WEAK_SCORE_MIN,
+            )
+            .order_by(PageIntentScore.score.desc())
+            .limit(1)
+        )
+        row = rows.first()
+        if not row:
+            return None
+        page_id, score, url = row
+        return page_id, url, score
 
     def _propose_title(self, intent: IntentCode, report: IntentClusterReport) -> str:
         """Generate a placeholder title for the standalone test."""

@@ -41,7 +41,8 @@ def normalize_url(url: str) -> str:
     """Deterministic URL normalization.
 
     - NFKC on host
-    - lowercase scheme and host
+    - lowercase scheme, host, and path (case-insensitive servers treat
+      /Hotel and /hotel as the same resource; query values are left as-is)
     - drop fragment
     - drop tracking params (utm_*, fbclid, gclid, yclid, etc.)
     - strip trailing slash (except root)
@@ -53,7 +54,7 @@ def normalize_url(url: str) -> str:
 
     scheme = parsed.scheme.lower() or "https"
     netloc = unicodedata.normalize("NFKC", parsed.netloc).lower()
-    path = parsed.path or "/"
+    path = (parsed.path or "/").lower()
 
     # Drop trailing slash except root
     if len(path) > 1 and path.endswith("/"):

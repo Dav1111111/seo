@@ -41,22 +41,32 @@ BRAND_TOKENS: dict[str, set[str]] = {
 def detect_brand(query: str, known_brands: list[str] | None = None) -> bool:
     """Detect if query contains a brand token.
 
+    Short tokens (<=3 chars) are matched with word boundaries to avoid
+    matching substrings like "ук" inside "рука" or "наука". Longer tokens
+    also use word boundaries for safety. Per-site ``known_brands`` are used
+    IN ADDITION to the global BRAND_TOKENS.
+
     Args:
         query: normalized query text (lowercase expected)
-        known_brands: site-specific brand tokens. If None, uses global BRAND_TOKENS.
+        known_brands: site-specific brand tokens, combined with global.
     """
     q = query.lower().strip()
     tokens_to_check: set[str] = set()
+    # Global brand tokens — always included
+    for tokens in BRAND_TOKENS.values():
+        for t in tokens:
+            tokens_to_check.add(t.lower())
+    # Per-site brand tokens — added on top of global
     if known_brands:
         for b in known_brands:
             tokens_to_check.add(b.lower())
-    else:
-        for tokens in BRAND_TOKENS.values():
-            for t in tokens:
-                tokens_to_check.add(t.lower())
 
     for token in tokens_to_check:
-        if token in q:
+        if not token:
+            continue
+        # Word-boundary match for all tokens (critical for short ones like "ук")
+        pattern = r"(?<!\w)" + re.escape(token) + r"(?!\w)"
+        if re.search(pattern, q, flags=re.IGNORECASE | re.UNICODE):
             return True
     return False
 
