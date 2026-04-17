@@ -156,20 +156,19 @@ async def check_c5_long_term_demand(
     cutoff = today - timedelta(days=min_days_active + 5)
 
     # Count distinct weeks with impressions
-    # Use date_trunc('week', date) for bucketing
+    wk_expr = func.date_trunc("week", DailyMetric.date)
     rows = await db.execute(
         select(
-            func.date_trunc("week", DailyMetric.date).label("wk"),
+            wk_expr.label("wk"),
             func.sum(DailyMetric.impressions).label("imp"),
         )
-        .join(SearchQuery, SearchQuery.id == DailyMetric.dimension_id)
         .where(
             DailyMetric.site_id == site_id,
             DailyMetric.metric_type == "query_performance",
             DailyMetric.date >= cutoff,
         )
-        .group_by(func.date_trunc("week", DailyMetric.date))
-        .order_by(func.date_trunc("week", DailyMetric.date))
+        .group_by(wk_expr)
+        .order_by(wk_expr)
     )
     weeks_with_impressions = sum(1 for wk, imp in rows if imp and imp > 0)
 

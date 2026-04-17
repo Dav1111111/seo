@@ -77,13 +77,23 @@ class Decisioner:
                 delete(CoverageDecision)
                 .where(CoverageDecision.site_id == site_id, CoverageDecision.status == "open")
             )
+            await db.commit()
 
         decisions_by_action = {a: 0 for a in ["create", "strengthen", "merge", "split", "leave", "block_create"]}
 
         for report in reports:
             try:
                 decision = await tree.decide(db, report, site_id)
-                decisions_by_action[decision.action.value] = decisions_by_action.get(decision.action.value, 0) + 1
+            except Exception as exc:
+                logger.warning("decide failed for intent %s: %s", report.intent_code.value, exc)
+                # Rollback failed transaction
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                continue
+
+            decisions_by_action[decision.action.value] = decisions_by_action.get(decision.action.value, 0) + 1
 
                 # Persist
                 evidence_dict: dict = {}
@@ -127,10 +137,13 @@ class Decisioner:
                     decided_at=now,
                 )
                 db.add(new_row)
+                await db.commit()
             except Exception as exc:
-                logger.warning("decision failed for intent %s: %s", report.intent_code.value, exc)
-
-        await db.commit()
+                logger.warning("persist failed for intent %s: %s", report.intent_code.value, exc)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
         stats["decisions_by_action"] = decisions_by_action
         stats["duration_ms"] = int((time.monotonic() - t0) * 1000)
         logger.info("decisioner done site=%s stats=%s", site_id, stats)
