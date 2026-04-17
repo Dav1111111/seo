@@ -184,7 +184,7 @@ class TaskGeneratorAgent:
             )
             .group_by(SearchQuery.id, SearchQuery.query_text, SearchQuery.cluster)
             .order_by(func.sum(DailyMetric.impressions).desc())
-            .limit(50)
+            .limit(25)
         )
         queries = [dict(r._mapping) for r in queries_rows]
 
@@ -288,7 +288,7 @@ class TaskGeneratorAgent:
             f"ЗАПРОСЫ ({len(context.get('queries', []))} топ-запросов):",
             "запрос | кластер | показы | клики | CTR% | позиция",
         ]
-        for q in context.get("queries", [])[:40]:
+        for q in context.get("queries", [])[:20]:
             imp = int(q.get("impressions") or 0)
             clk = int(q.get("clicks") or 0)
             ctr = round(clk / imp * 100, 1) if imp > 0 else 0
@@ -297,7 +297,7 @@ class TaskGeneratorAgent:
             lines.append(f"  {q['query_text']} | {cluster} | {imp} | {clk} | {ctr}% | {pos}")
 
         lines += ["", f"КЛАСТЕРЫ ({len(context.get('clusters', []))}):"]
-        for c in context.get("clusters", [])[:20]:
+        for c in context.get("clusters", [])[:10]:
             lines.append(
                 f"  {c['cluster']}: {c['count']} запросов, "
                 f"{int(c.get('impressions') or 0)} показов, "
@@ -305,17 +305,12 @@ class TaskGeneratorAgent:
             )
 
         lines += ["", f"СТРАНИЦЫ САЙТА ({len(context.get('pages', []))} проиндексированных):"]
-        for p in context.get("pages", [])[:30]:
+        for p in context.get("pages", [])[:15]:
             wc = p.get("word_count") or 0
             schema = "✓" if p.get("has_schema") else "✗"
-            title = (p.get("title") or "НЕТ TITLE")[:80]
-            desc = (p.get("meta_description") or "НЕТ DESCRIPTION")[:80]
-            h1 = (p.get("h1") or "НЕТ H1")[:80]
-            lines.append(f"  URL: {p['url']}")
-            lines.append(f"    Title: {title}")
-            lines.append(f"    Desc:  {desc}")
-            lines.append(f"    H1:    {h1}")
-            lines.append(f"    Слов: {wc} | Schema: {schema}")
+            title = (p.get("title") or "НЕТ")[:60]
+            desc = (p.get("meta_description") or "НЕТ")[:60]
+            lines.append(f"  {p['path']} | title: {title} | desc: {desc} | слов: {wc} schema:{schema}")
 
         lines += [
             "",
@@ -362,7 +357,7 @@ class TaskGeneratorAgent:
                 system=system,
                 user_message=user_msg,
                 tool=TASK_GENERATION_TOOL,
-                max_tokens=4096,
+                max_tokens=3000,
             )
         except Exception as exc:
             logger.error(f"TaskGenerator LLM call failed: {exc}")
