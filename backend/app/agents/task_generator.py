@@ -1,25 +1,16 @@
 """
-Task Generator Agent — the core of the "professional SEO agent".
+Task Generator Agent — profesional SEO agent that creates concrete tasks.
 
-Takes ALL available data:
-- Queries with positions, impressions, clicks, clusters
-- Site pages with current titles, H1s, meta descriptions, content
-- Competitor top-10 data (optional, if available)
+NEW APPROACH: Instead of one big LLM call that times out on Vercel proxy,
+we use a heuristic layer (pure Python) to identify opportunities,
+then small per-task LLM calls (3-5s each) to generate the ready content.
 
-Produces concrete SEO tasks with READY-TO-USE content:
-- New title/description for specific pages
-- Article drafts for new blog posts
-- FAQ blocks
-- Schema.org markup
-- Content additions
-
-Each task has priority, estimated impact, and actionable content.
+This is more reliable and produces better-quality content per task.
 """
 
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select, func
@@ -35,138 +26,81 @@ from app.models.task import Task
 
 logger = logging.getLogger(__name__)
 
+# Expected CTR by position (industry benchmark)
+EXPECTED_CTR = {
+    1: 0.28, 2: 0.15, 3: 0.11, 4: 0.08, 5: 0.07,
+    6: 0.05, 7: 0.04, 8: 0.03, 9: 0.03, 10: 0.02,
+}
 
-TASK_GENERATION_TOOL = {
-    "name": "create_seo_tasks",
-    "description": (
-        "Generate a list of concrete SEO tasks with ready-to-use content. "
-        "Each task must have a specific action, target page/query, and generated content "
-        "that the user can copy-paste directly."
-    ),
+# Small per-task content generation tool (fast, focused)
+META_TOOL = {
+    "name": "generate_meta",
+    "description": "Generate optimized title and meta description for a page.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "tasks": {
+            "new_title": {
+                "type": "string",
+                "description": "SEO-optimized title, 50-70 chars, with keyword + price/year",
+            },
+            "new_description": {
+                "type": "string",
+                "description": "Meta description, 140-160 chars, selling, with UTP + CTA",
+            },
+            "new_h1": {
+                "type": "string",
+                "description": "H1 heading, natural with main query",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "Brief explanation (1-2 sentences) why this improves SEO",
+            },
+        },
+        "required": ["new_title", "new_description", "new_h1"],
+    },
+}
+
+FAQ_TOOL = {
+    "name": "generate_faq",
+    "description": "Generate FAQ block for a tourism page.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "items": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "task_type": {
-                            "type": "string",
-                            "enum": [
-                                "meta_rewrite",        # rewrite title+description for existing page
-                                "new_page",            # create new landing/hub page
-                                "new_article",         # write new blog article
-                                "content_expansion",   # add content to thin page
-                                "schema_add",          # add Schema.org markup
-                                "faq_add",             # add FAQ block
-                                "internal_linking",    # fix/add internal links
-                                "h1_rewrite",          # improve H1
-                            ],
-                        },
-                        "priority": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 100,
-                            "description": "1-100, higher = more important (based on traffic potential)",
-                        },
-                        "estimated_impact": {
-                            "type": "string",
-                            "enum": ["high", "medium", "low"],
-                        },
-                        "estimated_effort": {
-                            "type": "string",
-                            "enum": ["XS", "S", "M", "L", "XL"],
-                            "description": "XS=15min, S=1h, M=half-day, L=day, XL=week",
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Task title — concrete, actionable (max 200 chars)",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "What to do and why. 2-4 sentences, plain Russian.",
-                        },
-                        "target_query": {
-                            "type": "string",
-                            "description": "Main search query this task targets (optional)",
-                        },
-                        "target_cluster": {
-                            "type": "string",
-                            "description": "Cluster this task targets (optional)",
-                        },
-                        "target_page_url": {
-                            "type": "string",
-                            "description": "URL of page to modify, or proposed URL for new page",
-                        },
-                        "generated_content": {
-                            "type": "object",
-                            "description": "Ready-to-paste content (varies by task_type)",
-                            "properties": {
-                                "new_title": {"type": "string"},
-                                "new_description": {"type": "string"},
-                                "new_h1": {"type": "string"},
-                                "article_outline": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "For new_article: H2 section headings",
-                                },
-                                "article_intro": {
-                                    "type": "string",
-                                    "description": "For new_article: opening paragraph",
-                                },
-                                "faq_items": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "question": {"type": "string"},
-                                            "answer": {"type": "string"},
-                                        },
-                                    },
-                                },
-                                "schema_type": {
-                                    "type": "string",
-                                    "description": "e.g. 'TouristTrip', 'Product', 'FAQPage', 'Review'",
-                                },
-                            },
-                        },
+                        "question": {"type": "string"},
+                        "answer": {"type": "string", "description": "30-60 words"},
                     },
-                    "required": [
-                        "task_type", "priority", "estimated_impact",
-                        "estimated_effort", "title", "description",
-                    ],
+                    "required": ["question", "answer"],
                 },
-            },
-            "summary": {
-                "type": "string",
-                "description": "Overall summary of generated tasks",
+                "description": "3-5 FAQ items — real tourist questions with concise answers",
             },
         },
-        "required": ["tasks", "summary"],
+        "required": ["items"],
     },
 }
 
 
 class TaskGeneratorAgent:
-    """Generates concrete, actionable SEO tasks from all available data."""
+    """Finds SEO opportunities heuristically, then generates ready content via small LLM calls."""
 
     agent_name = "task_generator"
-    model_tier = "cheap"  # Haiku — faster, fits Vercel proxy timeout. Quality is good enough for SEO tasks.
+    model_tier = "cheap"
 
-    async def load_context(self, db: AsyncSession, site_id: UUID) -> dict:
-        """Load everything the agent needs: queries, pages, clusters."""
+    async def load_data(self, db: AsyncSession, site_id: UUID) -> dict:
         today = date.today()
         end = today - timedelta(days=5)
-        start = end - timedelta(days=13)  # 2 weeks
+        start = end - timedelta(days=13)
 
-        # Site info
         site_row = await db.execute(select(Site).where(Site.id == site_id))
         site = site_row.scalar_one_or_none()
         if not site:
             return {}
 
-        # Top queries with positions (last 2 weeks)
+        # Top queries with metrics
         queries_rows = await db.execute(
             select(
                 SearchQuery.id,
@@ -184,165 +118,159 @@ class TaskGeneratorAgent:
             )
             .group_by(SearchQuery.id, SearchQuery.query_text, SearchQuery.cluster)
             .order_by(func.sum(DailyMetric.impressions).desc())
-            .limit(25)
+            .limit(30)
         )
         queries = [dict(r._mapping) for r in queries_rows]
 
-        # All pages (crawled)
-        pages_rows = await db.execute(
-            select(Page).where(Page.site_id == site_id)
-        )
+        # All pages
+        pages_rows = await db.execute(select(Page).where(Page.site_id == site_id))
         pages = pages_rows.scalars().all()
 
-        # Cluster summary
-        clusters_rows = await db.execute(
-            select(
-                SearchQuery.cluster,
-                func.count(SearchQuery.id).label("count"),
-                func.sum(DailyMetric.impressions).label("impressions"),
-                func.avg(DailyMetric.avg_position).label("avg_position"),
-            )
-            .join(DailyMetric,
-                (DailyMetric.dimension_id == SearchQuery.id)
-                & (DailyMetric.metric_type == "query_performance")
-                & (DailyMetric.date.between(start, end))
-            )
-            .where(SearchQuery.site_id == site_id, SearchQuery.cluster.isnot(None))
-            .group_by(SearchQuery.cluster)
-            .order_by(func.sum(DailyMetric.impressions).desc())
-        )
-        clusters = [dict(r._mapping) for r in clusters_rows]
-
         return {
-            "site": {
-                "domain": site.domain,
-                "display_name": site.display_name,
-                "operating_mode": site.operating_mode,
-            },
+            "site": site,
             "queries": queries,
-            "pages": [
-                {
-                    "url": p.url,
-                    "path": p.path,
-                    "title": p.title,
-                    "meta_description": p.meta_description,
-                    "h1": p.h1,
-                    "word_count": p.word_count or 0,
-                    "has_schema": p.has_schema,
-                    "content_preview": (p.content_text or "")[:500] if p.content_text else None,
-                }
-                for p in pages
-            ],
-            "clusters": clusters,
-            "period": f"{start} → {end}",
+            "pages": pages,
         }
 
-    def build_system_prompt(self, context: dict) -> str:
-        site = context.get("site", {})
-        return f"""Ты — профессиональный SEO-специалист для туристического бизнеса.
-Твоя задача — превратить данные о сайте в КОНКРЕТНЫЕ, ДЕЙСТВЕННЫЕ задачи с ГОТОВЫМ контентом.
+    def _find_opportunities(self, data: dict) -> list[dict]:
+        """Heuristic layer — finds SEO opportunities WITHOUT LLM.
 
-Сайт: {site.get('domain', '?')} ({site.get('display_name', '?')})
+        Returns list of opportunities, each with enough context for the LLM
+        to generate specific content in a tiny follow-up call.
+        """
+        opportunities: list[dict] = []
+        queries = data["queries"]
+        pages = {p.path: p for p in data["pages"]}
+        pages_by_url = {p.url: p for p in data["pages"]}
 
-ЧТО ТЫ АНАЛИЗИРУЕШЬ:
-1. Запросы, по которым сайт показывается, с позициями и показами
-2. Текущие страницы сайта с их title/meta description/H1/контентом
-3. Кластеры запросов (тематические группы)
-
-ПРИОРИТЕТЫ (от важнейшего к наименее важному):
-1. **Запросы 5-15 позиция, много показов** — можно быстро подтянуть в топ. Пиши задачу "meta_rewrite" с новым привлекательным title+description.
-2. **Запросы в топ-10, но CTR < 3%** — позиция хорошая, но кликают мало. Переписать meta description чтобы был магнит для кликов.
-3. **Кластеры без выделенной страницы** — запросы есть, отдельной страницы нет. Задача "new_page" с готовой структурой.
-4. **Тонкий контент (word_count < 500)** — добавить объём. Задача "content_expansion" с готовыми H2-секциями.
-5. **Страницы без Schema.org** — добавить разметку. Задача "schema_add" с готовым JSON-LD.
-6. **Страницы без FAQ** — добавить FAQ-блок (Яндекс любит, даёт rich snippet). Задача "faq_add" с 5-8 готовыми вопросами-ответами.
-
-ПРАВИЛА ГЕНЕРАЦИИ КОНТЕНТА (КРАТКО!):
-- Title: 50-70 символов, с ключевым словом + цена/год
-- Description: 140-160 символов, продающий, с УТП
-- H1: естественный, с основным запросом
-- Для статей: outline 4-5 коротких H2
-- Вступление статьи: 2-3 предложения (НЕ длинное!)
-- FAQ: 3-4 вопроса с КРАТКИМИ ответами (30-50 слов каждый)
-
-СТРОГОЕ ОГРАНИЧЕНИЕ: МАКСИМУМ 6 задач за раз. Лучше 6 качественных и концентрированных
-чем 15 размытых. Экономь токены — не пиши "воду".
-
-ТИПЫ ЗАДАЧ И КОГДА ИХ ВЫДАВАТЬ:
-- **meta_rewrite** — есть страница, но title/description слабые → улучшить
-- **new_page** — есть кластер запросов без посадочной страницы → создать
-- **new_article** — есть информационный запрос без статьи → написать статью в блог
-- **content_expansion** — страница с малым контентом → расширить
-- **schema_add** — страница без Schema.org → добавить разметку
-- **faq_add** — страница без FAQ → добавить блок
-
-НЕ ВЫДАВАЙ:
-- Общие советы без конкретного контента ("улучшите сайт" — нет)
-- Задачи с confidence <0.6
-- Более 6 задач за раз (максимум 6, приоритизируй лучшие)
-
-Выводи через create_seo_tasks. Контент — на русском языке."""
-
-    def build_user_message(self, context: dict) -> str:
-        lines = [
-            f"ПЕРИОД АНАЛИЗА: {context.get('period')}",
-            "",
-            f"ЗАПРОСЫ ({len(context.get('queries', []))} топ-запросов):",
-            "запрос | кластер | показы | клики | CTR% | позиция",
-        ]
-        for q in context.get("queries", [])[:20]:
+        # Opportunity 1: Queries at position 5-15 with many impressions — meta_rewrite
+        for q in queries[:20]:
+            pos = float(q.get("avg_position") or 0)
             imp = int(q.get("impressions") or 0)
-            clk = int(q.get("clicks") or 0)
-            ctr = round(clk / imp * 100, 1) if imp > 0 else 0
-            pos = round(float(q.get("avg_position") or 0), 1)
-            cluster = q.get("cluster") or "—"
-            lines.append(f"  {q['query_text']} | {cluster} | {imp} | {clk} | {ctr}% | {pos}")
+            if 5 <= pos <= 15 and imp >= 3:
+                opportunities.append({
+                    "type": "meta_rewrite",
+                    "priority": min(100, 50 + int(imp * 2) + int(15 - pos) * 2),
+                    "impact": "high" if pos <= 10 else "medium",
+                    "effort": "S",
+                    "query": q["query_text"],
+                    "cluster": q.get("cluster"),
+                    "position": pos,
+                    "impressions": imp,
+                    "clicks": int(q.get("clicks") or 0),
+                })
 
-        lines += ["", f"КЛАСТЕРЫ ({len(context.get('clusters', []))}):"]
-        for c in context.get("clusters", [])[:10]:
-            lines.append(
-                f"  {c['cluster']}: {c['count']} запросов, "
-                f"{int(c.get('impressions') or 0)} показов, "
-                f"поз. {round(float(c.get('avg_position') or 0), 1)}"
+        # Opportunity 2: Pages with thin content (< 200 words) — content_expansion
+        for page in data["pages"]:
+            wc = page.word_count or 0
+            if 0 < wc < 200 and page.http_status == 200 and not page.path.startswith("/admin"):
+                opportunities.append({
+                    "type": "content_expansion",
+                    "priority": 60,
+                    "impact": "medium",
+                    "effort": "M",
+                    "page_url": page.url,
+                    "current_title": page.title,
+                    "current_word_count": wc,
+                })
+
+        # Opportunity 3: Pages without Schema.org — schema_add
+        for page in data["pages"]:
+            if not page.has_schema and page.http_status == 200 and not page.path.startswith("/admin"):
+                opportunities.append({
+                    "type": "schema_add",
+                    "priority": 40,
+                    "impact": "medium",
+                    "effort": "S",
+                    "page_url": page.url,
+                    "page_title": page.title,
+                    "page_type": "tour" if "/tours/" in page.path else "landing",
+                })
+
+        # Opportunity 4: Tour/product pages without FAQ — faq_add
+        for page in data["pages"]:
+            path = page.path or ""
+            if ("/tours/" in path or "/excursion" in path) and page.http_status == 200:
+                content = (page.content_text or "").lower()
+                if "вопрос" not in content and "faq" not in content:
+                    opportunities.append({
+                        "type": "faq_add",
+                        "priority": 55,
+                        "impact": "medium",
+                        "effort": "M",
+                        "page_url": page.url,
+                        "page_title": page.title,
+                        "page_topic": page.h1 or page.title,
+                    })
+
+        # Sort by priority desc, dedupe by type+url
+        seen = set()
+        unique = []
+        for o in sorted(opportunities, key=lambda x: x["priority"], reverse=True):
+            key = (o["type"], o.get("page_url") or o.get("query"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(o)
+
+        return unique[:8]  # Cap at 8 tasks per run
+
+    async def _generate_meta_content(
+        self, opp: dict, site_domain: str
+    ) -> tuple[dict, dict]:
+        """Small LLM call for meta_rewrite: query + site → title/description/H1."""
+        system = """Ты SEO-копирайтер для туристического сайта. Пиши ПРОДАЮЩИЕ meta-теги на русском.
+Title 50-70 символов с ключевым словом + цена/год. Description 140-160 символов с УТП и призывом."""
+        user_msg = f"""Сайт: {site_domain}
+Запрос: "{opp['query']}"
+Позиция: {opp['position']} | Показов: {opp['impressions']} | Кликов: {opp['clicks']}
+
+Напиши новый title, description и H1 чтобы поднять позицию и CTR. Вызови generate_meta."""
+        try:
+            raw, usage = call_with_tool(
+                model_tier="cheap", system=system, user_message=user_msg,
+                tool=META_TOOL, max_tokens=800,
             )
+            return raw, usage
+        except Exception as e:
+            logger.warning(f"Meta gen failed for '{opp['query']}': {e}")
+            return {}, {"cost_usd": 0, "input_tokens": 0, "output_tokens": 0, "model": "claude-haiku-4-5-20251001"}
 
-        lines += ["", f"СТРАНИЦЫ САЙТА ({len(context.get('pages', []))} проиндексированных):"]
-        for p in context.get("pages", [])[:15]:
-            wc = p.get("word_count") or 0
-            schema = "✓" if p.get("has_schema") else "✗"
-            title = (p.get("title") or "НЕТ")[:60]
-            desc = (p.get("meta_description") or "НЕТ")[:60]
-            lines.append(f"  {p['path']} | title: {title} | desc: {desc} | слов: {wc} schema:{schema}")
+    async def _generate_faq_content(self, opp: dict, site_domain: str) -> tuple[dict, dict]:
+        """Small LLM call for FAQ: page topic → FAQ items."""
+        system = """Ты помощник для туристического сайта. Пишешь FAQ-блоки на русском.
+3-5 реальных вопросов туристов с краткими ответами (30-60 слов каждый)."""
+        user_msg = f"""Сайт: {site_domain}
+Страница: {opp['page_url']}
+Тема: {opp.get('page_topic', opp.get('page_title', ''))}
 
-        lines += [
-            "",
-            "СГЕНЕРИРУЙ SEO-ЗАДАЧИ.",
-            "Каждая задача должна иметь ГОТОВЫЙ контент который можно скопировать и вставить.",
-            "Приоритизируй по потенциалу трафика.",
-            "Вызови create_seo_tasks.",
-        ]
-        return "\n".join(lines)
+Создай FAQ-блок. Вызови generate_faq."""
+        try:
+            raw, usage = call_with_tool(
+                model_tier="cheap", system=system, user_message=user_msg,
+                tool=FAQ_TOOL, max_tokens=1500,
+            )
+            return raw, usage
+        except Exception as e:
+            logger.warning(f"FAQ gen failed for {opp['page_url']}: {e}")
+            return {}, {"cost_usd": 0, "input_tokens": 0, "output_tokens": 0, "model": "claude-haiku-4-5-20251001"}
 
     async def run(self, db: AsyncSession, site_id: UUID, trigger: str = "manual") -> dict:
-        """Generate SEO tasks for a site."""
         t0 = time.monotonic()
-
-        context = await self.load_context(db, site_id)
-        if not context:
+        data = await self.load_data(db, site_id)
+        if not data:
             return {"status": "no_site", "tasks_created": 0}
+        if not data.get("queries") and not data.get("pages"):
+            return {"status": "no_data", "tasks_created": 0}
 
-        if not context.get("queries"):
-            return {
-                "status": "no_data",
-                "reason": "No query data. Run Webmaster collection first.",
-                "tasks_created": 0,
-            }
+        site = data["site"]
+        opportunities = self._find_opportunities(data)
+        logger.info(f"TaskGenerator: found {len(opportunities)} opportunities for {site.domain}")
 
-        # Record run start
         run_record = AgentRun(
             site_id=site_id,
             agent_name=self.agent_name,
-            model_used="pending",
+            model_used="claude-haiku-4-5-20251001",
             trigger=trigger,
             status="running",
             started_at=datetime.now(timezone.utc),
@@ -350,55 +278,44 @@ class TaskGeneratorAgent:
         db.add(run_record)
         await db.flush()
 
-        system = self.build_system_prompt(context)
-        user_msg = self.build_user_message(context)
-
-        try:
-            raw_output, usage = call_with_tool(
-                model_tier=self.model_tier,
-                system=system,
-                user_message=user_msg,
-                tool=TASK_GENERATION_TOOL,
-                max_tokens=4096,
-            )
-        except Exception as exc:
-            logger.error(f"TaskGenerator LLM call failed: {exc}")
-            run_record.status = "failed"
-            run_record.error_message = str(exc)[:2000]
-            run_record.completed_at = datetime.now(timezone.utc)
-            await db.flush()
-            return {"status": "error", "error": str(exc), "tasks_created": 0}
-
-        tasks_data = raw_output.get("tasks", [])
-        summary = raw_output.get("summary", "")
-        logger.info(
-            f"TaskGenerator raw_output: {len(tasks_data)} tasks, keys: {list(raw_output.keys())}"
-        )
-        if not tasks_data:
-            logger.warning(f"TaskGenerator: no tasks in output. Full output: {str(raw_output)[:500]}")
-
-        # Save tasks to DB
+        total_cost = 0.0
+        total_input = 0
+        total_output = 0
         created = 0
-        for t in tasks_data:
+
+        for opp in opportunities:
             try:
+                task_data = self._build_task_base(opp)
+
+                # For meta_rewrite + faq_add, generate content via small LLM call
+                if opp["type"] == "meta_rewrite":
+                    content, usage = await self._generate_meta_content(opp, site.domain)
+                    if content:
+                        task_data["generated_content"] = content
+                    total_cost += usage.get("cost_usd", 0)
+                    total_input += usage.get("input_tokens", 0)
+                    total_output += usage.get("output_tokens", 0)
+
+                elif opp["type"] == "faq_add":
+                    content, usage = await self._generate_faq_content(opp, site.domain)
+                    if content and "items" in content:
+                        task_data["generated_content"] = {"faq_items": content["items"]}
+                    total_cost += usage.get("cost_usd", 0)
+                    total_input += usage.get("input_tokens", 0)
+                    total_output += usage.get("output_tokens", 0)
+
+                # For content_expansion and schema_add, no LLM call —
+                # the task itself carries the instruction, user sees what to do
+
                 new_task = Task(
                     site_id=site_id,
-                    title=t.get("title", "")[:500],
-                    description=t.get("description", ""),
-                    task_type=t.get("task_type", "meta_rewrite"),
-                    priority=int(t.get("priority", 50)),
-                    estimated_impact=t.get("estimated_impact"),
-                    estimated_effort=t.get("estimated_effort"),
-                    target_query=t.get("target_query"),
-                    target_cluster=t.get("target_cluster"),
-                    target_page_url=t.get("target_page_url"),
-                    generated_content=t.get("generated_content"),
+                    **task_data,
                     status="backlog",
                 )
                 db.add(new_task)
                 created += 1
             except Exception as exc:
-                logger.warning(f"Failed to save task: {exc}")
+                logger.warning(f"Failed to create task for opp {opp}: {exc}")
 
         await db.commit()
 
@@ -406,24 +323,73 @@ class TaskGeneratorAgent:
         run_record.status = "completed"
         run_record.completed_at = datetime.now(timezone.utc)
         run_record.duration_ms = elapsed_ms
-        run_record.model_used = usage["model"]
-        run_record.input_tokens = usage["input_tokens"]
-        run_record.output_tokens = usage["output_tokens"]
-        run_record.cost_usd = usage["cost_usd"]
+        run_record.input_tokens = total_input
+        run_record.output_tokens = total_output
+        run_record.cost_usd = total_cost
         run_record.output_summary = {
+            "opportunities": len(opportunities),
             "tasks_created": created,
-            "summary": summary[:500],
         }
         await db.flush()
         await db.commit()
 
         logger.info(
-            f"TaskGenerator done: {created} tasks, ${usage['cost_usd']:.4f}, {elapsed_ms}ms"
+            f"TaskGenerator done: {created}/{len(opportunities)} tasks, "
+            f"${total_cost:.4f}, {elapsed_ms}ms"
         )
 
         return {
             "status": "completed",
+            "opportunities": len(opportunities),
             "tasks_created": created,
-            "summary": summary,
-            "cost_usd": usage["cost_usd"],
+            "cost_usd": total_cost,
         }
+
+    def _build_task_base(self, opp: dict) -> dict:
+        """Build Task fields from opportunity data."""
+        t = opp["type"]
+        base = {
+            "task_type": t,
+            "priority": opp.get("priority", 50),
+            "estimated_impact": opp.get("impact", "medium"),
+            "estimated_effort": opp.get("effort", "M"),
+            "target_query": opp.get("query"),
+            "target_cluster": opp.get("cluster"),
+            "target_page_url": opp.get("page_url"),
+        }
+
+        if t == "meta_rewrite":
+            base["title"] = f"Переписать meta-теги для запроса «{opp['query']}»"
+            base["description"] = (
+                f"Запрос на позиции {opp['position']}, {opp['impressions']} показов, "
+                f"{opp['clicks']} кликов. Перепишите title и description на странице — "
+                f"цель подтянуть позицию в топ-5 и увеличить CTR."
+            )
+        elif t == "content_expansion":
+            wc = opp["current_word_count"]
+            base["title"] = f"Расширить контент страницы {opp['page_url'].split('/')[-1] or '/'}"
+            base["description"] = (
+                f"На странице всего {wc} слов — это тонкий контент, Яндекс его понижает. "
+                f"Добавьте основные разделы: описание, программа, включено/не включено, отзывы. "
+                f"Цель — 800+ слов полезного текста."
+            )
+        elif t == "schema_add":
+            schema_type = "TouristTrip" if opp["page_type"] == "tour" else "TravelAgency"
+            base["title"] = f"Добавить Schema.org ({schema_type}) на {opp['page_url'].split('/')[-1] or '/'}"
+            base["description"] = (
+                f"На странице нет структурированной разметки. Добавьте JSON-LD с типом {schema_type} "
+                f"— Яндекс сможет показывать цены/рейтинг в выдаче (rich snippet) = +30% CTR."
+            )
+            base["generated_content"] = {"schema_type": schema_type}
+        elif t == "faq_add":
+            base["title"] = f"Добавить FAQ-блок на {opp['page_url'].split('/')[-1] or '/'}"
+            base["description"] = (
+                "Яндекс любит FAQ — показывает их rich snippets в выдаче. "
+                "Добавьте блок с 3-5 частыми вопросами туристов и ответами. "
+                "Готовые вопросы и ответы прилагаются — просто скопируйте."
+            )
+        else:
+            base["title"] = f"SEO-задача: {t}"
+            base["description"] = "Автогенерация задачи"
+
+        return base
