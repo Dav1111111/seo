@@ -97,6 +97,8 @@ export const api = {
     apiFetch<any>(`/sites/${siteId}/crawl`, { method: "POST" }),
   pages: (siteId = SITE_ID) =>
     apiFetch<any>(`/sites/${siteId}/pages`),
+  agentStatus: (siteId = SITE_ID) =>
+    apiFetch<any>(`/sites/${siteId}/agent-status`),
 
   // Chat
   chat: (siteId = SITE_ID, message: string, history: any[] = [], issueId?: string) =>

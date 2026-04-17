@@ -76,10 +76,33 @@ FAQ_TOOL = {
                     },
                     "required": ["question", "answer"],
                 },
-                "description": "3-5 FAQ items — real tourist questions with concise answers",
+                "description": "Exactly 5 FAQ items — real tourist questions with concise answers",
             },
         },
         "required": ["items"],
+    },
+}
+
+SCHEMA_TOOL = {
+    "name": "generate_schema",
+    "description": "Generate ready-to-paste JSON-LD Schema.org markup for a page.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "schema_jsonld": {
+                "type": "string",
+                "description": "Complete JSON-LD block as a string, wrapped in <script type=\"application/ld+json\">...</script>. Valid JSON. Use only real data — skip fields you can't verify.",
+            },
+            "schema_type": {
+                "type": "string",
+                "description": "Primary @type used (TouristTrip, TravelAgency, BlogPosting, FAQPage)",
+            },
+            "install_notes": {
+                "type": "string",
+                "description": "1-2 sentences in Russian: куда вставить на странице",
+            },
+        },
+        "required": ["schema_jsonld", "schema_type", "install_notes"],
     },
 }
 
@@ -143,11 +166,23 @@ class TaskGeneratorAgent:
         pages = {p.path: p for p in data["pages"]}
         pages_by_url = {p.url: p for p in data["pages"]}
 
+        # Try to map queries to pages (best-effort via title keywords)
+        pages_by_title = {(p.title or "").lower(): p for p in data["pages"] if p.title}
+
         # Opportunity 1: Queries at position 5-15 with many impressions — meta_rewrite
         for q in queries[:20]:
             pos = float(q.get("avg_position") or 0)
             imp = int(q.get("impressions") or 0)
             if 5 <= pos <= 15 and imp >= 3:
+                # Find a likely target page by matching query keywords to title
+                query_lower = q["query_text"].lower()
+                target_page = None
+                for title_lower, p in pages_by_title.items():
+                    words = set(query_lower.split())
+                    if any(w in title_lower for w in words if len(w) > 3):
+                        target_page = p
+                        break
+
                 opportunities.append({
                     "type": "meta_rewrite",
                     "priority": min(100, 50 + int(imp * 2) + int(15 - pos) * 2),
@@ -158,6 +193,9 @@ class TaskGeneratorAgent:
                     "position": pos,
                     "impressions": imp,
                     "clicks": int(q.get("clicks") or 0),
+                    "page_url": target_page.url if target_page else None,
+                    "current_title": target_page.title if target_page else None,
+                    "current_description": target_page.meta_description if target_page else None,
                 })
 
         # Opportunity 2: Pages with thin content (< 200 words) — content_expansion
@@ -177,6 +215,18 @@ class TaskGeneratorAgent:
         # Opportunity 3: Pages without Schema.org — schema_add
         for page in data["pages"]:
             if not page.has_schema and page.http_status == 200 and not page.path.startswith("/admin"):
+                path = page.path or ""
+                # Better page type detection
+                if "/tours/" in path or "/excursion" in path or "/expeditions/" in path:
+                    page_type = "tour"
+                elif "/blog/" in path or "/articles/" in path or "/stati/" in path or "/stories/" in path:
+                    page_type = "article"
+                elif path in ("/", ""):
+                    page_type = "landing"
+                else:
+                    # Skip utility pages (contacts, about, privacy) — generic WebPage schema doesn't help
+                    continue
+
                 opportunities.append({
                     "type": "schema_add",
                     "priority": 40,
@@ -184,7 +234,9 @@ class TaskGeneratorAgent:
                     "effort": "S",
                     "page_url": page.url,
                     "page_title": page.title,
-                    "page_type": "tour" if "/tours/" in page.path else "landing",
+                    "page_description": page.meta_description,
+                    "page_h1": page.h1,
+                    "page_type": page_type,
                 })
 
         # Opportunity 4: Tour/product pages without FAQ — faq_add
@@ -219,18 +271,50 @@ class TaskGeneratorAgent:
         self, opp: dict, site: Site
     ) -> tuple[dict, dict]:
         """Small LLM call for meta_rewrite: query + site → title/description/H1."""
-        # Site description for context — critical so AI doesn't invent business type
         site_context = self._describe_site(site)
-        system = f"""Ты SEO-копирайтер для российского туристического бизнеса. Пишешь ПРОДАЮЩИЕ meta-теги на русском.
-Title 50-70 символов с ключевым словом + цена/год. Description 140-160 символов с УТП и призывом.
+        current_year = date.today().year
+        expected_ctr = EXPECTED_CTR.get(int(opp["position"]), 0.02) * 100
+        actual_ctr = (opp["clicks"] / max(opp["impressions"], 1) * 100) if opp["impressions"] else 0
+
+        system = f"""Ты SEO-копирайтер для российского туристического рынка с опытом 10+ лет.
+Пишешь meta-теги ПОД ЯНДЕКС (не Google — правила отличаются).
 
 О САЙТЕ: {site_context}
 
-ПРАВИЛО: Пиши ТОЛЬКО то что реально есть на сайте. Не придумывай услуги которых нет."""
-        user_msg = f"""Запрос: "{opp['query']}"
-Позиция: {opp['position']} | Показов: {opp['impressions']} | Кликов: {opp['clicks']}
+ТРЕБОВАНИЯ К TITLE (50-65 символов):
+1. Ключевой запрос в первых 30 символах (Яндекс учитывает левое вхождение)
+2. Город/регион ОБЯЗАТЕЛЬНО (Сочи / Абхазия / Красная Поляна / Адлер)
+3. Год {current_year} для коммерческих запросов (туры, экскурсии, цены)
+4. Цена "от X₽" если есть конкретная цифра
+5. Один триггер: "с гидом" / "без очередей" / "с трансфером" / "ежедневно"
+6. Разделитель — "|" или "—", НЕ дефис
+7. ЗАПРЕТ: CAPS, "!", эмодзи, слова "лучший/уникальный/незабываемый" без конкретики
 
-Напиши новый title, description и H1. Вызови generate_meta."""
+ТРЕБОВАНИЯ К DESCRIPTION (140-160 символов):
+1. Первые 100 символов — главный оффер (обрезается на мобильных)
+2. Структура: [что] + [где] + [цена/длительность] + [УТП] + [CTA]
+3. УТП конкретное: "трансфер от отеля", "группа до 8 чел", "работаем с 2014"
+4. CTA в императиве: "Забронируйте", "Выберите дату", "Посмотрите программу"
+5. Цифры: "3 водопада", "8 часов", "от 2500₽"
+
+ТРЕБОВАНИЯ К H1:
+1. НЕ дублирует title дословно (Яндекс считает переспамом)
+2. На 10-20 символов длиннее title, описательнее
+3. Один раз основной ключ + LSI-синоним (экскурсия/тур/поездка)
+4. Без года и цены
+
+ПРАВИЛО АНТИ-ГАЛЛЮЦИНАЦИИ: пиши только услуги из описания сайта."""
+
+        user_msg = f"""Запрос: "{opp['query']}"
+Кластер: {opp.get('cluster') or '—'}
+Позиция в Яндексе: {opp['position']:.1f}
+Показов за 14 дней: {opp['impressions']} | Кликов: {opp['clicks']} | CTR: {actual_ctr:.1f}% (ожидается на поз.{int(opp['position'])}: {expected_ctr:.0f}%)
+
+Текущий title: "{opp.get('current_title') or '(страница не найдена)'}"
+Текущий description: "{opp.get('current_description') or '(пусто)'}"
+
+ЗАДАЧА: Перепиши так, чтобы поднять позицию в топ-5 и CTR минимум до ожидаемого.
+Вызови generate_meta."""
         try:
             raw, usage = call_with_tool(
                 model_tier="cheap", system=system, user_message=user_msg,
@@ -241,19 +325,98 @@ Title 50-70 символов с ключевым словом + цена/год.
             logger.warning(f"Meta gen failed for '{opp['query']}': {e}")
             return {}, {"cost_usd": 0, "input_tokens": 0, "output_tokens": 0, "model": "claude-haiku-4-5-20251001"}
 
-    async def _generate_faq_content(self, opp: dict, site: Site) -> tuple[dict, dict]:
-        """Small LLM call for FAQ: page topic → FAQ items."""
+    async def _generate_schema_content(self, opp: dict, site: Site) -> tuple[dict, dict]:
+        """Small LLM call for schema_add: page info → ready JSON-LD."""
         site_context = self._describe_site(site)
-        system = f"""Ты помощник для российского туристического сайта. Пишешь FAQ-блоки на русском.
-3-5 реальных вопросов туристов с краткими ответами (30-60 слов каждый).
+        page_type = opp.get("page_type", "landing")
+
+        # Type-specific guidance
+        if page_type == "tour":
+            type_hint = (
+                "Используй @type: TouristTrip с offers (Offer с price, priceCurrency='RUB'). "
+                "Добавь itinerary (ItemList с этапами программы тура), "
+                "touristType, provider (ссылка на TravelAgency сайта). "
+                "aggregateRating добавь ТОЛЬКО если есть реальные отзывы на странице — иначе ПРОПУСТИ."
+            )
+        elif page_type == "landing":
+            type_hint = (
+                "Используй @graph с 2 объектами: TravelAgency (name, description, url, "
+                "address с addressLocality='Сочи', areaServed, foundingDate, priceRange) "
+                "и WebSite (url, name, publisher). Телефон/sameAs — ТОЛЬКО если есть реальные."
+            )
+        elif page_type == "article":
+            type_hint = (
+                "Используй @type: BlogPosting с headline, description, image, "
+                "datePublished (из last_crawled_at или сегодня), author (Organization - название сайта), "
+                "publisher (Organization с logo), mainEntityOfPage, inLanguage='ru-RU'."
+            )
+        else:
+            type_hint = "Используй @type: WebPage с name, description, url."
+
+        system = f"""Ты эксперт по Schema.org для Яндекса. Пишешь ВАЛИДНЫЙ JSON-LD.
 
 О САЙТЕ: {site_context}
 
-ПРАВИЛО: Вопросы и ответы должны быть основаны на реальных услугах сайта, не придумывай."""
+ПРАВИЛА:
+- Все URL — абсолютные (https://...)
+- Цены в RUB
+- Язык 'ru-RU'
+- НЕ придумывай данные: если нет номера телефона / реальных отзывов / точного адреса — ПРОПУСТИ эти поля
+- НЕ используй плейсхолдеры типа XXX, [name], ...
+- Оборачивай в <script type="application/ld+json">...</script>
+
+{type_hint}"""
+
+        user_msg = f"""URL: {opp['page_url']}
+Title страницы: {opp.get('page_title') or '—'}
+H1: {opp.get('page_h1') or '—'}
+Описание: {opp.get('page_description') or '—'}
+
+Сгенерируй JSON-LD для этой страницы. Вызови generate_schema."""
+
+        try:
+            raw, usage = call_with_tool(
+                model_tier="cheap", system=system, user_message=user_msg,
+                tool=SCHEMA_TOOL, max_tokens=2000,
+            )
+            return raw, usage
+        except Exception as e:
+            logger.warning(f"Schema gen failed for {opp['page_url']}: {e}")
+            return {}, {"cost_usd": 0, "input_tokens": 0, "output_tokens": 0, "model": "claude-haiku-4-5-20251001"}
+
+    async def _generate_faq_content(self, opp: dict, site: Site) -> tuple[dict, dict]:
+        """Small LLM call for FAQ: page topic → FAQ items + JSON-LD."""
+        site_context = self._describe_site(site)
+        system = f"""Ты контент-стратег по туризму. Пишешь FAQ которые попадают в быстрые ответы Яндекса (rich snippets, турбо-выдача).
+
+О САЙТЕ: {site_context}
+
+СТРУКТУРА FAQ:
+Ровно 5 вопросов. Вопросы — РЕАЛЬНЫЕ формулировки как пишут туристы в поиске:
+- "Сколько стоит {{что-то}}?"
+- "Нужен ли загранпаспорт в {{место}}?"
+- "Во сколько выезжает группа и откуда забирают?"
+- "Что включено в стоимость?"
+- "Можно ли с детьми / пожилыми / беременным?"
+
+ОБЯЗАТЕЛЬНЫЕ ТЕМЫ (минимум 4 из 6):
+- Цена (что входит/не входит)
+- Логистика (откуда забирают, длительность, возврат)
+- Документы (паспорт, для Абхазии — внутренний или загран)
+- Для кого подходит (дети, пожилые, физподготовка)
+- Что взять с собой
+- Отмена и возврат денег
+
+ФОРМАТ ОТВЕТОВ (30-60 слов каждый):
+1. ПЕРВОЕ предложение — прямой ответ (Да / Нет / Стоимость X₽ / Длится N часов)
+2. Конкретные цифры, не "обычно" и "в большинстве случаев"
+3. Без воды: не пиши "мы стараемся", "как правило"
+
+ПРАВИЛО: основано на услугах из описания сайта, не выдумывай."""
         user_msg = f"""Страница: {opp['page_url']}
 Тема: {opp.get('page_topic', opp.get('page_title', ''))}
 
-Создай FAQ-блок. Вызови generate_faq."""
+Создай 5 вопросов-ответов. Вызови generate_faq."""
         try:
             raw, usage = call_with_tool(
                 model_tier="cheap", system=system, user_message=user_msg,
@@ -309,6 +472,18 @@ Title 50-70 символов с ключевым словом + цена/год.
                     content, usage = await self._generate_faq_content(opp, site)
                     if content and "items" in content:
                         task_data["generated_content"] = {"faq_items": content["items"]}
+                    total_cost += usage.get("cost_usd", 0)
+                    total_input += usage.get("input_tokens", 0)
+                    total_output += usage.get("output_tokens", 0)
+
+                elif opp["type"] == "schema_add":
+                    content, usage = await self._generate_schema_content(opp, site)
+                    if content and content.get("schema_jsonld"):
+                        task_data["generated_content"] = {
+                            "schema_type": content.get("schema_type"),
+                            "schema_jsonld": content.get("schema_jsonld"),
+                            "install_notes": content.get("install_notes"),
+                        }
                     total_cost += usage.get("cost_usd", 0)
                     total_input += usage.get("input_tokens", 0)
                     total_output += usage.get("output_tokens", 0)
@@ -411,13 +586,18 @@ Title 50-70 символов с ключевым словом + цена/год.
                 f"Цель — 800+ слов полезного текста."
             )
         elif t == "schema_add":
-            schema_type = "TouristTrip" if opp["page_type"] == "tour" else "TravelAgency"
+            pt = opp.get("page_type", "landing")
+            schema_type = {
+                "tour": "TouristTrip",
+                "landing": "TravelAgency",
+                "article": "BlogPosting",
+            }.get(pt, "WebPage")
             base["title"] = f"Добавить Schema.org ({schema_type}) на {opp['page_url'].split('/')[-1] or '/'}"
             base["description"] = (
                 f"На странице нет структурированной разметки. Добавьте JSON-LD с типом {schema_type} "
-                f"— Яндекс сможет показывать цены/рейтинг в выдаче (rich snippet) = +30% CTR."
+                f"— Яндекс сможет показывать цены/рейтинг в выдаче (rich snippet) = +30% CTR. "
+                f"Готовый код прилагается."
             )
-            base["generated_content"] = {"schema_type": schema_type}
         elif t == "faq_add":
             base["title"] = f"Добавить FAQ-блок на {opp['page_url'].split('/')[-1] or '/'}"
             base["description"] = (

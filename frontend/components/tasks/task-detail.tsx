@@ -236,21 +236,27 @@ export function TaskDetailDialog({
         )}
 
         {/* Schema.org */}
-        {content.schema_type && (
+        {content.schema_jsonld && (
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs font-medium text-primary">
               <FileText className="h-3.5 w-3.5" />
-              SCHEMA.ORG
+              SCHEMA.ORG ({content.schema_type})
             </div>
             <div className="border rounded-lg overflow-hidden">
               <div className="bg-muted/50 px-3 py-1.5 flex items-center justify-between border-b">
                 <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Тип: {content.schema_type}
+                  JSON-LD для {'<head>'}
                 </span>
+                <CopyButton text={content.schema_jsonld} />
               </div>
-              <div className="p-3 text-xs text-muted-foreground">
-                Добавьте JSON-LD блок типа <code className="bg-muted px-1">{content.schema_type}</code> на страницу.
-              </div>
+              <pre className="p-3 text-[10px] font-mono overflow-x-auto max-h-64 overflow-y-auto bg-slate-50 dark:bg-slate-900">
+{content.schema_jsonld}
+              </pre>
+              {content.install_notes && (
+                <div className="bg-muted/30 px-3 py-2 text-xs text-muted-foreground border-t">
+                  💡 {content.install_notes}
+                </div>
+              )}
             </div>
           </div>
         )}

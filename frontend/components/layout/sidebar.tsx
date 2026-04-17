@@ -10,12 +10,14 @@ import {
   AlertTriangle,
   CheckSquare,
   Workflow,
+  Activity,
   Settings,
   TrendingUp,
 } from "lucide-react";
 
 const nav = [
   { href: "/",         label: "Обзор",    icon: LayoutDashboard },
+  { href: "/status",   label: "Статус",   icon: Activity },
   { href: "/queries",  label: "Запросы",  icon: Search },
   { href: "/tasks",    label: "Задачи",   icon: CheckSquare },
   { href: "/issues",   label: "Проблемы", icon: AlertTriangle },
