@@ -152,7 +152,7 @@ class TaskGeneratorAgent:
     """Generates concrete, actionable SEO tasks from all available data."""
 
     agent_name = "task_generator"
-    model_tier = "smart"  # Sonnet — needs quality for content generation
+    model_tier = "cheap"  # Haiku — faster, fits Vercel proxy timeout. Quality is good enough for SEO tasks.
 
     async def load_context(self, db: AsyncSession, site_id: UUID) -> dict:
         """Load everything the agent needs: queries, pages, clusters."""
@@ -362,7 +362,7 @@ class TaskGeneratorAgent:
                 system=system,
                 user_message=user_msg,
                 tool=TASK_GENERATION_TOOL,
-                max_tokens=8000,
+                max_tokens=4096,
             )
         except Exception as exc:
             logger.error(f"TaskGenerator LLM call failed: {exc}")

@@ -46,8 +46,12 @@ PRICING = {
 def get_client() -> anthropic.Anthropic:
     global _client
     if _client is None:
-        kwargs: dict[str, Any] = {"api_key": settings.ANTHROPIC_API_KEY}
-        # Use Cloudflare Worker proxy if configured (bypasses geo-block)
+        kwargs: dict[str, Any] = {
+            "api_key": settings.ANTHROPIC_API_KEY,
+            "timeout": 120.0,  # extend timeout for long Sonnet calls via Vercel proxy
+            "max_retries": 2,
+        }
+        # Use Cloudflare Worker / Vercel proxy if configured (bypasses geo-block)
         if settings.ANTHROPIC_BASE_URL:
             kwargs["base_url"] = settings.ANTHROPIC_BASE_URL
         _client = anthropic.Anthropic(**kwargs)
