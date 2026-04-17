@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -84,7 +84,7 @@ async def get_agent_status(
             func.sum(AgentRun.cost_usd).label("total_cost"),
             func.max(AgentRun.completed_at).label("last_run"),
             func.sum(
-                func.case((AgentRun.status == "completed", 1), else_=0)
+                case((AgentRun.status == "completed", 1), else_=0)
             ).label("successful"),
         )
         .where(
