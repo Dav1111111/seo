@@ -53,17 +53,7 @@ class CoverageAnalyzer:
         end = today - timedelta(days=5)  # Webmaster lag
         start = end - timedelta(days=days - 1)
 
-        # ── Query side: aggregate metrics per intent ──────────────────
-        query_agg = await db.execute(
-            select(
-                QueryIntent.intent_code,
-                func.count(QueryIntent.query_id).label("queries_count"),
-                func.sum(
-                    func.cast(QueryIntent.is_ambiguous, func.BIGINT if False else func.Integer if False else None) # noqa
-                )
-            ).where(QueryIntent.site_id == site_id).group_by(QueryIntent.intent_code)
-        )
-        # The above is messy; let's simplify with a cleaner query:
+        # ── Query side: group queries by intent ───────────────────────
         query_stats: dict[str, dict] = {}
         rows = await db.execute(
             select(
