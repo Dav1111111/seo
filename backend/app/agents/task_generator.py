@@ -369,6 +369,11 @@ class TaskGeneratorAgent:
 
         tasks_data = raw_output.get("tasks", [])
         summary = raw_output.get("summary", "")
+        logger.info(
+            f"TaskGenerator raw_output: {len(tasks_data)} tasks, keys: {list(raw_output.keys())}"
+        )
+        if not tasks_data:
+            logger.warning(f"TaskGenerator: no tasks in output. Full output: {str(raw_output)[:500]}")
 
         # Save tasks to DB
         created = 0
