@@ -77,6 +77,27 @@ export const api = {
   triggerQueryRecommendations: (siteId = SITE_ID) =>
     apiFetch<any>(`/sites/${siteId}/analyse/query-recommendations`, { method: "POST" }),
 
+  // SEO Tasks
+  tasks: (siteId = SITE_ID, params: Record<string, string | number> = {}) => {
+    const qs = new URLSearchParams(params as any).toString();
+    return apiFetch<any>(`/sites/${siteId}/tasks${qs ? `?${qs}` : ""}`);
+  },
+  getTask: (siteId = SITE_ID, taskId: string) =>
+    apiFetch<any>(`/sites/${siteId}/tasks/${taskId}`),
+  updateTask: (siteId = SITE_ID, taskId: string, body: Record<string, unknown>) =>
+    apiFetch<any>(`/sites/${siteId}/tasks/${taskId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteTask: (siteId = SITE_ID, taskId: string) =>
+    apiFetch<any>(`/sites/${siteId}/tasks/${taskId}`, { method: "DELETE" }),
+  triggerGenerateTasks: (siteId = SITE_ID) =>
+    apiFetch<any>(`/sites/${siteId}/generate-tasks`, { method: "POST" }),
+  triggerCrawl: (siteId = SITE_ID) =>
+    apiFetch<any>(`/sites/${siteId}/crawl`, { method: "POST" }),
+  pages: (siteId = SITE_ID) =>
+    apiFetch<any>(`/sites/${siteId}/pages`),
+
   // Chat
   chat: (siteId = SITE_ID, message: string, history: any[] = [], issueId?: string) =>
     apiFetch<{ reply: string; cost_usd: number }>(`/sites/${siteId}/chat`, {

@@ -161,6 +161,28 @@ def collect_site_webmaster(site_id: str):
     return _run_async(_run())
 
 
+@celery_app.task(name="crawl_site")
+def crawl_site(site_id: str):
+    """Crawl a site — fetch sitemap + all pages, extract SEO data."""
+    from app.collectors.site_crawler import SiteCrawler
+
+    async def _run():
+        session_factory = _make_session()
+        async with session_factory() as db:
+            result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
+            site = result.scalar_one_or_none()
+            if not site:
+                return {"error": "Site not found"}
+
+            # Figure out base URL — for punycode domains, use the ascii form
+            domain = site.domain
+            base_url = f"https://{domain}" if not domain.startswith("xn--") and "." in domain else f"https://{domain}"
+            crawler = SiteCrawler(domain=domain, base_url=base_url, max_pages=50)
+            return await crawler.crawl_and_store(db, site.id)
+
+    return _run_async(_run())
+
+
 @celery_app.task(name="collect_site_metrica")
 def collect_site_metrica(site_id: str):
     """Collect Metrica data for a specific site (for manual trigger)."""

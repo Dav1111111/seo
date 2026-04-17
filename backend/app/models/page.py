@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base, TimestampMixin
@@ -22,3 +22,13 @@ class Page(Base, TimestampMixin):
     in_sitemap: Mapped[bool] = mapped_column(Boolean, default=False)
     http_status: Mapped[int | None] = mapped_column(Integer)
     meta: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
+
+    # Crawled content (from SiteCrawler)
+    meta_description: Mapped[str | None] = mapped_column(String(1000))
+    h1: Mapped[str | None] = mapped_column(String(500))
+    content_text: Mapped[str | None] = mapped_column(Text)  # plain text content for LLM analysis
+    word_count: Mapped[int | None] = mapped_column(Integer)
+    internal_links: Mapped[list | None] = mapped_column(JSONB)  # list of URLs this page links to
+    images_count: Mapped[int | None] = mapped_column(Integer)
+    has_schema: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

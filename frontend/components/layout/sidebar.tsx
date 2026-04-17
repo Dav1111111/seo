@@ -8,6 +8,7 @@ import {
   LayoutDashboard,
   Search,
   AlertTriangle,
+  CheckSquare,
   Workflow,
   Settings,
   TrendingUp,
@@ -16,6 +17,7 @@ import {
 const nav = [
   { href: "/",         label: "Обзор",    icon: LayoutDashboard },
   { href: "/queries",  label: "Запросы",  icon: Search },
+  { href: "/tasks",    label: "Задачи",   icon: CheckSquare },
   { href: "/issues",   label: "Проблемы", icon: AlertTriangle },
   { href: "/pipeline", label: "Pipeline", icon: Workflow },
   { href: "/settings", label: "Настройки",icon: Settings },

@@ -185,6 +185,22 @@ def run_query_tactical_all(self):
     return results
 
 
+# ── Task Generator ─────────────────────────────────────────────────
+
+async def _generate_tasks_for_site(site_id: UUID, trigger: str = "manual") -> dict:
+    from app.agents.task_generator import TaskGeneratorAgent
+    agent = TaskGeneratorAgent()
+    session_factory = _make_session()
+    async with session_factory() as db:
+        return await agent.run(db, site_id, trigger=trigger)
+
+
+@celery_app.task(name="generate_seo_tasks")
+def generate_seo_tasks(site_id: str):
+    """Generate concrete SEO tasks with ready-to-use content for a site."""
+    return _run(_generate_tasks_for_site(UUID(site_id), "manual"))
+
+
 @celery_app.task(name="run_query_strategic_all", bind=True, max_retries=1)
 def run_query_strategic_all(self):
     """Run strategic query recommendations for all active sites (weekly)."""
