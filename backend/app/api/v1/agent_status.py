@@ -33,47 +33,44 @@ async def get_agent_status(
     today = date.today()
 
     # 1. Last data collection times (from DailyMetric)
-    last_webmaster = await db.execute(
+    last_webmaster_at = (await db.execute(
         select(func.max(DailyMetric.created_at))
         .where(
             DailyMetric.site_id == site_id,
             DailyMetric.metric_type == "query_performance",
         )
-    )
-    last_webmaster_at = last_webmaster.scalar()
+    )).scalar()
 
-    last_metrica = await db.execute(
+    last_metrica_at = (await db.execute(
         select(func.max(DailyMetric.created_at))
         .where(
             DailyMetric.site_id == site_id,
             DailyMetric.metric_type == "site_traffic",
         )
-    )
-    last_metrica_at = last_metrica.scalar()
+    )).scalar()
 
-    # 2. Data coverage — how much data do we have?
-    queries_count = await db.execute(
+    # 2. Data coverage — immediately extract scalars to avoid closed result errors
+    queries_count = (await db.execute(
         select(func.count(SearchQuery.id)).where(SearchQuery.site_id == site_id)
-    )
+    )).scalar() or 0
 
-    clustered_count = await db.execute(
+    clustered_count = (await db.execute(
         select(func.count(SearchQuery.id))
         .where(SearchQuery.site_id == site_id, SearchQuery.cluster.isnot(None))
-    )
+    )).scalar() or 0
 
-    pages_count = await db.execute(
+    pages_count = (await db.execute(
         select(func.count(Page.id)).where(Page.site_id == site_id)
-    )
+    )).scalar() or 0
 
-    pages_with_content = await db.execute(
+    pages_with_content = (await db.execute(
         select(func.count(Page.id))
         .where(Page.site_id == site_id, Page.word_count.isnot(None), Page.word_count > 0)
-    )
+    )).scalar() or 0
 
-    last_crawl = await db.execute(
+    last_crawl_at = (await db.execute(
         select(func.max(Page.last_crawled_at)).where(Page.site_id == site_id)
-    )
-    last_crawl_at = last_crawl.scalar()
+    )).scalar()
 
     # 3. Agent runs last 7 days
     week_ago = now - timedelta(days=7)
@@ -118,15 +115,15 @@ async def get_agent_status(
     issue_statuses = {row[0]: row[1] for row in issues_by_status}
 
     # 6. Impact: tasks that were completed, and their effect
-    tasks_measuring = await db.execute(
+    tasks_measuring = (await db.execute(
         select(func.count(Task.id))
         .where(Task.site_id == site_id, Task.status == "measuring")
-    )
+    )).scalar() or 0
 
-    tasks_with_effect = await db.execute(
+    tasks_with_effect = (await db.execute(
         select(func.count(Task.id))
         .where(Task.site_id == site_id, Task.effect_tracked == True)  # noqa: E712
-    )
+    )).scalar() or 0
 
     # 7. Overall health checks
     def hours_since(ts):
@@ -145,7 +142,7 @@ async def get_agent_status(
         "site_crawled": {
             "status": "ok" if last_crawl_at else "not_crawled",
             "hours_since_crawl": hours_since(last_crawl_at),
-            "pages": pages_count.scalar() or 0,
+            "pages": pages_count,
         },
         "ai_active": {
             "status": "ok" if agent_runs else "idle",
@@ -188,15 +185,15 @@ async def get_agent_status(
     return {
         "health": health,
         "data_coverage": {
-            "queries_total": queries_count.scalar() or 0,
-            "queries_clustered": clustered_count.scalar() or 0,
-            "pages_total": pages_count.scalar() or 0,
-            "pages_with_content": pages_with_content.scalar() or 0,
+            "queries_total": queries_count,
+            "queries_clustered": clustered_count,
+            "pages_total": pages_count,
+            "pages_with_content": pages_with_content,
         },
         "agent_runs": agent_runs,
         "tasks_by_status": task_statuses,
         "issues_by_status": issue_statuses,
-        "tasks_measuring": tasks_measuring.scalar() or 0,
-        "tasks_with_effect": tasks_with_effect.scalar() or 0,
+        "tasks_measuring": tasks_measuring,
+        "tasks_with_effect": tasks_with_effect,
         "timeline": timeline,
     }
