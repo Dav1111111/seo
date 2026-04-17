@@ -24,10 +24,66 @@ class QueuedResponse(BaseModel):
 
 @router.post("/intent/sites/{site_id}/classify", response_model=QueuedResponse)
 async def trigger_classify(site_id: uuid.UUID):
-    """Classify queries + score pages for a site."""
+    """Classify queries + score pages for a site (regex-only)."""
     from app.intent.tasks import intent_classify_site
     task = intent_classify_site.delay(str(site_id))
     return QueuedResponse(task_id=task.id, status="queued")
+
+
+@router.post("/intent/sites/{site_id}/decide", response_model=QueuedResponse)
+async def trigger_decide(site_id: uuid.UUID, use_llm: bool = True):
+    """Run full Decisioner: classify → LLM fallback → coverage → decision tree → safety."""
+    from app.intent.tasks import intent_decide
+    task = intent_decide.delay(str(site_id), use_llm)
+    return QueuedResponse(task_id=task.id, status="queued")
+
+
+@router.get("/intent/sites/{site_id}/decisions")
+async def list_decisions(
+    site_id: uuid.UUID,
+    action: str | None = None,
+    status: str = "open",
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """List coverage decisions for a site."""
+    from app.intent.models import CoverageDecision
+    q = select(CoverageDecision).where(
+        CoverageDecision.site_id == site_id,
+        CoverageDecision.status == status,
+    )
+    if action:
+        q = q.where(CoverageDecision.action == action)
+    q = q.order_by(CoverageDecision.total_impressions.desc())
+    rows = await db.execute(q)
+    decisions = rows.scalars().all()
+
+    counts_rows = await db.execute(
+        select(CoverageDecision.action, func.count())
+        .where(CoverageDecision.site_id == site_id, CoverageDecision.status == status)
+        .group_by(CoverageDecision.action)
+    )
+    counts = {a: c for a, c in counts_rows}
+
+    return {
+        "total": len(decisions),
+        "by_action": counts,
+        "items": [
+            {
+                "id": str(d.id),
+                "intent_code": d.intent_code,
+                "cluster_key": d.cluster_key,
+                "action": d.action,
+                "coverage_status": d.coverage_status,
+                "justification_ru": d.justification_ru,
+                "proposed_url": d.proposed_url,
+                "queries_in_cluster": d.queries_in_cluster,
+                "total_impressions": d.total_impressions,
+                "evidence": d.evidence,
+                "decided_at": d.decided_at.isoformat() if d.decided_at else None,
+            }
+            for d in decisions
+        ],
+    }
 
 
 @router.get("/intent/sites/{site_id}/queries")

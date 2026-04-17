@@ -78,6 +78,20 @@ def intent_classify_all(self):
     return _run(_run_all())
 
 
+@celery_app.task(name="intent_decide", bind=True, max_retries=1)
+def intent_decide(self, site_id: str, use_llm: bool = True):
+    """Full Decisioner pipeline for a site: classify + score + coverage + decisions."""
+
+    async def _run_decisioner():
+        from app.intent.decisioner import Decisioner
+        session_factory = _make_session()
+        d = Decisioner()
+        async with session_factory() as db:
+            return await d.run_for_site(db, UUID(site_id), use_llm_fallback=use_llm)
+
+    return _run(_run_decisioner())
+
+
 @celery_app.task(name="intent_analyze_coverage")
 def intent_analyze_coverage(site_id: str):
     """Run coverage analysis for a site (read-only, returns reports)."""
