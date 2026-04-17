@@ -216,16 +216,21 @@ class TaskGeneratorAgent:
         return unique[:8]  # Cap at 8 tasks per run
 
     async def _generate_meta_content(
-        self, opp: dict, site_domain: str
+        self, opp: dict, site: Site
     ) -> tuple[dict, dict]:
         """Small LLM call for meta_rewrite: query + site → title/description/H1."""
-        system = """Ты SEO-копирайтер для туристического сайта. Пиши ПРОДАЮЩИЕ meta-теги на русском.
-Title 50-70 символов с ключевым словом + цена/год. Description 140-160 символов с УТП и призывом."""
-        user_msg = f"""Сайт: {site_domain}
-Запрос: "{opp['query']}"
+        # Site description for context — critical so AI doesn't invent business type
+        site_context = self._describe_site(site)
+        system = f"""Ты SEO-копирайтер для российского туристического бизнеса. Пишешь ПРОДАЮЩИЕ meta-теги на русском.
+Title 50-70 символов с ключевым словом + цена/год. Description 140-160 символов с УТП и призывом.
+
+О САЙТЕ: {site_context}
+
+ПРАВИЛО: Пиши ТОЛЬКО то что реально есть на сайте. Не придумывай услуги которых нет."""
+        user_msg = f"""Запрос: "{opp['query']}"
 Позиция: {opp['position']} | Показов: {opp['impressions']} | Кликов: {opp['clicks']}
 
-Напиши новый title, description и H1 чтобы поднять позицию и CTR. Вызови generate_meta."""
+Напиши новый title, description и H1. Вызови generate_meta."""
         try:
             raw, usage = call_with_tool(
                 model_tier="cheap", system=system, user_message=user_msg,
@@ -236,12 +241,16 @@ Title 50-70 символов с ключевым словом + цена/год.
             logger.warning(f"Meta gen failed for '{opp['query']}': {e}")
             return {}, {"cost_usd": 0, "input_tokens": 0, "output_tokens": 0, "model": "claude-haiku-4-5-20251001"}
 
-    async def _generate_faq_content(self, opp: dict, site_domain: str) -> tuple[dict, dict]:
+    async def _generate_faq_content(self, opp: dict, site: Site) -> tuple[dict, dict]:
         """Small LLM call for FAQ: page topic → FAQ items."""
-        system = """Ты помощник для туристического сайта. Пишешь FAQ-блоки на русском.
-3-5 реальных вопросов туристов с краткими ответами (30-60 слов каждый)."""
-        user_msg = f"""Сайт: {site_domain}
-Страница: {opp['page_url']}
+        site_context = self._describe_site(site)
+        system = f"""Ты помощник для российского туристического сайта. Пишешь FAQ-блоки на русском.
+3-5 реальных вопросов туристов с краткими ответами (30-60 слов каждый).
+
+О САЙТЕ: {site_context}
+
+ПРАВИЛО: Вопросы и ответы должны быть основаны на реальных услугах сайта, не придумывай."""
+        user_msg = f"""Страница: {opp['page_url']}
 Тема: {opp.get('page_topic', opp.get('page_title', ''))}
 
 Создай FAQ-блок. Вызови generate_faq."""
@@ -289,7 +298,7 @@ Title 50-70 символов с ключевым словом + цена/год.
 
                 # For meta_rewrite + faq_add, generate content via small LLM call
                 if opp["type"] == "meta_rewrite":
-                    content, usage = await self._generate_meta_content(opp, site.domain)
+                    content, usage = await self._generate_meta_content(opp, site)
                     if content:
                         task_data["generated_content"] = content
                     total_cost += usage.get("cost_usd", 0)
@@ -297,7 +306,7 @@ Title 50-70 символов с ключевым словом + цена/год.
                     total_output += usage.get("output_tokens", 0)
 
                 elif opp["type"] == "faq_add":
-                    content, usage = await self._generate_faq_content(opp, site.domain)
+                    content, usage = await self._generate_faq_content(opp, site)
                     if content and "items" in content:
                         task_data["generated_content"] = {"faq_items": content["items"]}
                     total_cost += usage.get("cost_usd", 0)
@@ -344,6 +353,34 @@ Title 50-70 символов с ключевым словом + цена/год.
             "tasks_created": created,
             "cost_usd": total_cost,
         }
+
+    def _describe_site(self, site: Site) -> str:
+        """Build a concise site description for LLM context."""
+        domain = site.domain
+        display = site.display_name or domain
+
+        # Hardcoded descriptions for known sites (manually curated context)
+        known = {
+            "xn----jtbbjdhsdbbg3ce9iub.xn--p1ai": (
+                "Южный Континент — экскурсионное бюро в Сочи с 2014 года. "
+                "Проводит экскурсии и туры: Красная Поляна, 33 водопада, Абхазия (Золотое кольцо, Рица, Гагра, Новый Афон), "
+                "морские прогулки, джиппинг, Ведьмино ущелье, VIP-туры. Цены 700-5000₽. "
+                "Группы от 6 до 50 человек. Бесплатный трансфер из отелей Сочи."
+            ),
+            "grandtourspirit.ru": (
+                "Grand Tour Spirit (GTS) — премиальный клуб активного отдыха в Сочи. "
+                "Флагман — багги-экспедиции по Абхазии (маршруты 1-5 дней): урочище Гизла, Кушонский перевал, "
+                "Ауадхара (альпийские луга), Сухум-Кодор, Кисловодск-Архыз, Крым. "
+                "Также яхты, вертолёты, консьерж-сервис, VIP-трансферы, мероприятия. "
+                "Цены экспедиций 24 900 - 359 900₽. Офис в Олимпийском парке."
+            ),
+        }
+
+        if domain in known:
+            return known[domain]
+
+        # Fallback: generic
+        return f"{display} ({domain}) — туристический сайт в России."
 
     def _build_task_base(self, opp: dict) -> dict:
         """Build Task fields from opportunity data."""
