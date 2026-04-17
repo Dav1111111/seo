@@ -48,6 +48,11 @@ celery_app.conf.beat_schedule = {
         "task": "fingerprint_gc_stale",
         "schedule": crontab(hour=3, minute=30, day_of_week=0),
     },
+    # Intent classification — daily 04:00 UTC (after fingerprinting)
+    "intent-classify-all-daily": {
+        "task": "intent_classify_all",
+        "schedule": crontab(hour=4, minute=0),
+    },
     # Query clustering (weekly, Monday 09:00 MSK)
     "cluster-queries-weekly": {
         "task": "run_query_clustering_all",
@@ -65,4 +70,4 @@ celery_app.conf.beat_schedule = {
     },
 }
 
-celery_app.autodiscover_tasks(["app.collectors", "app.agents", "app.fingerprint"])
+celery_app.autodiscover_tasks(["app.collectors", "app.agents", "app.fingerprint", "app.intent"])
