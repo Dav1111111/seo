@@ -39,13 +39,23 @@ def compute_relevance(
     filled_slots: Mapping[str, str],
     target_config: Mapping[str, object],
 ) -> float:
-    """Return a float in [0, 1], rounded to 3 decimals."""
-    # Service match (binary).
+    """Return a float in [0, 1], rounded to 3 decimals.
+
+    Optional `service_weights` and `geo_weights` in target_config let the
+    user prioritize specific services/geos (all default to 1.0). Missing
+    entries fall back to 1.0 — fully backward-compatible.
+    """
+    # Service match (binary) — multiplied by user-declared service weight.
     service_val = filled_slots.get("service") or filled_slots.get("activity")
     declared_services = set(target_config.get("services", []) or [])
-    r_service = 1.0 if service_val and service_val in declared_services else 0.0
+    service_weights = target_config.get("service_weights") or {}
+    if service_val and service_val in declared_services:
+        r_service = 1.0 * float(service_weights.get(service_val, 1.0))
+    else:
+        r_service = 0.0
+    r_service = max(0.0, min(1.0, r_service))
 
-    # Geo match — primary wins over secondary.
+    # Geo match — primary wins over secondary, scaled by geo weight.
     geo_val = (
         filled_slots.get("city")
         or filled_slots.get("destination")
@@ -54,12 +64,16 @@ def compute_relevance(
     )
     primary = set(target_config.get("geo_primary", []) or [])
     secondary = set(target_config.get("geo_secondary", []) or [])
+    geo_weights = target_config.get("geo_weights") or {}
     if geo_val and geo_val in primary:
         r_geo = 1.0
     elif geo_val and geo_val in secondary:
         r_geo = 0.6
     else:
         r_geo = 0.0
+    if geo_val:
+        r_geo = r_geo * float(geo_weights.get(geo_val, 1.0))
+    r_geo = max(0.0, min(1.0, r_geo))
 
     # Intent strength.
     r_intent = _INTENT_STRENGTH.get(cluster_type, 0.5)

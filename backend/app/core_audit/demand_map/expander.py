@@ -135,6 +135,16 @@ def _template_slot_names(template: SeedTemplate) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _literal_tokens(pattern: str) -> frozenset[str]:
+    """Tokens in the pattern that are NOT slot names — guards against
+    redundancy like `{activity} туры {region}` where activity=туры would
+    produce "туры туры region".
+    """
+    # Remove {slot} placeholders first
+    stripped = _SLOT_RE.sub(" ", pattern)
+    return frozenset(m.group(0).lower() for m in _TOKEN_RE.finditer(stripped))
+
+
 # ---------- key + keywords --------------------------------------------------
 
 
@@ -283,6 +293,8 @@ def expand_for_site(
         if not slot_value_axes:
             continue
 
+        literal_tokens = _literal_tokens(template.pattern)
+
         per_template = 0
         for combo in itertools.product(*slot_value_axes):
             if per_template >= max_per_template:
@@ -293,6 +305,16 @@ def expand_for_site(
             }
             # Missing any required slot -> skip.
             if any(r not in filled for r in template.required_slots):
+                continue
+
+            # Token-collision guard: skip if any filled value duplicates a
+            # literal token already in the template pattern. Prevents things
+            # like "экскурсии туры сочи" where {activity}=экскурсии fills a
+            # pattern that already contains the literal "туры" — such a
+            # combo is semantically redundant.
+            if literal_tokens and any(
+                val.lower() in literal_tokens for val in filled.values() if val
+            ):
                 continue
             if not filled:
                 # Template with no slots — emit once.
