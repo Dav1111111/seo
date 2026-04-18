@@ -145,6 +145,26 @@ def _literal_tokens(pattern: str) -> frozenset[str]:
     return frozenset(m.group(0).lower() for m in _TOKEN_RE.finditer(stripped))
 
 
+# Russian tourism-domain synonyms. When any word in a group appears as a
+# literal token in a template, filling a different slot with ANOTHER word
+# from the same group produces redundancy ("экскурсии туры X" where
+# экскурсии ≈ туры in RU tourism SEO). Block such combos.
+_SYNONYM_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"туры", "тур", "экскурсии", "экскурсия", "путешествия",
+               "путешествие", "поездки", "поездка"}),
+)
+
+
+def _expand_synonyms(tokens: frozenset[str]) -> frozenset[str]:
+    """Return the input tokens plus every synonym of each token."""
+    expanded = set(tokens)
+    for t in tokens:
+        for group in _SYNONYM_GROUPS:
+            if t in group:
+                expanded.update(group)
+    return frozenset(expanded)
+
+
 # ---------- key + keywords --------------------------------------------------
 
 
@@ -294,6 +314,7 @@ def expand_for_site(
             continue
 
         literal_tokens = _literal_tokens(template.pattern)
+        forbidden_tokens = _expand_synonyms(literal_tokens)
 
         per_template = 0
         for combo in itertools.product(*slot_value_axes):
@@ -308,12 +329,12 @@ def expand_for_site(
                 continue
 
             # Token-collision guard: skip if any filled value duplicates a
-            # literal token already in the template pattern. Prevents things
-            # like "экскурсии туры сочи" where {activity}=экскурсии fills a
-            # pattern that already contains the literal "туры" — such a
-            # combo is semantically redundant.
-            if literal_tokens and any(
-                val.lower() in literal_tokens for val in filled.values() if val
+            # literal token (identity) or a synonym of one (semantic). E.g.
+            # template "{activity} туры {region}" with activity=экскурсии
+            # produces "экскурсии туры X" which is semantically redundant
+            # (экскурсии ≈ туры in RU tourism SEO).
+            if forbidden_tokens and any(
+                val.lower() in forbidden_tokens for val in filled.values() if val
             ):
                 continue
             if not filled:
