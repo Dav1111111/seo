@@ -78,9 +78,15 @@ celery_app.conf.beat_schedule = {
         "task": "report_build_all_weekly",
         "schedule": crontab(hour=7, minute=0, day_of_week=1),
     },
+    # Target Demand Map — weekly build (Mondays 03:30 UTC, before intent pipeline)
+    "demand-map-build-weekly": {
+        "task": "demand_map_build_all_weekly",
+        "schedule": crontab(hour=3, minute=30, day_of_week=1),
+    },
 }
 
 celery_app.autodiscover_tasks([
     "app.collectors", "app.agents", "app.fingerprint", "app.intent",
     "app.core_audit.review", "app.core_audit.priority", "app.core_audit.report",
+    "app.core_audit.demand_map",
 ])

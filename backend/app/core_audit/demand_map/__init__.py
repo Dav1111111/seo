@@ -39,6 +39,24 @@ from app.core_audit.demand_map.guardrails import (
 )
 from app.core_audit.demand_map.quality import classify_quality_tier
 from app.core_audit.demand_map.relevance import compute_relevance
+from app.core_audit.demand_map.rescoring import (
+    OVERLAP_BOOST,
+    rescore_with_observed_overlap,
+)
+from app.core_audit.demand_map.suggest import (
+    MAX_SUGGEST_CALLS,
+    enrich_clusters_with_suggest,
+    fetch_suggestions,
+)
+from app.core_audit.demand_map.llm_expansion import (
+    MAX_ADDITIONAL_QUERIES,
+    MAX_GAP_CLUSTERS,
+    expand_with_llm,
+)
+from app.core_audit.demand_map.persistence import (
+    load_observed_queries,
+    persist_demand_map,
+)
 
 __all__ = [
     "ClusterSource",
@@ -55,4 +73,15 @@ __all__ = [
     "MAX_GEO_PERMUTATIONS",
     "MAX_PER_TEMPLATE",
     "SOFT_CAPS_PER_TIER",
+    # Phase B
+    "MAX_SUGGEST_CALLS",
+    "MAX_ADDITIONAL_QUERIES",
+    "MAX_GAP_CLUSTERS",
+    "OVERLAP_BOOST",
+    "fetch_suggestions",
+    "enrich_clusters_with_suggest",
+    "expand_with_llm",
+    "rescore_with_observed_overlap",
+    "persist_demand_map",
+    "load_observed_queries",
 ]

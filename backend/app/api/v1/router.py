@@ -12,6 +12,7 @@ from app.api.v1.intent import router as intent_router
 from app.api.v1.review import router as review_router
 from app.api.v1.priority import router as priority_router
 from app.api.v1.report import router as report_router
+from app.api.v1.admin_demand_map import router as admin_demand_map_router
 
 v1_router = APIRouter()
 v1_router.include_router(health_router, tags=["health"])
@@ -27,3 +28,4 @@ v1_router.include_router(intent_router, tags=["intent"])
 v1_router.include_router(review_router, tags=["review"])
 v1_router.include_router(priority_router, tags=["priority"])
 v1_router.include_router(report_router, tags=["report"])
+v1_router.include_router(admin_demand_map_router, tags=["admin-demand-map"])

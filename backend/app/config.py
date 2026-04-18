@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     TIMEZONE: str = "Europe/Moscow"
 
+    # Admin API (header-gated endpoints for ops/manual re-runs)
+    ADMIN_API_KEY: str = ""
+
+    # Demand Map — Phase B feature flag.
+    # When False, Celery task runs Cartesian only (no Suggest / LLM).
+    # Default True so Phase B pipeline is exercised in dev/tests.
+    USE_DEMAND_MAP_ENRICHMENT: bool = True
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
