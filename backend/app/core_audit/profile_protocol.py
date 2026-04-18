@@ -124,6 +124,11 @@ class SiteProfile(Protocol):
     # profiles working unchanged.
     seed_cluster_templates: "tuple[SeedTemplate, ...]"
 
+    # Physical service-geo compatibility (A.5) — kills impossible combos
+    # like "морские прогулки × красная поляна" at expansion time.
+    geo_properties: dict[str, frozenset[str]]
+    service_geo_requirements: dict[str, frozenset[str]]
+
     # Site-state-dependent helpers (functions, not data)
     def propose_url(self, intent: IntentCode, top_query: str) -> str: ...
     def propose_title(self, intent: IntentCode, top_query: str) -> str: ...
@@ -155,3 +160,6 @@ class ProfileData:
     commercial_factors: tuple[CommercialFactor, ...] = ()
     # Target Demand Map seeds — populated by vertical's ./seed_templates.py.
     seed_cluster_templates: "tuple[SeedTemplate, ...]" = ()
+    # Physical service-geo compatibility matrix (A.5).
+    geo_properties: dict[str, frozenset[str]] = field(default_factory=dict)
+    service_geo_requirements: dict[str, frozenset[str]] = field(default_factory=dict)

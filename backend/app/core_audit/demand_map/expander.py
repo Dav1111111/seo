@@ -281,6 +281,25 @@ def expand_for_site(
 
     emitted: dict[str, TargetClusterDTO] = {}
 
+    # Physical service-geo compatibility matrix (optional, profile-supplied).
+    geo_properties: dict[str, frozenset[str]] = dict(
+        getattr(profile, "geo_properties", {}) or {}
+    )
+    service_geo_requirements: dict[str, frozenset[str]] = dict(
+        getattr(profile, "service_geo_requirements", {}) or {}
+    )
+
+    def _service_geo_compatible(service: str | None, geo: str | None) -> bool:
+        if not service or not geo or not service_geo_requirements or not geo_properties:
+            return True
+        reqs = service_geo_requirements.get(service.lower())
+        if not reqs:
+            return True
+        props = geo_properties.get(geo.lower())
+        if props is None:
+            return True
+        return bool(reqs & props)
+
     for template in templates:
         slot_names = _template_slot_names(template)
         if len(slot_names) > max_depth:
@@ -336,6 +355,14 @@ def expand_for_site(
             if forbidden_tokens and any(
                 val.lower() in forbidden_tokens for val in filled.values() if val
             ):
+                continue
+
+            # Physical service-geo compatibility: drop impossible combos like
+            # "морские прогулки × красная поляна" (no sea in mountains).
+            service_val = filled.get("service") or filled.get("activity")
+            geo_val = (filled.get("city") or filled.get("destination")
+                       or filled.get("region") or filled.get("pickup_city"))
+            if not _service_geo_compatible(service_val, geo_val):
                 continue
             if not filled:
                 # Template with no slots — emit once.

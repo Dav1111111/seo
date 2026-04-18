@@ -25,6 +25,10 @@ from app.profiles.tourism.page_signals import (
     TOURISM_INFO_CTA_PATTERNS,
     TOURISM_URL_PATTERNS,
 )
+from app.profiles.tourism.geo_compatibility import (
+    GEO_PROPERTIES,
+    SERVICE_GEO_REQUIREMENTS,
+)
 from app.profiles.tourism.schema_rules import TOURISM_SCHEMA_RULES
 from app.profiles.tourism.seed_templates import TOURISM_SEED_TEMPLATES
 from app.profiles.tourism.url_heuristics import propose_title, propose_url
@@ -49,6 +53,8 @@ def _build_tour_operator_profile() -> ProfileData:
         eeat_signals=TOURISM_EEAT_SIGNALS,
         commercial_factors=TOURISM_COMMERCIAL_FACTORS,
         seed_cluster_templates=TOURISM_SEED_TEMPLATES,
+        geo_properties=GEO_PROPERTIES,
+        service_geo_requirements=SERVICE_GEO_REQUIREMENTS,
     )
 
 
