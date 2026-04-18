@@ -24,6 +24,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+import app.profiles  # noqa: F401 — triggers profile registration
 from app.config import settings
 from app.core_audit.demand_map.expander import expand_for_site
 from app.core_audit.demand_map.persistence import (
