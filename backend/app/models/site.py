@@ -25,4 +25,13 @@ class Site(Base, TimestampMixin):
     vertical: Mapped[str] = mapped_column(String(32), nullable=False, default="tourism", server_default="tourism")
     business_model: Mapped[str] = mapped_column(String(48), nullable=False, default="tour_operator", server_default="tour_operator")
 
+    # Target Demand Map (Phase A) — user-declared services/geo/competitor brands.
+    # Populated via psql/SQL during early adoption; no UI in Phase A.
+    target_config: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=lambda: {},
+        server_default="{}",
+    )
+
     tenant = relationship("Tenant", back_populates="sites")

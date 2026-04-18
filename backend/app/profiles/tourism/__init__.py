@@ -26,6 +26,7 @@ from app.profiles.tourism.page_signals import (
     TOURISM_URL_PATTERNS,
 )
 from app.profiles.tourism.schema_rules import TOURISM_SCHEMA_RULES
+from app.profiles.tourism.seed_templates import TOURISM_SEED_TEMPLATES
 from app.profiles.tourism.url_heuristics import propose_title, propose_url
 
 
@@ -47,6 +48,7 @@ def _build_tour_operator_profile() -> ProfileData:
         schema_rules=TOURISM_SCHEMA_RULES,
         eeat_signals=TOURISM_EEAT_SIGNALS,
         commercial_factors=TOURISM_COMMERCIAL_FACTORS,
+        seed_cluster_templates=TOURISM_SEED_TEMPLATES,
     )
 
 

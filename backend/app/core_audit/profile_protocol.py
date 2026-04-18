@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from app.core_audit.intent_codes import IntentCode
+
+if TYPE_CHECKING:
+    from app.core_audit.demand_map.dto import SeedTemplate
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,11 @@ class SiteProfile(Protocol):
     eeat_signals: tuple[EEATSignal, ...]
     commercial_factors: tuple[CommercialFactor, ...]
 
+    # Target Demand Map (Phase A) — vertical-level seed templates for
+    # deterministic Cartesian expansion. Default empty tuple keeps older
+    # profiles working unchanged.
+    seed_cluster_templates: "tuple[SeedTemplate, ...]"
+
     # Site-state-dependent helpers (functions, not data)
     def propose_url(self, intent: IntentCode, top_query: str) -> str: ...
     def propose_title(self, intent: IntentCode, top_query: str) -> str: ...
@@ -145,3 +153,5 @@ class ProfileData:
     schema_rules: dict[IntentCode, tuple[str, ...]] = field(default_factory=dict)
     eeat_signals: tuple[EEATSignal, ...] = ()
     commercial_factors: tuple[CommercialFactor, ...] = ()
+    # Target Demand Map seeds — populated by vertical's ./seed_templates.py.
+    seed_cluster_templates: "tuple[SeedTemplate, ...]" = ()
