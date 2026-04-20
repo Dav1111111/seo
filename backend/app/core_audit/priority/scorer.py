@@ -75,6 +75,18 @@ class ScorerContext:
     # "Today" — injectable for deterministic tests
     today: date | None = None
 
+    # ── Phase D — Target Demand Map integration (all optional) ────────
+    # When the USE_TARGET_DEMAND_MAP flag is on, PriorityService looks up
+    # the best-matching TargetCluster for the recommendation's intent
+    # and attaches these fields. When None, the scorer falls back to
+    # the legacy observed-only impact formula.
+    target_cluster_relevance: float | None = None
+    is_brand_cluster: bool = False
+    site_non_brand_coverage_ratio: float | None = None
+    # Cluster-level coverage_score (0..1) for the matched target_cluster —
+    # used by the Phase D impact formula. None in legacy mode.
+    current_coverage_score: float | None = None
+
 
 def score_recommendation(ctx: ScorerContext) -> ScoreBreakdown | None:
     """Score a recommendation. Returns None if the rec should be dropped
@@ -105,6 +117,17 @@ def score_recommendation(ctx: ScorerContext) -> ScoreBreakdown | None:
         score *= DEFERRED_SCORE_MULTIPLIER
         notes.append("deferred_penalty")
 
+    # Phase D — brand dampening: if the recommendation belongs to a brand
+    # cluster AND the site still has weak non-brand coverage foundation,
+    # halve the score so non-brand work surfaces first.
+    if (
+        ctx.is_brand_cluster
+        and ctx.site_non_brand_coverage_ratio is not None
+        and ctx.site_non_brand_coverage_ratio < 0.3
+    ):
+        score *= 0.5
+        notes.append("brand_deprioritized_until_nonbrand_foundation")
+
     return ScoreBreakdown(
         impact=round(impact, 4),
         confidence=round(confidence, 4),
@@ -134,6 +157,38 @@ def _impact(ctx: ScorerContext) -> tuple[float, dict]:
 
     # Category weight
     cat_weight = CATEGORY_IMPACT_WEIGHT.get(ctx.category, DEFAULT_CATEGORY_IMPACT)
+
+    # Phase D — if we have a matched target_cluster, blend observed
+    # impressions with a cluster-gap-weighted component driven by
+    # business_relevance. Legacy path (target_cluster_relevance is None)
+    # uses the original formula byte-identically.
+    if ctx.target_cluster_relevance is not None:
+        cluster_cov = (
+            ctx.current_coverage_score
+            if ctx.current_coverage_score is not None
+            else 0.0
+        )
+        cluster_cov = max(0.0, min(1.0, float(cluster_cov)))
+        rel = max(0.0, min(1.0, float(ctx.target_cluster_relevance)))
+        cluster_gap_weighted = (1.0 - cluster_cov) * rel
+        imp_component = 0.6 * cluster_gap_weighted + 0.4 * imp_norm
+        impact = (
+            0.45 * imp_component
+            + 0.25 * gap_norm
+            + 0.20 * prio_weight
+            + 0.10 * cat_weight
+        )
+        impact = max(min(impact, 1.0), 0.0)
+        return impact, {
+            "impressions_norm": round(imp_norm, 4),
+            "score_gap_norm": round(gap_norm, 4),
+            "priority_weight": prio_weight,
+            "category_weight": cat_weight,
+            "cluster_gap_weighted": round(cluster_gap_weighted, 4),
+            "target_cluster_relevance": round(rel, 4),
+            "cluster_coverage_score": round(cluster_cov, 4),
+            "imp_component": round(imp_component, 4),
+        }
 
     impact = 0.45 * imp_norm + 0.25 * gap_norm + 0.20 * prio_weight + 0.10 * cat_weight
     impact = max(min(impact, 1.0), 0.0)

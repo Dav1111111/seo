@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # Default True so Phase B pipeline is exercised in dev/tests.
     USE_DEMAND_MAP_ENRICHMENT: bool = True
 
+    # Target Demand Map — Phase D feature flag.
+    # When True, Decisioner + PriorityService route through the
+    # target_clusters coverage path (Phase C) instead of the legacy
+    # IntentCode enum path. Default False — parity-safe until we flip
+    # it in a later phase.
+    USE_TARGET_DEMAND_MAP: bool = False
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

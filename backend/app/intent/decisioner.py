@@ -21,6 +21,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.profiles  # noqa: F401 — triggers profile registration
+from app.config import settings
 from app.core_audit.decision_tree import DecisionTree
 from app.core_audit.registry import get_profile
 from app.intent.classifier import classify_query
@@ -76,8 +77,12 @@ class Decisioner:
 
         # 4. Build coverage reports
         analyzer = CoverageAnalyzer()
-        reports = await analyzer.analyze_site(db, site_id)
+        coverage_mode = (
+            "target_clusters" if settings.USE_TARGET_DEMAND_MAP else "legacy_intents"
+        )
+        reports = await analyzer.analyze_site(db, site_id, mode=coverage_mode)
         stats["intents_analyzed"] = len(reports)
+        stats["coverage_mode"] = coverage_mode
 
         # 5. Run decision tree
         tree = DecisionTree()

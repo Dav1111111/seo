@@ -17,10 +17,13 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
+from app.core_audit.demand_map.models import TargetCluster
 from app.core_audit.priority.aggregator import MAX_PER_PAGE_DEFAULT, rank, weekly_plan
 from app.core_audit.priority.dto import PrioritizedItem, WeeklyPlan
 from app.core_audit.priority.scorer import SCORER_VERSION, ScorerContext, score_recommendation
 from app.core_audit.review.models import PageReview, PageReviewRecommendation
+from app.intent.coverage import CoverageAnalyzer
 from app.intent.models import CoverageDecision, PageIntentScore
 from app.models.page import Page
 
@@ -47,6 +50,16 @@ class PriorityService:
         if not latest_ids:
             return {"site_id": str(site_id), "scored": 0, "dropped": 0, "zeroed_older": 0}
 
+        # Phase D — when flag is on, build the per-intent_code cluster
+        # lookup + site-level non-brand coverage ratio up front so the
+        # score loop can attach them to ScorerContext.
+        cluster_by_intent: dict[str, dict] = {}
+        non_brand_ratio: float | None = None
+        if settings.USE_TARGET_DEMAND_MAP:
+            cluster_by_intent, non_brand_ratio = (
+                await self._build_phase_d_site_context(db, site_id)
+            )
+
         # Zero out older review recommendations on this site
         zeroed = await db.execute(
             update(PageReviewRecommendation)
@@ -72,7 +85,13 @@ class PriorityService:
         # Score recs from latest reviews
         scored = 0
         dropped = 0
-        async for ctx, rec_id in self._score_inputs(db, site_id, latest_ids):
+        async for ctx, rec_id in self._score_inputs(
+            db,
+            site_id,
+            latest_ids,
+            cluster_by_intent=cluster_by_intent,
+            non_brand_ratio=non_brand_ratio,
+        ):
             result = score_recommendation(ctx)
             if result is None:
                 # Schema below confidence floor — drop score; rec row stays
@@ -185,8 +204,12 @@ class PriorityService:
         db: AsyncSession,
         site_id: UUID,
         latest_review_ids: set[UUID],
+        *,
+        cluster_by_intent: dict[str, dict] | None = None,
+        non_brand_ratio: float | None = None,
     ):
         """Async generator yielding (ScorerContext, rec_id) tuples."""
+        cluster_by_intent = cluster_by_intent or {}
         stmt = (
             select(
                 PageReviewRecommendation.id,
@@ -237,6 +260,15 @@ class PriorityService:
         for r in rows:
             signal_type, signal_name = self._split_source_finding_id(r.estimated_impact)
             top_q = self._first_top_query(r.top_queries_snapshot)
+
+            # Phase D — attach target_cluster match for this rec's intent.
+            # When flag is off or no cluster found, fields stay None/False
+            # and scorer falls back to legacy formula.
+            cluster_info = cluster_by_intent.get(r.target_intent_code)
+            target_rel = cluster_info["business_relevance"] if cluster_info else None
+            is_brand = bool(cluster_info["is_brand"]) if cluster_info else False
+            cluster_cov = cluster_info.get("coverage_score") if cluster_info else None
+
             ctx = ScorerContext(
                 category=r.category,
                 priority=r.priority,
@@ -249,6 +281,10 @@ class PriorityService:
                 total_impressions_14d=int(decisions.get(r.coverage_decision_id, 0)),
                 current_score=page_scores.get((r.page_id, r.target_intent_code), 0.0),
                 top_query=top_q,
+                target_cluster_relevance=target_rel,
+                is_brand_cluster=is_brand,
+                site_non_brand_coverage_ratio=non_brand_ratio,
+                current_coverage_score=cluster_cov,
             )
             yield ctx, r.id
 
@@ -326,6 +362,61 @@ class PriorityService:
             )
             for r in rows
         ]
+
+    # ── Phase D — site-level target-cluster context ──────────────────
+
+    async def _build_phase_d_site_context(
+        self, db: AsyncSession, site_id: UUID
+    ) -> tuple[dict[str, dict], float | None]:
+        """Return (cluster_by_intent, non_brand_coverage_ratio).
+
+        cluster_by_intent maps intent_code -> best matching target_cluster
+        (max business_relevance): {business_relevance, is_brand,
+        coverage_score}. coverage_score comes from the Phase C analyzer
+        output for the cluster's intent_code.
+        non_brand_coverage_ratio: len(non_brand where coverage_score >=
+        0.6) / len(non_brand). None when the site has no non-brand
+        clusters at all.
+        """
+        # Phase C analyzer gives us per-cluster coverage_score; reuse it
+        # both for the cluster lookup and for the non-brand ratio (Option
+        # A in the plan — keeps things simple, no extra SQL pass).
+        analyzer = CoverageAnalyzer()
+        reports = await analyzer.analyze_site(
+            db, site_id, mode="target_clusters"
+        )
+
+        # Cluster-by-intent: pick the report with highest business_relevance.
+        by_intent: dict[str, dict] = {}
+        for rep in reports:
+            if rep.target_cluster_id is None:
+                continue
+            ic = rep.intent_code.value
+            current = by_intent.get(ic)
+            rel = float(rep.business_relevance or 0.0)
+            if current is None or rel > current["business_relevance"]:
+                by_intent[ic] = {
+                    "business_relevance": rel,
+                    "is_brand": bool(rep.is_brand_cluster),
+                    "coverage_score": (
+                        float(rep.coverage_score)
+                        if rep.coverage_score is not None
+                        else 0.0
+                    ),
+                }
+
+        # Site-level non-brand coverage ratio.
+        non_brand = [r for r in reports if not bool(r.is_brand_cluster)]
+        if not non_brand:
+            non_brand_ratio: float | None = None
+        else:
+            covered = sum(
+                1 for r in non_brand
+                if (r.coverage_score or 0.0) >= 0.6
+            )
+            non_brand_ratio = covered / len(non_brand)
+
+        return by_intent, non_brand_ratio
 
     # ── Helpers ──────────────────────────────────────────────────────
 
