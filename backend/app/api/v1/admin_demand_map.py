@@ -234,6 +234,100 @@ async def export_demand_map_csv(
     )
 
 
+# ---------- Phase F — Draft Profile endpoints ------------------------------
+
+
+class CommitDraftBody(BaseModel):
+    """Body for the commit-draft endpoint.
+
+    `confirm=False` is a read-only preview (no write happens). Any
+    `field_overrides` keys replace the corresponding keys on top of the
+    draft_config before the final write.
+    """
+
+    confirm: bool = True
+    field_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post(
+    "/sites/{site_id}/draft-profile/rebuild",
+    response_model=QueuedResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_draft_profile_rebuild(site_id: uuid.UUID) -> QueuedResponse:
+    """Queue a `draft_profile_build_site` Celery task for the site."""
+    from app.core_audit.draft_profile.tasks import (
+        draft_profile_build_site_task,
+    )
+    task = draft_profile_build_site_task.delay(str(site_id))
+    return QueuedResponse(task_id=task.id, status="queued")
+
+
+@router.get(
+    "/sites/{site_id}/draft-profile",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_draft_profile(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the stored draft profile blob for the site."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    draft = dict(site.target_config_draft or {})
+    return {
+        "site_id": str(site_id),
+        "draft": draft,
+        "has_draft": bool(draft),
+    }
+
+
+@router.post(
+    "/sites/{site_id}/target-config/commit-draft",
+    dependencies=[Depends(_require_admin)],
+)
+async def commit_draft_to_target_config(
+    site_id: uuid.UUID,
+    body: CommitDraftBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Copy `target_config_draft.draft_config` onto `target_config`.
+
+    Applies optional `field_overrides` on top of the draft before
+    writing. When `confirm=False`, returns a preview of the merged
+    config without writing.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    draft_blob = dict(site.target_config_draft or {})
+    draft_config = dict(draft_blob.get("draft_config") or {})
+    if not draft_config:
+        raise HTTPException(
+            status_code=400, detail="no draft profile to commit",
+        )
+
+    merged: dict[str, Any] = dict(draft_config)
+    for k, v in (body.field_overrides or {}).items():
+        merged[k] = v
+
+    if not body.confirm:
+        return {
+            "committed": False,
+            "preview": True,
+            "target_config": merged,
+        }
+
+    site.target_config = merged
+    await db.flush()
+    return {
+        "committed": True,
+        "target_config": merged,
+    }
+
+
 def _cluster_dto(r: TargetCluster, queries_count: int) -> dict[str, Any]:
     return {
         "id": str(r.id),
