@@ -14,6 +14,55 @@ def render_markdown(report: WeeklyReport) -> str:
                f"статус: {m.status}")
     out.append("")
 
+    # 0. Diagnostic (Phase E) — rendered only when available.
+    d = report.diagnostic
+    if d.available:
+        out.append("# 🧭 Корневая проблема")
+        out.append(d.root_problem_ru)
+        out.append("")
+        if d.supporting_symptoms_ru:
+            out.append("**Сопутствующие симптомы:**")
+            for s in d.supporting_symptoms_ru:
+                out.append(f"- {s}")
+            out.append("")
+        if d.recommended_first_actions_ru:
+            out.append("**Что делать в первую очередь:**")
+            for i, a in enumerate(d.recommended_first_actions_ru, 1):
+                out.append(f"{i}. {a}")
+            out.append("")
+
+        bd = d.brand_demand or {}
+        nbd = d.non_brand_demand or {}
+        out.append("**Спрос**")
+        out.append(
+            f"- Брендовый: {bd.get('clusters', 0)} кластеров, "
+            f"{bd.get('observed_impressions', 0)} показов"
+        )
+        out.append(
+            f"- Небрендовый: {nbd.get('clusters', 0)} кластеров, "
+            f"{nbd.get('observed_impressions', 0)} показов, "
+            f"{nbd.get('covered', 0)}/{nbd.get('clusters', 0)} покрыты"
+        )
+        out.append("")
+
+        if d.missing_target_clusters:
+            out.append("**Приоритетные пробелы (топ-10):**")
+            for c in d.missing_target_clusters:
+                cov = (
+                    f"{c.coverage_score:.2f}" if c.coverage_score is not None else "—"
+                )
+                out.append(
+                    f"- {c.name_ru} — релевантность {c.business_relevance:.2f}, "
+                    f"покрытие {cov}"
+                )
+            out.append("")
+
+        if d.low_priority_findings:
+            out.append("**Понижено в приоритете (было топом в старой выдаче):**")
+            for f_ in d.low_priority_findings:
+                out.append(f"- {f_}")
+            out.append("")
+
     # 1. Executive
     e = report.executive
     out.append(f"## 1. Резюме  ·  Health Score: **{e.health_score}/100**")

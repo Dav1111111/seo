@@ -145,9 +145,62 @@ class TechnicalSection(BaseModel):
     warning_ru: str | None = None
 
 
+# ── 0. Diagnostic (Phase E — Target Demand Map) ───────────────────────
+
+class ClusterRef(BaseModel):
+    """Compact reference to a target_cluster for diagnostic listings."""
+    cluster_key: str
+    name_ru: str
+    cluster_type: str
+    quality_tier: str
+    business_relevance: float
+    coverage_score: float | None = None
+    is_brand: bool = False
+
+
+class DiagnosticSection(BaseModel):
+    """Root-cause diagnostic section, computed when USE_TARGET_DEMAND_MAP=True.
+
+    When the flag is off OR the site has no target_clusters rows the section
+    degrades to `available=False` with a skeleton payload — no DB work, no
+    LLM call, zero cost. Downstream consumers that do not know about the
+    `diagnostic` field simply ignore it (additive change).
+    """
+
+    available: bool = False
+    # "brand_bias" | "weak_technical" | "low_coverage" | "none" | "insufficient_data"
+    root_problem_classification: str = "insufficient_data"
+    root_problem_ru: str = ""
+    supporting_symptoms_ru: list[str] = Field(default_factory=list)
+    recommended_first_actions_ru: list[str] = Field(default_factory=list)
+
+    # Transparent signal dict so both the user and downstream agents
+    # can audit exactly why the trigger fired.
+    signals: dict[str, Any] = Field(default_factory=dict)
+
+    # Brand vs non-brand demand split.
+    brand_demand: dict[str, Any] = Field(default_factory=dict)
+    non_brand_demand: dict[str, Any] = Field(default_factory=dict)
+
+    # Top covered / missing clusters for navigation.
+    covered_target_clusters: list[ClusterRef] = Field(default_factory=list)
+    missing_target_clusters: list[ClusterRef] = Field(default_factory=list)
+
+    # Legacy-report top-ranked items that are demoted by the diagnostic
+    # (e.g. title/h1 tweaks on brand pages when trigger_brand_bias=True).
+    low_priority_findings: list[str] = Field(default_factory=list)
+
+    # Source of the prose ("llm" | "template" | "skeleton").
+    prose_source: str = "skeleton"
+
+
 # ── Composite ─────────────────────────────────────────────────────────
 
 class WeeklyReport(BaseModel):
+    # Phase E: diagnostic is the FIRST section. Optional in legacy consumers —
+    # default factory returns an `available=False` skeleton so JSONB
+    # serialisation stays stable when the flag is off.
+    diagnostic: DiagnosticSection = Field(default_factory=DiagnosticSection)
     meta: ReportMeta
     executive: ExecutiveSection
     action_plan: ActionPlanSection

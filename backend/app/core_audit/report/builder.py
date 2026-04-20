@@ -28,6 +28,7 @@ from app.core_audit.report.prose import (
 )
 from app.core_audit.report.sections.action_plan import build_action_plan
 from app.core_audit.report.sections.coverage import build_coverage
+from app.core_audit.report.sections.diagnostic import build_diagnostic
 from app.core_audit.report.sections.page_findings import build_page_findings
 from app.core_audit.report.sections.query_trends import build_query_trends
 from app.core_audit.report.sections.technical import build_technical
@@ -55,6 +56,11 @@ class ReportBuilder:
 
         site = (await db.execute(select(Site).where(Site.id == site_id))).scalar_one_or_none()
         host = site.domain if site else str(site_id)
+
+        # ── Phase E: Diagnostic FIRST (flag-gated inside build_diagnostic).
+        # When USE_TARGET_DEMAND_MAP=False this returns a cheap skeleton
+        # (no DB queries beyond a target_clusters existence check, no LLM).
+        diagnostic = await build_diagnostic(db, site_id)
 
         # ── Data sections (in parallel is fine; keep serial for clarity + debug)
         coverage = await build_coverage(db, site_id)
@@ -104,6 +110,13 @@ class ReportBuilder:
                 }
                 for it in action_plan.items[:5]
             ],
+            # Phase E: surface diagnostic signal summary to executive prose so
+            # exec-level narrative cross-references the diagnostic's root cause
+            # coherently. When diagnostic.available=False this is a no-op
+            # payload the LLM can simply ignore.
+            "diagnostic_available": diagnostic.available,
+            "diagnostic_classification": diagnostic.root_problem_classification,
+            "diagnostic_signals": diagnostic.signals,
         }
 
         prose_result, prose_usage = generate_prose(prose_payload)
@@ -147,6 +160,7 @@ class ReportBuilder:
         )
 
         return WeeklyReport(
+            diagnostic=diagnostic,
             meta=meta,
             executive=executive,
             action_plan=action_plan,
