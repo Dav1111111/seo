@@ -4,6 +4,15 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
 export const SITE_ID = process.env.NEXT_PUBLIC_SITE_ID || "1e11339f-c87e-4742-9d38-6f79463b0d16";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // Guard against empty siteId that would produce "/sites//..." URLs.
+  // Happens when the SiteProvider context hasn't hydrated yet but a
+  // component tries to fetch. Fail fast with a clear message.
+  if (path.includes("//")) {
+    throw new Error(
+      "API call skipped: siteId is empty (context not ready yet). " +
+      "Wait for site to load and try again."
+    );
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     headers: {
       "Content-Type": "application/json",
