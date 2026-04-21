@@ -254,4 +254,32 @@ export const api = {
     apiFetch<any>(`/sites/${siteId}/onboarding/complete`, {
       method: "POST", base: "admin",
     }),
+
+  // Competitor discovery (SERP-based)
+  triggerCompetitorDiscovery: (siteId: string, maxQueries = 20, topK = 10) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/sites/${siteId}/competitors/discover?max_queries=${maxQueries}&top_k=${topK}`,
+      { method: "POST", base: "admin" },
+    ),
+  getCompetitors: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      domain: string;
+      competitor_domains: string[];
+      profile: {
+        queries_probed?: number;
+        queries_with_results?: number;
+        competitors?: Array<{
+          domain: string;
+          serp_hits: number;
+          best_position: number;
+          avg_position: number;
+          example_url: string;
+          example_title: string;
+          example_query: string;
+        }>;
+        cost_usd?: number;
+        errors?: Record<string, number>;
+      };
+    }>(`/sites/${siteId}/competitors`, { base: "admin" }),
 };
