@@ -1,45 +1,26 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
+const ADMIN_PROXY = "/admin-proxy";  // Next.js server-side proxy — holds the admin key in backend env only
 
 // Default site ID — in Phase 9 this becomes dynamic
 export const SITE_ID = process.env.NEXT_PUBLIC_SITE_ID || "1e11339f-c87e-4742-9d38-6f79463b0d16";
 
-function getAdminKey(): string {
-  if (typeof window !== "undefined") {
-    const saved = window.localStorage.getItem("gt_admin_key");
-    if (saved) return saved;
-  }
-  return process.env.NEXT_PUBLIC_ADMIN_KEY || "";
-}
-
-export function setAdminKey(key: string): void {
-  if (typeof window === "undefined") return;
-  if (key) window.localStorage.setItem("gt_admin_key", key);
-  else window.localStorage.removeItem("gt_admin_key");
-}
-
-async function apiFetch<T>(path: string, init?: RequestInit & { admin?: boolean }): Promise<T> {
-  // Guard against empty siteId that would produce "/sites//..." URLs.
-  // Happens when the SiteProvider context hasn't hydrated yet but a
-  // component tries to fetch. Fail fast with a clear message.
+async function apiFetch<T>(
+  path: string,
+  init?: RequestInit & { base?: "api" | "admin" },
+): Promise<T> {
   if (path.includes("//")) {
     throw new Error(
       "API call skipped: siteId is empty (context not ready yet). " +
       "Wait for site to load and try again."
     );
   }
-  const extra: Record<string, string> = {};
-  if (init?.admin) {
-    const key = getAdminKey();
-    if (!key) throw new Error("Admin key not set. Откройте Настройки и введите X-Admin-Key.");
-    extra["X-Admin-Key"] = key;
-  }
-  const { admin: _drop, ...rest } = init || {};
-  const res = await fetch(`${API_BASE}${path}`, {
+  const { base = "api", ...rest } = init || {};
+  const prefix = base === "admin" ? ADMIN_PROXY : API_BASE;
+  const res = await fetch(`${prefix}${path}`, {
     headers: {
       "Content-Type": "application/json",
-      "ngrok-skip-browser-warning": "true",  // bypass ngrok interstitial
-      ...extra,
-      ...rest?.headers,
+      "ngrok-skip-browser-warning": "true",
+      ...rest.headers,
     },
     ...rest,
   });
@@ -190,29 +171,28 @@ export const api = {
     }),
 
   // Admin — Draft Profile (Phase F/G)
+  // These go through the Next.js server-side proxy (/admin-proxy/*) which
+  // injects X-Admin-Key from backend env. No key ever touches the browser.
   draftProfile: (siteId: string) =>
     apiFetch<{ site_id: string; draft: any; has_draft: boolean }>(
-      `/admin/sites/${siteId}/draft-profile`,
-      { admin: true },
+      `/sites/${siteId}/draft-profile`, { base: "admin" },
     ),
   triggerDraftRebuild: (siteId: string) =>
     apiFetch<{ task_id: string; status: string }>(
-      `/admin/sites/${siteId}/draft-profile/rebuild`,
-      { method: "POST", admin: true },
+      `/sites/${siteId}/draft-profile/rebuild`, { method: "POST", base: "admin" },
     ),
   commitDraft: (
     siteId: string,
     body: { confirm: boolean; field_overrides?: Record<string, any> } = { confirm: true },
   ) =>
     apiFetch<{ committed: boolean; preview?: boolean; target_config: any }>(
-      `/admin/sites/${siteId}/target-config/commit-draft`,
-      { method: "POST", admin: true, body: JSON.stringify(body) },
+      `/sites/${siteId}/target-config/commit-draft`,
+      { method: "POST", base: "admin", body: JSON.stringify(body) },
     ),
   demandMap: (siteId: string, params: Record<string, string | number> = {}) => {
     const qs = new URLSearchParams(params as any).toString();
     return apiFetch<{ clusters_total: number; items: any[] }>(
-      `/admin/sites/${siteId}/demand-map${qs ? `?${qs}` : ""}`,
-      { admin: true },
+      `/sites/${siteId}/demand-map${qs ? `?${qs}` : ""}`, { base: "admin" },
     );
   },
 };

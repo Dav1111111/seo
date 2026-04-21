@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import useSWR from "swr";
-import { api, setAdminKey } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useCurrentSiteId } from "@/lib/site-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,7 @@ import {
   Select, SelectContent, SelectItem,
   SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { CheckCircle, XCircle, KeyRound } from "lucide-react";
+import { CheckCircle, XCircle } from "lucide-react";
 
 const MODES = [
   {
@@ -52,24 +52,6 @@ export default function SettingsPage() {
   const [mode, setMode] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [adminKeyInput, setAdminKeyInput] = useState("");
-  const [hasAdminKey, setHasAdminKey] = useState(false);
-  const [adminKeyMsg, setAdminKeyMsg] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      setHasAdminKey(!!window.localStorage.getItem("gt_admin_key") || !!process.env.NEXT_PUBLIC_ADMIN_KEY);
-    }
-  }, []);
-
-  function saveAdminKey() {
-    const v = adminKeyInput.trim();
-    setAdminKey(v);
-    setHasAdminKey(!!v);
-    setAdminKeyInput("");
-    setAdminKeyMsg(v ? "Ключ сохранён." : "Ключ очищен.");
-    setTimeout(() => setAdminKeyMsg(null), 2500);
-  }
 
   useEffect(() => {
     if (site?.operating_mode) setMode(site.operating_mode);
@@ -134,39 +116,6 @@ export default function SettingsPage() {
               </div>
             </>
           )}
-        </CardContent>
-      </Card>
-
-      {/* Admin key (Phase F/G) */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <KeyRound className="h-4 w-4" /> Admin API-ключ
-          </CardTitle>
-          <CardDescription>
-            Нужен для админских эндпоинтов: Профиль спроса, карта спроса.
-            Хранится локально в браузере.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Badge variant={hasAdminKey ? "default" : "destructive"} className="text-xs">
-              {hasAdminKey ? "задан" : "не задан"}
-            </Badge>
-            {adminKeyMsg && <span className="text-xs text-emerald-700">{adminKeyMsg}</span>}
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              value={adminKeyInput}
-              onChange={(e) => setAdminKeyInput(e.target.value)}
-              type="password"
-              placeholder={hasAdminKey ? "••••••  (ввести новый)" : "введите admin-ключ…"}
-              className="flex-1 rounded-md border bg-background px-3 py-2 text-sm"
-            />
-            <Button size="sm" onClick={saveAdminKey}>
-              {adminKeyInput.trim() ? "Сохранить" : (hasAdminKey ? "Очистить" : "Сохранить")}
-            </Button>
-          </div>
         </CardContent>
       </Card>
 

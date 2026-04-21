@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
-import { api, setAdminKey } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useCurrentSiteId } from "@/lib/site-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/table";
 import { ConfidenceChip } from "@/components/demand-profile/confidence-chip";
 import { ChipEditor } from "@/components/demand-profile/chip-editor";
-import { RefreshCw, Check, Eye, KeyRound } from "lucide-react";
+import { RefreshCw, Check, Eye } from "lucide-react";
 
 interface FieldConfidence {
   field: string;
@@ -51,27 +51,19 @@ function confMap(list: FieldConfidence[] | undefined): Record<string, FieldConfi
 
 export default function DemandProfilePage() {
   const siteId = useCurrentSiteId();
-  const [keyInput, setKeyInput] = useState("");
-  const [keyOk, setKeyOk] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
   const [edits, setEdits] = useState<DraftConfig>({});
 
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      setKeyOk(!!window.localStorage.getItem("gt_admin_key") || !!process.env.NEXT_PUBLIC_ADMIN_KEY);
-    }
-  }, []);
-
   const { data, isLoading, error, mutate } = useSWR(
-    siteId && keyOk ? `draft-${siteId}` : null,
+    siteId ? `draft-${siteId}` : null,
     () => api.draftProfile(siteId),
     { refreshInterval: 0 },
   );
 
   const { data: mapData } = useSWR(
-    siteId && keyOk ? `map-${siteId}` : null,
+    siteId ? `map-${siteId}` : null,
     () => api.demandMap(siteId, { limit: 50 }),
   );
 
@@ -127,13 +119,6 @@ export default function DemandProfilePage() {
     }
   }
 
-  function saveKey() {
-    setAdminKey(keyInput.trim());
-    setKeyOk(!!keyInput.trim());
-    setKeyInput("");
-    mutate();
-  }
-
   const diffFields = (["services", "excluded_services", "geo_primary", "geo_secondary", "excluded_geo", "competitor_brands"] as const)
     .filter((f) => JSON.stringify(edits[f] || []) !== JSON.stringify(cfg[f] || []));
 
@@ -147,7 +132,7 @@ export default function DemandProfilePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={onRebuild} disabled={rebuilding || !siteId || !keyOk}>
+          <Button size="sm" variant="outline" onClick={onRebuild} disabled={rebuilding || !siteId}>
             <RefreshCw className={`mr-2 h-4 w-4 ${rebuilding ? "animate-spin" : ""}`} />
             {rebuilding ? "Ставим в очередь…" : "Пересобрать"}
           </Button>
@@ -159,26 +144,6 @@ export default function DemandProfilePage() {
           </Button>
         </div>
       </div>
-
-      {!keyOk && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <KeyRound className="h-4 w-4" /> Нужен X-Admin-Key
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex items-center gap-2">
-            <input
-              value={keyInput}
-              onChange={(e) => setKeyInput(e.target.value)}
-              type="password"
-              placeholder="введите admin-ключ…"
-              className="flex-1 rounded-md border bg-background px-3 py-2 text-sm"
-            />
-            <Button size="sm" onClick={saveKey} disabled={!keyInput.trim()}>Сохранить</Button>
-          </CardContent>
-        </Card>
-      )}
 
       {banner && (
         <div className={`rounded border px-3 py-2 text-sm ${banner.kind === "ok"
@@ -198,7 +163,7 @@ export default function DemandProfilePage() {
         <div className="space-y-3">
           {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-24" />)}
         </div>
-      ) : !keyOk ? null : !data?.has_draft ? (
+      ) : !data?.has_draft ? (
         <Card>
           <CardContent className="py-10 text-center text-sm text-muted-foreground">
             Черновик ещё не собран. Нажмите «Пересобрать» и вернитесь через минуту.
