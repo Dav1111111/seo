@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   RefreshCw, Search, ExternalLink, Swords,
-  TrendingDown, Layers, Check, X,
+  TrendingDown, Layers, Check, X, Target,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -19,7 +19,7 @@ export default function CompetitorsPage() {
   const siteId = useCurrentSiteId();
   const [discovering, setDiscovering] = useState(false);
   const [diving, setDiving] = useState(false);
-  const [tab, setTab] = useState<"list" | "gaps" | "dive">("list");
+  const [tab, setTab] = useState<"opps" | "list" | "gaps" | "dive">("opps");
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
   const listSWR = useSWR(
@@ -35,6 +35,11 @@ export default function CompetitorsPage() {
   const diveSWR = useSWR(
     siteId ? `dive-${siteId}` : null,
     () => api.getCompetitorDeepDive(siteId),
+    { refreshInterval: 0 },
+  );
+  const oppsSWR = useSWR(
+    siteId ? `opps-${siteId}` : null,
+    () => api.getGrowthOpportunities(siteId),
     { refreshInterval: 0 },
   );
 
@@ -68,12 +73,14 @@ export default function CompetitorsPage() {
     listSWR.mutate();
     gapsSWR.mutate();
     diveSWR.mutate();
+    oppsSWR.mutate();
   }
 
   const list = listSWR.data;
   const competitors = list?.profile?.competitors ?? [];
   const gaps = gapsSWR.data?.gaps ?? [];
   const dive = diveSWR.data;
+  const opps = oppsSWR.data?.opportunities ?? [];
 
   return (
     <div className="space-y-6">
@@ -111,6 +118,10 @@ export default function CompetitorsPage() {
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as any)}>
         <TabsList>
+          <TabsTrigger value="opps">
+            <Target className="h-4 w-4 mr-2" />Что делать
+            {opps.length > 0 && <Badge variant="secondary" className="ml-2">{opps.length}</Badge>}
+          </TabsTrigger>
           <TabsTrigger value="list">
             Список
             {competitors.length > 0 && <Badge variant="secondary" className="ml-2">{competitors.length}</Badge>}
@@ -126,6 +137,84 @@ export default function CompetitorsPage() {
             )}
           </TabsTrigger>
         </TabsList>
+
+        {/* OPPORTUNITIES TAB */}
+        <TabsContent value="opps" className="mt-4">
+          {oppsSWR.isLoading ? (
+            <div className="space-y-2">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-24" />)}</div>
+          ) : opps.length === 0 ? (
+            <Card>
+              <CardContent className="py-10 text-center text-sm text-muted-foreground">
+                План действий появится после запуска разведки + глубокого анализа.
+                Нажми «Пересобрать список» — он автоматически потянет глубокий анализ
+                и сгенерирует план.
+              </CardContent>
+            </Card>
+          ) : (
+            <ul className="space-y-3">
+              {opps.map((o) => (
+                <li key={o.id} className="rounded-lg border bg-card p-4 space-y-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "text-[10px]",
+                        o.priority === "high"
+                          ? "bg-rose-100 text-rose-800 border-rose-300"
+                          : o.priority === "medium"
+                          ? "bg-amber-100 text-amber-800 border-amber-300"
+                          : "bg-slate-100 text-slate-700 border-slate-300",
+                      )}
+                    >
+                      {o.priority}
+                    </Badge>
+                    <Badge variant="secondary" className="text-[10px]">
+                      {o.source === "content_gap"
+                        ? "новая страница"
+                        : o.source === "feature_diff"
+                        ? "элемент сайта"
+                        : "schema.org"}
+                    </Badge>
+                  </div>
+                  <h3 className="font-semibold leading-snug">{o.title_ru}</h3>
+                  <p className="text-sm text-muted-foreground leading-snug">{o.reasoning_ru}</p>
+                  <p className="text-sm leading-snug">{o.suggested_action_ru}</p>
+
+                  {o.source === "content_gap" && o.evidence?.queries && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                        Запросы в кластере ({o.evidence.queries.length})
+                      </summary>
+                      <ul className="mt-2 space-y-0.5 pl-4 text-muted-foreground">
+                        {o.evidence.queries.map((q: string, i: number) => (
+                          <li key={i} className="font-mono">· {q}</li>
+                        ))}
+                      </ul>
+                      {o.evidence.competitor_url && (
+                        <a
+                          href={o.evidence.competitor_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 mt-2 text-primary hover:underline"
+                        >
+                          <ExternalLink className="h-3 w-3" /> пример страницы
+                          у {o.evidence.competitor_domain}
+                        </a>
+                      )}
+                    </details>
+                  )}
+
+                  {(o.source === "feature_diff" || o.source === "schema_diff") &&
+                    Array.isArray(o.evidence?.competitors_with) && (
+                      <div className="text-xs text-muted-foreground">
+                        Есть у: {o.evidence.competitors_with.join(", ")}
+                      </div>
+                    )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </TabsContent>
 
         {/* LIST TAB */}
         <TabsContent value="list" className="mt-4">

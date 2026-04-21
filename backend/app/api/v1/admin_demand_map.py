@@ -707,6 +707,31 @@ async def trigger_competitor_deep_dive(site_id: uuid.UUID) -> QueuedResponse:
 
 
 @router.get(
+    "/sites/{site_id}/competitors/opportunities",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_growth_opportunities(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the latest list of growth opportunities.
+
+    Produced at the end of a deep-dive task. Each opportunity is a
+    concrete action: create-a-page, add-a-feature, add-schema etc.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    opps = (site.target_config or {}).get("growth_opportunities") or []
+    return {
+        "site_id": str(site_id),
+        "own_domain": site.domain,
+        "count": len(opps),
+        "opportunities": opps,
+    }
+
+
+@router.get(
     "/sites/{site_id}/competitors/deep-dive",
     dependencies=[Depends(_require_admin)],
 )

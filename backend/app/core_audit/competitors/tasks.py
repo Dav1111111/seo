@@ -216,6 +216,21 @@ def competitors_discover_site_task(
                     site.target_config = cfg
 
                     await db.commit()
+
+                    # Chain: discovery done → fire deep-dive automatically
+                    # so the comparison table and growth opportunities are
+                    # ready without the user clicking a second button.
+                    # Skip the chain if we found nothing — deep-dive would
+                    # have nothing to crawl.
+                    if profile.competitors:
+                        try:
+                            competitors_deep_dive_site_task.delay(site_id)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning(
+                                "competitors.discovery.chain_dive_failed "
+                                "site=%s err=%s", site_id, exc,
+                            )
+
                     return {
                         "status": "ok",
                         "site_id": site_id,
@@ -225,6 +240,7 @@ def competitors_discover_site_task(
                         "top3": [c.domain for c in profile.competitors[:3]],
                         "cost_usd": round(profile.cost_usd, 4),
                         "errors": profile.errors,
+                        "deep_dive_queued": bool(profile.competitors),
                     }
                 finally:
                     await db.execute(
@@ -253,10 +269,12 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
     Persists to sites.target_config.competitor_deep_dive (list of site
     reports, plus a 'self' entry).
     """
+    from app.core_audit.competitors.content_gap import analyze_gaps
     from app.core_audit.competitors.deep_dive import (
         analyze_competitor_site,
         analyze_page,
     )
+    from app.core_audit.competitors.opportunities import build_growth_opportunities
 
     async def _inner() -> dict:
         try:
@@ -297,6 +315,27 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                     "competitors": reports,
                     "self": own_page,
                 }
+
+                # Build growth opportunities from (cached gaps + fresh deep-dive).
+                # Gaps come from the per-query SERP cache captured by discovery.
+                query_serps = profile.get("query_serps") or {}
+                gap_dicts = []
+                if query_serps:
+                    gaps = analyze_gaps(
+                        own_domain=site.domain,
+                        competitor_domains=list(site.competitor_domains or []),
+                        query_to_serp=query_serps,
+                        top_k_gaps=25,
+                    )
+                    gap_dicts = [g.to_dict() for g in gaps]
+
+                opportunities = build_growth_opportunities(
+                    content_gaps=gap_dicts,
+                    deep_dive_self=own_page,
+                    deep_dive_competitors=reports,
+                    max_items=15,
+                )
+                cfg["growth_opportunities"] = opportunities
                 site.target_config = cfg
                 await db.commit()
 
@@ -309,6 +348,7 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                         for p in r.get("pages", [])
                         if p.get("status") == "ok"
                     ),
+                    "opportunities_generated": len(opportunities),
                 }
         except Exception as exc:  # noqa: BLE001
             log.warning(

@@ -313,4 +313,21 @@ export const api = {
       self: any;
       competitors: any[];
     }>(`/sites/${siteId}/competitors/deep-dive`, { base: "admin" }),
+
+  getGrowthOpportunities: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      own_domain: string;
+      count: number;
+      opportunities: Array<{
+        id: string;
+        source: "content_gap" | "feature_diff" | "schema_diff";
+        category: "new_page" | "on_page_feature" | "schema" | "contact";
+        priority: "high" | "medium" | "low";
+        title_ru: string;
+        reasoning_ru: string;
+        suggested_action_ru: string;
+        evidence: Record<string, any>;
+      }>;
+    }>(`/sites/${siteId}/competitors/opportunities`, { base: "admin" }),
 };
