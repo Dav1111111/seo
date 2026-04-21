@@ -130,7 +130,7 @@ export default function PrioritiesPage() {
               </div>
               <div className="space-y-3">
                 {planItems.map((it) => (
-                  <PriorityCard key={it.recommendation_id} item={it} onMutated={refresh} />
+                  <PriorityCard key={it.recommendation_id} item={it} onMutated={refresh} siteId={siteId} />
                 ))}
               </div>
             </>
@@ -197,7 +197,7 @@ export default function PrioritiesPage() {
           ) : (
             <div className="space-y-3">
               {backlogItems.map((it) => (
-                <PriorityCard key={it.recommendation_id} item={it} onMutated={refresh} />
+                <PriorityCard key={it.recommendation_id} item={it} onMutated={refresh} siteId={siteId} />
               ))}
             </div>
           )}

@@ -34,6 +34,12 @@ import re
 from collections import Counter
 from typing import Iterable, Sequence
 
+from app.core_audit.competitors.page_match import (
+    STRONG_MATCH_THRESHOLD,
+    WEAK_MATCH_THRESHOLD,
+    find_best_page,
+)
+
 
 # Features we track in deep-dive and how to phrase them.
 FEATURE_LABELS: dict[str, tuple[str, str]] = {
@@ -162,10 +168,21 @@ class Opportunity:
 
 # ── Source 1: content gaps ────────────────────────────────────────────
 
-def _content_gap_opportunities(gap_rows: Sequence[dict]) -> list[Opportunity]:
-    """Group gaps by normalised query, emit one "create page" per group."""
+def _content_gap_opportunities(
+    gap_rows: Sequence[dict],
+    own_pages: Sequence[dict] | None = None,
+) -> list[Opportunity]:
+    """Group gaps by normalised query, emit one opportunity per group.
+
+    If one of our own pages matches the gap query strongly (token
+    overlap on title/h1/url), category is `strengthen_existing_page`
+    — owner already has a page, just needs to reinforce it. Otherwise
+    `new_page` as before.
+    """
     if not gap_rows:
         return []
+
+    pages = list(own_pages or [])
 
     buckets: dict[str, list[dict]] = {}
     for row in gap_rows:
@@ -182,6 +199,16 @@ def _content_gap_opportunities(gap_rows: Sequence[dict]) -> list[Opportunity]:
         queries = [r.get("query") for r in rows if r.get("query")]
         best_comp_pos = top.get("competitor_position", 99)
         site_pos = top.get("site_position")
+        display_query = min(queries, key=len) if queries else key
+
+        # Check if we already have a page that matches this topic
+        match = find_best_page(display_query, pages) if pages else None
+        is_strong = match is not None and match.score >= STRONG_MATCH_THRESHOLD
+        is_weak = (
+            match is not None
+            and match.score >= WEAK_MATCH_THRESHOLD
+            and match.score < STRONG_MATCH_THRESHOLD
+        )
 
         # Priority: top-3 competitor position + site absent = high
         if best_comp_pos <= 3 and (site_pos is None or site_pos > 30):
@@ -191,40 +218,81 @@ def _content_gap_opportunities(gap_rows: Sequence[dict]) -> list[Opportunity]:
         else:
             prio = "low"
 
-        # Human title uses the shortest canonical-looking query in the cluster
-        display_query = min(queries, key=len) if queries else key
-        title = f"Создай страницу по теме «{display_query}»"
-        reasoning = (
-            f"Конкурент {top.get('competitor_domain')} стоит на позиции "
-            f"{best_comp_pos} по этому запросу, ты "
-            + (f"на позиции {site_pos}" if site_pos else "не ранжируешься в топ-100")
-            + ". В кластере "
-            + f"{len(queries)} похожих запрос"
-            + ("" if len(queries) == 1 else ("а" if 1 < len(queries) < 5 else "ов"))
-            + "."
-        )
-        action = (
-            "Сделай отдельную посадочную под эту тему: "
-            "заголовок с ключевой фразой, описание услуги, цена, "
-            "кнопка брони, 3–5 фото, секция FAQ."
-        )
+        if is_strong:
+            category = "strengthen_existing_page"
+            page_url = match.url or match.path
+            title = f"Усиль страницу «{match.title or page_url}» под «{display_query}»"
+            reasoning = (
+                f"Конкурент {top.get('competitor_domain')} стоит на позиции "
+                f"{best_comp_pos} по запросу «{display_query}». У тебя "
+                + (
+                    f"уже есть страница {page_url} — но ты {'на позиции ' + str(site_pos) if site_pos else 'не в топ-100'}. "
+                    f"Значит, странице нужна докрутка: недостаёт сигналов "
+                    f"intent и покрытия темы."
+                )
+            )
+            missing = ", ".join(match.missing_tokens[:5]) if match.missing_tokens else ""
+            action = (
+                "Докрути существующую страницу: "
+                + (f"добавь в заголовок и h1 слова — {missing}. " if missing else "")
+                + "Разверни описание услуги, вынеси цену в первый экран, "
+                "добавь 3–5 фото, секцию FAQ, отзывы. "
+                "Проверь внутреннюю перелинковку на эту страницу с главной."
+            )
+        elif is_weak:
+            category = "crossover_page"
+            page_url = match.url or match.path
+            title = f"Стрейтч-тема: страница «{match.title or page_url}» пока слабо покрывает «{display_query}»"
+            reasoning = (
+                f"У тебя есть близкая страница {page_url} (совпадение "
+                f"{int(match.score * 100)}%), но она не полностью "
+                f"отвечает на «{display_query}». Конкурент "
+                f"{top.get('competitor_domain')} на позиции {best_comp_pos}."
+            )
+            action = (
+                "Реши: расширить существующую страницу под новую тему "
+                "или создать отдельную посадочную. Расширять дешевле, "
+                "отдельная обычно ранжируется лучше."
+            )
+        else:
+            category = "new_page"
+            title = f"Создай страницу по теме «{display_query}»"
+            reasoning = (
+                f"Конкурент {top.get('competitor_domain')} стоит на позиции "
+                f"{best_comp_pos} по этому запросу, ты "
+                + (f"на позиции {site_pos}" if site_pos else "не ранжируешься в топ-100")
+                + ". В кластере "
+                + f"{len(queries)} похожих запрос"
+                + ("" if len(queries) == 1 else ("а" if 1 < len(queries) < 5 else "ов"))
+                + ". Подходящей страницы на твоём сайте не найдено."
+            )
+            action = (
+                "Сделай отдельную посадочную под эту тему: "
+                "заголовок с ключевой фразой, описание услуги, цена, "
+                "кнопка брони, 3–5 фото, секция FAQ."
+            )
+
+        evidence = {
+            "queries": queries[:10],
+            "competitor_domain": top.get("competitor_domain"),
+            "competitor_position": best_comp_pos,
+            "competitor_url": top.get("competitor_url"),
+            "competitor_title": top.get("competitor_title"),
+            "site_position": site_pos,
+            "other_competitors": top.get("other_competitors") or [],
+        }
+        if match is not None:
+            evidence["matched_page"] = match.to_dict()
+
         out.append(Opportunity(
             id=_opp_id("content_gap", key),
             source="content_gap",
-            category="new_page",
+            category=category,
             priority=prio,
             title_ru=title,
             reasoning_ru=reasoning,
             suggested_action_ru=action,
-            evidence={
-                "queries": queries[:10],
-                "competitor_domain": top.get("competitor_domain"),
-                "competitor_position": best_comp_pos,
-                "competitor_url": top.get("competitor_url"),
-                "competitor_title": top.get("competitor_title"),
-                "site_position": site_pos,
-                "other_competitors": top.get("other_competitors") or [],
-            },
+            evidence=evidence,
         ))
 
     out.sort(key=lambda o: {"high": 0, "medium": 1, "low": 2}[o.priority])
@@ -341,15 +409,24 @@ def build_growth_opportunities(
     content_gaps: Sequence[dict] | None,
     deep_dive_self: dict | None,
     deep_dive_competitors: Sequence[dict] | None,
+    own_pages: Sequence[dict] | None = None,
     max_items: int = 15,
 ) -> list[dict]:
-    """Compose all opportunity sources into a prioritized JSONB-ready list."""
+    """Compose all opportunity sources into a prioritized JSONB-ready list.
+
+    `own_pages` is an optional list of dicts describing pages of the
+    site (url, title, h1, meta_description, content_snippet). When
+    provided, content-gap opportunities get an extra signal: "do we
+    already have a page about this?" If yes, the opportunity becomes
+    `strengthen_existing_page` instead of `new_page`.
+    """
     gaps = list(content_gaps or [])
     own = dict(deep_dive_self or {})
     competitors = list(deep_dive_competitors or [])
+    pages = list(own_pages or [])
 
     items: list[Opportunity] = []
-    items += _content_gap_opportunities(gaps)
+    items += _content_gap_opportunities(gaps, pages)
     items += _feature_diff_opportunities(own, competitors)
     items += _schema_diff_opportunities(own, competitors)
 

@@ -194,6 +194,23 @@ def crawl_site(site_id: str):
     return result
 
 
+@celery_app.task(name="crawl_all_sites_monthly", bind=True, max_retries=0)
+def crawl_all_sites_monthly(self):
+    """Monthly re-crawl of every active site. Spaces sites by 60 seconds
+    so one giant crawl doesn't hog the worker pool."""
+    logger.info("Starting monthly crawl for all active sites")
+    sites = _run_async(_get_active_sites())
+    queued = []
+    for i, site in enumerate(sites):
+        if site.get("id"):
+            crawl_site.apply_async(
+                args=[str(site["id"])],
+                countdown=i * 60,
+            )
+            queued.append(site["domain"])
+    return {"queued": queued}
+
+
 @celery_app.task(name="collect_site_metrica")
 def collect_site_metrica(site_id: str):
     """Collect Metrica data for a specific site (for manual trigger)."""

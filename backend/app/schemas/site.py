@@ -41,6 +41,8 @@ class SiteResponse(BaseModel):
     is_active: bool
     yandex_webmaster_host_id: str | None
     yandex_metrica_counter_id: str | None
+    onboarding_step: str | None = None
+    competitor_domains: list[str] | None = None
     created_at: datetime | None
     updated_at: datetime | None
     # yandex_oauth_token excluded intentionally — never expose tokens in API

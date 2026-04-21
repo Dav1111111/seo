@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -11,9 +11,10 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { TrafficChart } from "@/components/dashboard/traffic-chart";
+import { ActivityFeed } from "@/components/dashboard/activity-feed";
 import {
   TrendingUp, TrendingDown, Eye, MousePointer,
-  MapPin, FileSearch, ArrowRight, Flame,
+  MapPin, FileSearch, ArrowRight, Flame, Play,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -95,6 +96,32 @@ export function OverviewPage() {
     { refreshInterval: 0 },
   );
 
+  const { data: activityByStage } = useSWR(
+    siteId && onboardingActive ? `activity-last-${siteId}` : null,
+    () => api.getActivityByStage(siteId).catch(() => null),
+    { refreshInterval: 10_000 },
+  );
+
+  const [runningFull, setRunningFull] = useState(false);
+  const [banner, setBanner] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+
+  async function runFullAnalysis() {
+    if (!siteId || runningFull) return;
+    setRunningFull(true);
+    setBanner(null);
+    try {
+      await api.triggerFullAnalysis(siteId);
+      setBanner({
+        kind: "ok",
+        msg: "Полный анализ запущен — следи за лентой активности ниже. Обычно 3–5 минут.",
+      });
+    } catch (e: any) {
+      setBanner({ kind: "err", msg: e?.message ?? String(e) });
+    } finally {
+      setRunningFull(false);
+    }
+  }
+
   // While we wait on the redirect decision, show nothing instead of a
   // half-rendered dashboard that flashes and then disappears.
   if (!onbState || !onboardingActive) {
@@ -126,8 +153,32 @@ export function OverviewPage() {
           <h1 className="text-2xl font-bold">Обзор</h1>
           <p className="text-sm text-muted-foreground">{currentSite?.domain ?? "—"}</p>
         </div>
-        {latestReport?.health_score != null && <HealthBadge score={latestReport.health_score} />}
+        <div className="flex items-center gap-2">
+          {latestReport?.health_score != null && <HealthBadge score={latestReport.health_score} />}
+          <Button size="sm" onClick={runFullAnalysis} disabled={runningFull}>
+            <Play className={cn("mr-2 h-4 w-4", runningFull && "animate-pulse")} />
+            {runningFull ? "Запускаю…" : "Запустить полный анализ"}
+          </Button>
+        </div>
       </div>
+
+      {banner && (
+        <div
+          className={cn(
+            "rounded border px-3 py-2 text-sm",
+            banner.kind === "ok"
+              ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+              : "border-red-300 bg-red-50 text-red-900",
+          )}
+        >
+          {banner.msg}
+        </div>
+      )}
+
+      {/* Last-updated strip */}
+      {activityByStage?.by_stage && Object.keys(activityByStage.by_stage).length > 0 && (
+        <StageTimestamps byStage={activityByStage.by_stage} />
+      )}
 
       {/* Root problem */}
       {hasDiagnostic ? (
@@ -227,7 +278,61 @@ export function OverviewPage() {
         </CardContent>
       </Card>
 
+      <ActivityFeed siteId={siteId} />
+
       <TrafficChart siteId={siteId} />
     </div>
+  );
+}
+
+function StageTimestamps({
+  byStage,
+}: {
+  byStage: Record<string, { ts: string; stage: string; status: string; message: string }>;
+}) {
+  const rows = [
+    { key: "crawl",                label: "Страницы сайта" },
+    { key: "webmaster",            label: "Вебмастер" },
+    { key: "demand_map",           label: "Карта спроса" },
+    { key: "competitor_discovery", label: "Конкуренты" },
+    { key: "opportunities",        label: "Точки роста" },
+    { key: "report",               label: "Отчёт" },
+  ];
+
+  function ago(iso: string): string {
+    const then = new Date(iso).getTime();
+    const sec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+    if (sec < 60) return "только что";
+    if (sec < 3600) return `${Math.floor(sec / 60)} мин`;
+    if (sec < 86_400) return `${Math.floor(sec / 3600)} ч`;
+    const days = Math.floor(sec / 86_400);
+    return `${days} д`;
+  }
+
+  return (
+    <Card>
+      <CardContent className="py-3 px-4">
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs">
+          {rows.map(({ key, label }) => {
+            const ev = byStage[key];
+            return (
+              <div key={key} className="flex items-center gap-1.5">
+                <span className="text-muted-foreground">{label}:</span>
+                {ev ? (
+                  <>
+                    <span className="font-medium">{ago(ev.ts)} назад</span>
+                    {ev.status === "failed" && (
+                      <Badge variant="destructive" className="text-[10px]">ошибка</Badge>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-muted-foreground italic">ни разу</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

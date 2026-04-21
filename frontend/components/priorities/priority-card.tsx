@@ -45,10 +45,11 @@ const CATEGORY_LABEL_RU: Record<string, string> = {
 };
 
 export function PriorityCard({
-  item, onMutated,
+  item, onMutated, siteId,
 }: {
   item: PriorityItem;
   onMutated: () => void;
+  siteId?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -58,6 +59,21 @@ export function PriorityCard({
     setBusy(next); setError(null);
     try {
       await api.patchRecommendation(item.recommendation_id, { user_status: next });
+      // When owner says "applied" — also snapshot baseline for 14-day
+      // follow-up comparison. Silent failure: the core status update
+      // already succeeded, outcome tracking is best-effort.
+      if (next === "applied" && siteId) {
+        try {
+          await api.markApplied(
+            siteId,
+            item.recommendation_id,
+            "priority",
+            item.page_url ?? undefined,
+          );
+        } catch {
+          /* ignore */
+        }
+      }
       onMutated();
     } catch (e: any) {
       setError(e?.message ?? String(e));

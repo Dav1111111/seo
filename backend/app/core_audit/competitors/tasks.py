@@ -18,6 +18,7 @@ from uuid import UUID
 
 from sqlalchemy import desc, func, select, text
 
+from app.core_audit.activity import log_event
 from app.core_audit.competitors.discovery import (
     DEFAULT_MAX_QUERIES,
     DEFAULT_TOP_K,
@@ -25,6 +26,7 @@ from app.core_audit.competitors.discovery import (
 )
 from app.core_audit.demand_map.models import TargetCluster
 from app.models.daily_metric import DailyMetric
+from app.models.page import Page
 from app.models.search_query import SearchQuery
 from app.models.site import Site
 from app.workers.celery_app import celery_app
@@ -190,11 +192,21 @@ def competitors_discover_site_task(
                         biz_tokens=_business_tokens(site.target_config or {}),
                     )
                     if not queries:
+                        await log_event(
+                            db, site_id, "competitor_discovery", "skipped",
+                            "Нет запросов для разведки — сначала запусти сбор из Вебмастера.",
+                        )
                         return {
                             "status": "skipped",
                             "reason": "no_queries_available",
                             "site_id": site_id,
                         }
+
+                    await log_event(
+                        db, site_id, "competitor_discovery", "started",
+                        f"Ищу конкурентов в Яндекс-выдаче по {len(queries)} запросам…",
+                        extra={"queries_count": len(queries)},
+                    )
 
                     profile = discover_competitors(
                         own_domain=site.domain,
@@ -216,6 +228,19 @@ def competitors_discover_site_task(
                     site.target_config = cfg
 
                     await db.commit()
+
+                    await log_event(
+                        db, site_id, "competitor_discovery", "done",
+                        (
+                            f"Разведка готова: найдено {len(profile.competitors)} "
+                            f"конкурентов по {profile.queries_probed} запросам."
+                        ),
+                        extra={
+                            "competitors_found": len(profile.competitors),
+                            "top3": [c.domain for c in profile.competitors[:3]],
+                            "cost_usd": round(profile.cost_usd, 4),
+                        },
+                    )
 
                     # Chain: discovery done → fire deep-dive automatically
                     # so the comparison table and growth opportunities are
@@ -293,13 +318,22 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                         "site_id": site_id,
                     }
 
+                await log_event(
+                    db, site_id, "competitor_deep_dive", "started",
+                    f"Глубокий анализ: читаю сайты {min(5, len(competitors))} конкурентов…",
+                )
+
                 # Top 5 competitors — crawl each (homepage + example URL)
                 reports: list[dict] = []
-                for c in competitors[:5]:
+                for i, c in enumerate(competitors[:5]):
                     domain = c.get("domain")
                     example_url = c.get("example_url") or ""
                     if not domain:
                         continue
+                    await log_event(
+                        db, site_id, "competitor_deep_dive", "progress",
+                        f"Читаю {domain} ({i + 1}/{min(5, len(competitors))})…",
+                    )
                     rep = analyze_competitor_site(
                         domain=domain,
                         urls=[example_url] if example_url else [],
@@ -329,15 +363,50 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                     )
                     gap_dicts = [g.to_dict() for g in gaps]
 
+                # Pull our own crawled pages so we can check whether the
+                # site already has a page for each gap query. This turns
+                # "create new page" into "strengthen existing page" when
+                # we already cover the topic.
+                page_stmt = select(
+                    Page.url, Page.path, Page.title, Page.h1,
+                    Page.meta_description, Page.content_text,
+                ).where(Page.site_id == site.id, Page.in_index.is_(True))
+                page_rows = (await db.execute(page_stmt)).all()
+                own_pages_dicts = [
+                    {
+                        "url": r.url,
+                        "path": r.path,
+                        "title": r.title,
+                        "h1": r.h1,
+                        "meta_description": r.meta_description,
+                        "content_snippet": (r.content_text or "")[:600],
+                    }
+                    for r in page_rows
+                ]
+
                 opportunities = build_growth_opportunities(
                     content_gaps=gap_dicts,
                     deep_dive_self=own_page,
                     deep_dive_competitors=reports,
+                    own_pages=own_pages_dicts,
                     max_items=15,
                 )
                 cfg["growth_opportunities"] = opportunities
                 site.target_config = cfg
                 await db.commit()
+
+                await log_event(
+                    db, site_id, "opportunities", "done",
+                    (
+                        f"Готово: {len(opportunities)} точек роста, "
+                        f"проверено {len(own_pages_dicts)} твоих страниц."
+                    ),
+                    extra={
+                        "opportunities": len(opportunities),
+                        "own_pages": len(own_pages_dicts),
+                        "competitors_crawled": len(reports),
+                    },
+                )
 
                 return {
                     "status": "ok",
@@ -349,6 +418,7 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                         if p.get("status") == "ok"
                     ),
                     "opportunities_generated": len(opportunities),
+                    "own_pages_scanned": len(own_pages_dicts),
                 }
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -360,7 +430,40 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
     return _run(_inner())
 
 
+@celery_app.task(name="competitors_discover_all_weekly", bind=True, max_retries=0)
+def competitors_discover_all_weekly_task(self) -> dict:
+    """Weekly refresh of competitor lists + deep-dive for every active site.
+
+    Loops over active sites, queues discovery with a 3-minute gap between
+    sites so the shared SERP + Haiku quotas don't spike. Discovery
+    auto-chains deep-dive, so this one task refreshes both halves of the
+    competitor picture for every site.
+    """
+    async def _inner() -> dict:
+        try:
+            async with task_session() as db:
+                result = await db.execute(
+                    select(Site.id, Site.domain).where(Site.is_active.is_(True)),
+                )
+                rows = result.all()
+
+            queued: list[str] = []
+            for i, row in enumerate(rows):
+                competitors_discover_site_task.apply_async(
+                    args=[str(row.id)],
+                    countdown=i * 180,
+                )
+                queued.append(row.domain)
+            return {"status": "ok", "queued": queued}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("competitors.weekly_all.failed err=%s", exc)
+            return {"status": "error", "err": str(exc)}
+
+    return _run(_inner())
+
+
 __all__ = [
     "competitors_discover_site_task",
     "competitors_deep_dive_site_task",
+    "competitors_discover_all_weekly_task",
 ]

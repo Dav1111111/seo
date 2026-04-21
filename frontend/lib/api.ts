@@ -322,7 +322,13 @@ export const api = {
       opportunities: Array<{
         id: string;
         source: "content_gap" | "feature_diff" | "schema_diff";
-        category: "new_page" | "on_page_feature" | "schema" | "contact";
+        category:
+          | "new_page"
+          | "strengthen_existing_page"
+          | "crossover_page"
+          | "on_page_feature"
+          | "schema"
+          | "contact";
         priority: "high" | "medium" | "low";
         title_ru: string;
         reasoning_ru: string;
@@ -330,4 +336,83 @@ export const api = {
         evidence: Record<string, any>;
       }>;
     }>(`/sites/${siteId}/competitors/opportunities`, { base: "admin" }),
+
+  getActivity: (siteId: string, limit = 20) =>
+    apiFetch<{
+      events: Array<{
+        id: number;
+        stage: string;
+        status: string;
+        message: string;
+        ts: string;
+        extra: Record<string, any>;
+      }>;
+    }>(`/sites/${siteId}/activity?limit=${limit}`),
+
+  getActivityByStage: (siteId: string) =>
+    apiFetch<{
+      by_stage: Record<
+        string,
+        {
+          id: number;
+          stage: string;
+          status: string;
+          message: string;
+          ts: string;
+          extra: Record<string, any>;
+        }
+      >;
+    }>(`/sites/${siteId}/activity/last`),
+
+  triggerFullAnalysis: (siteId: string) =>
+    apiFetch<{ status: string; queued: string[] }>(
+      `/sites/${siteId}/pipeline/full`,
+      { method: "POST", base: "admin" },
+    ),
+
+  markApplied: (siteId: string, recommendationId: string, source: string, pageUrl?: string) =>
+    apiFetch<{ status: string; snapshot_id: string }>(
+      `/sites/${siteId}/outcomes/applied`,
+      {
+        method: "POST",
+        base: "admin",
+        body: JSON.stringify({
+          recommendation_id: recommendationId,
+          source,
+          page_url: pageUrl || null,
+        }),
+      },
+    ),
+
+  getOutcomes: (siteId: string) =>
+    apiFetch<{
+      outcomes: Array<{
+        id: string;
+        recommendation_id: string;
+        source: string;
+        page_url: string | null;
+        applied_at: string;
+        followup_at: string | null;
+        delta: Record<string, any>;
+        baseline_metrics: Record<string, any>;
+        followup_metrics: Record<string, any>;
+        note_ru: string | null;
+      }>;
+    }>(`/sites/${siteId}/outcomes`, { base: "admin" }),
+
+  updateCompetitorsList: (siteId: string, domains: string[]) =>
+    apiFetch<{ status: string; competitor_domains: string[] }>(
+      `/sites/${siteId}/competitors/list`,
+      {
+        method: "PUT",
+        base: "admin",
+        body: JSON.stringify({ domains }),
+      },
+    ),
+
+  restartOnboarding: (siteId: string) =>
+    apiFetch<{ status: string; onboarding_step: string }>(
+      `/sites/${siteId}/onboarding/restart`,
+      { method: "POST", base: "admin" },
+    ),
 };

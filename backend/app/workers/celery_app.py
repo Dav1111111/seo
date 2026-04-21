@@ -48,10 +48,11 @@ celery_app.conf.beat_schedule = {
         "task": "fingerprint_gc_stale",
         "schedule": crontab(hour=3, minute=30, day_of_week=0),
     },
-    # Intent classification — daily 04:00 UTC (after fingerprinting)
+    # Intent classification — daily 04:20 UTC
+    # (runs after collect_webmaster_all 04:00 to have fresh query data)
     "intent-classify-all-daily": {
         "task": "intent_classify_all",
-        "schedule": crontab(hour=4, minute=0),
+        "schedule": crontab(hour=4, minute=20),
     },
     # Query clustering (weekly, Monday 09:00 MSK)
     "cluster-queries-weekly": {
@@ -83,6 +84,24 @@ celery_app.conf.beat_schedule = {
         "task": "demand_map_build_all_weekly",
         "schedule": crontab(hour=3, minute=30, day_of_week=1),
     },
+    # Competitor discovery — weekly (Tuesdays 04:00 UTC / 07:00 MSK)
+    # Refreshes competitor list + auto-chains deep-dive → opportunities
+    "competitors-discover-weekly": {
+        "task": "competitors_discover_all_weekly",
+        "schedule": crontab(hour=4, minute=0, day_of_week=2),
+    },
+    # Site re-crawl — monthly (1st of each month, 02:00 UTC / 05:00 MSK)
+    # Refreshes page index, title/h1/content used for page-match scoring
+    "crawl-all-sites-monthly": {
+        "task": "crawl_all_sites_monthly",
+        "schedule": crontab(hour=2, minute=0, day_of_month=1),
+    },
+    # Outcome follow-up — daily (08:00 UTC / 11:00 MSK)
+    # Fills delta for snapshots that matured (applied ≥14 days ago)
+    "outcomes-followup-daily": {
+        "task": "outcomes_followup_daily",
+        "schedule": crontab(hour=8, minute=0),
+    },
 }
 
 celery_app.autodiscover_tasks([
@@ -90,4 +109,5 @@ celery_app.autodiscover_tasks([
     "app.core_audit.review", "app.core_audit.priority", "app.core_audit.report",
     "app.core_audit.demand_map", "app.core_audit.draft_profile",
     "app.core_audit.onboarding", "app.core_audit.competitors",
+    "app.core_audit.outcomes",
 ])

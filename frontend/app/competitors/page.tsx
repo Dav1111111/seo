@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   RefreshCw, Search, ExternalLink, Swords,
-  TrendingDown, Layers, Check, X, Target,
+  TrendingDown, Layers, Check, X, Target, CheckCircle2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -40,6 +40,11 @@ export default function CompetitorsPage() {
   const oppsSWR = useSWR(
     siteId ? `opps-${siteId}` : null,
     () => api.getGrowthOpportunities(siteId),
+    { refreshInterval: 0 },
+  );
+  const outcomesSWR = useSWR(
+    siteId ? `outcomes-${siteId}` : null,
+    () => api.getOutcomes(siteId),
     { refreshInterval: 0 },
   );
 
@@ -81,6 +86,24 @@ export default function CompetitorsPage() {
   const gaps = gapsSWR.data?.gaps ?? [];
   const dive = diveSWR.data;
   const opps = oppsSWR.data?.opportunities ?? [];
+  const outcomes = outcomesSWR.data?.outcomes ?? [];
+  const outcomeByRecId = new Map(outcomes.map((o) => [o.recommendation_id, o]));
+
+  async function markOppApplied(opp: any) {
+    if (!siteId) return;
+    try {
+      await api.markApplied(
+        siteId,
+        opp.id,
+        "opportunity",
+        opp.evidence?.matched_page?.url,
+      );
+      outcomesSWR.mutate();
+      setBanner({ kind: "ok", msg: "Отмечено. Через 14 дней платформа посчитает эффект." });
+    } catch (e: any) {
+      setBanner({ kind: "err", msg: e?.message ?? String(e) });
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -169,16 +192,35 @@ export default function CompetitorsPage() {
                       {o.priority}
                     </Badge>
                     <Badge variant="secondary" className="text-[10px]">
-                      {o.source === "content_gap"
+                      {o.category === "new_page"
                         ? "новая страница"
-                        : o.source === "feature_diff"
-                        ? "элемент сайта"
-                        : "schema.org"}
+                        : o.category === "strengthen_existing_page"
+                        ? "усилить страницу"
+                        : o.category === "crossover_page"
+                        ? "стрейтч-страница"
+                        : o.category === "schema"
+                        ? "schema.org"
+                        : o.category === "contact"
+                        ? "контакты"
+                        : "элемент сайта"}
                     </Badge>
                   </div>
                   <h3 className="font-semibold leading-snug">{o.title_ru}</h3>
                   <p className="text-sm text-muted-foreground leading-snug">{o.reasoning_ru}</p>
                   <p className="text-sm leading-snug">{o.suggested_action_ru}</p>
+
+                  {o.evidence?.matched_page && (
+                    <a
+                      href={o.evidence.matched_page.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                      Твоя страница: {o.evidence.matched_page.path || o.evidence.matched_page.url}
+                      {" "}· совпадение {Math.round((o.evidence.matched_page.score ?? 0) * 100)}%
+                    </a>
+                  )}
 
                   {o.source === "content_gap" && o.evidence?.queries && (
                     <details className="text-xs">
@@ -210,6 +252,54 @@ export default function CompetitorsPage() {
                         Есть у: {o.evidence.competitors_with.join(", ")}
                       </div>
                     )}
+
+                  {(() => {
+                    const out = outcomeByRecId.get(o.id);
+                    if (!out) {
+                      return (
+                        <div className="pt-1">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => markOppApplied(o)}
+                          >
+                            <CheckCircle2 className="mr-2 h-4 w-4" /> Отметить «применил»
+                          </Button>
+                        </div>
+                      );
+                    }
+                    const applied = new Date(out.applied_at);
+                    const daysAgo = Math.floor((Date.now() - applied.getTime()) / 86400000);
+                    if (!out.followup_at) {
+                      const daysLeft = Math.max(0, 14 - daysAgo);
+                      return (
+                        <div className="rounded bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-900">
+                          <CheckCircle2 className="inline h-3.5 w-3.5 mr-1" />
+                          Применено {daysAgo} д назад ·
+                          {" "}{daysLeft > 0 ? `через ${daysLeft} д посчитаем эффект` : "эффект замерим сегодня"}
+                        </div>
+                      );
+                    }
+                    const d = out.delta || {};
+                    const impPct = d.impressions_pct;
+                    const clkPct = d.clicks_pct;
+                    const fmt = (v: number | null | undefined) =>
+                      v == null ? "н/д" : `${v >= 0 ? "+" : ""}${v}%`;
+                    const tone =
+                      (impPct ?? 0) > 5
+                        ? "bg-emerald-50 border-emerald-200 text-emerald-900"
+                        : (impPct ?? 0) < -5
+                        ? "bg-rose-50 border-rose-200 text-rose-900"
+                        : "bg-slate-50 border-slate-200 text-slate-800";
+                    return (
+                      <div className={cn("rounded border px-3 py-2 text-xs", tone)}>
+                        <b>Итог 14 дней:</b> показы {fmt(impPct)}, клики {fmt(clkPct)}
+                        {d.position_delta != null && (
+                          <> · позиция {d.position_delta > 0 ? "улучшилась" : "ухудшилась"} на {Math.abs(d.position_delta)}</>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </li>
               ))}
             </ul>

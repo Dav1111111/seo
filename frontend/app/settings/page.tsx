@@ -12,7 +12,8 @@ import {
   Select, SelectContent, SelectItem,
   SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { CheckCircle, XCircle } from "lucide-react";
+import { CheckCircle, XCircle, X as XIcon, Plus, RotateCcw } from "lucide-react";
+import { useRouter } from "next/navigation";
 
 const MODES = [
   {
@@ -29,8 +30,9 @@ const MODES = [
 
 export default function SettingsPage() {
   const siteId = useCurrentSiteId();
+  const router = useRouter();
   const { data: site, isLoading, mutate } = useSWR(
-    `sites`,
+    siteId ? `sites-${siteId}` : null,
     async () => {
       const sites = await api.sites();
       return sites.find((s: any) => s.id === siteId) || sites[0];
@@ -43,8 +45,19 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  // Competitor list editing
+  const [competitors, setCompetitors] = useState<string[]>([]);
+  const [newCompetitor, setNewCompetitor] = useState("");
+  const [compSaving, setCompSaving] = useState(false);
+  const [compSaved, setCompSaved] = useState(false);
+
+  const [restarting, setRestarting] = useState(false);
+
   useEffect(() => {
     if (site?.operating_mode) setMode(site.operating_mode);
+    if (Array.isArray(site?.competitor_domains)) {
+      setCompetitors(site.competitor_domains);
+    }
   }, [site]);
 
   async function saveMode() {
@@ -57,6 +70,57 @@ export default function SettingsPage() {
       setTimeout(() => setSaved(false), 2000);
     } finally {
       setSaving(false);
+    }
+  }
+
+  function cleanDomain(d: string): string {
+    return d.trim().toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .replace(/\/+$/, "");
+  }
+
+  function addCompetitor() {
+    const d = cleanDomain(newCompetitor);
+    if (!d) return;
+    if (competitors.includes(d)) {
+      setNewCompetitor("");
+      return;
+    }
+    setCompetitors([...competitors, d]);
+    setNewCompetitor("");
+  }
+
+  function removeCompetitor(d: string) {
+    setCompetitors(competitors.filter((x) => x !== d));
+  }
+
+  async function saveCompetitors() {
+    if (!siteId) return;
+    setCompSaving(true);
+    try {
+      await api.updateCompetitorsList(siteId, competitors);
+      mutate();
+      setCompSaved(true);
+      setTimeout(() => setCompSaved(false), 2000);
+    } finally {
+      setCompSaving(false);
+    }
+  }
+
+  async function onRestartOnboarding() {
+    if (!siteId) return;
+    const ok = window.confirm(
+      "Запустить онбординг заново? Собранная аналитика сохранится, " +
+      "но LLM-понимание бизнеса будет построено с нуля.",
+    );
+    if (!ok) return;
+    setRestarting(true);
+    try {
+      await api.restartOnboarding(siteId);
+      router.push(`/onboarding/${siteId}`);
+    } catch (e) {
+      setRestarting(false);
     }
   }
 
@@ -142,6 +206,92 @@ export default function SettingsPage() {
               </Button>
             </>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Competitors manual edit */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Конкуренты (ручной список)</CardTitle>
+          <CardDescription>
+            Автоматически находятся при разведке по Яндекс-выдаче. Здесь можно добавить
+            тех, кого алгоритм пропустил, или удалить лишних.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {competitors.length === 0 ? (
+            <p className="text-sm text-muted-foreground italic">
+              Список пуст. Конкуренты появятся после запуска разведки на странице «Конкуренты».
+            </p>
+          ) : (
+            <ul className="space-y-1.5">
+              {competitors.map((d) => (
+                <li
+                  key={d}
+                  className="flex items-center justify-between gap-2 rounded border px-3 py-1.5 text-sm"
+                >
+                  <a
+                    href={`https://${d}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-mono hover:underline"
+                  >
+                    {d}
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => removeCompetitor(d)}
+                    className="text-muted-foreground hover:text-rose-600"
+                    title="Удалить"
+                  >
+                    <XIcon className="h-4 w-4" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={newCompetitor}
+              onChange={(e) => setNewCompetitor(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addCompetitor();
+                }
+              }}
+              placeholder="example.ru"
+              className="flex-1 rounded border px-3 py-1.5 text-sm bg-background"
+            />
+            <Button size="sm" variant="outline" onClick={addCompetitor} disabled={!newCompetitor.trim()}>
+              <Plus className="mr-1 h-4 w-4" /> Добавить
+            </Button>
+          </div>
+          <Button onClick={saveCompetitors} disabled={compSaving}>
+            {compSaved ? "Сохранено ✓" : compSaving ? "Сохраняю…" : "Сохранить список"}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Danger zone */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Запустить онбординг заново</CardTitle>
+          <CardDescription>
+            Если LLM-понимание бизнеса устарело (изменились услуги, регион, позиционирование) —
+            пройди 7 шагов ещё раз. Собранная аналитика не пострадает.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            variant="outline"
+            onClick={onRestartOnboarding}
+            disabled={restarting}
+          >
+            <RotateCcw className={`mr-2 h-4 w-4 ${restarting ? "animate-spin" : ""}`} />
+            {restarting ? "Готовлю…" : "Начать онбординг заново"}
+          </Button>
         </CardContent>
       </Card>
     </div>
