@@ -645,6 +645,13 @@ def _cluster_dto(r: TargetCluster, queries_count: int) -> dict[str, Any]:
         "business_relevance": float(r.business_relevance or 0),
         "source": r.source,
         "queries_count": queries_count,
+        # Этап 1 — user-confirmation layer (step 4/5 of wizard)
+        "user_confirmed": r.user_confirmed,
+        "growth_intent": r.growth_intent,
+        "query_intent": r.query_intent,
+        "seasonality_peak_months": list(r.seasonality_peak_months or []),
+        "page_intent_fit": r.page_intent_fit,
+        "page_intent_fit_reason_ru": r.page_intent_fit_reason_ru,
     }
 
 
