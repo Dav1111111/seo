@@ -346,6 +346,51 @@ class UnderstandingPatchBody(BaseModel):
     detected_usp: str | None = None
 
 
+class ProductsPatchBody(BaseModel):
+    """Body for PATCH /onboarding/products — step 2 output.
+
+    `primary_product` is a human-readable marker of what the business
+    considers its main offering (e.g. "багги-экспедиции"). The effective
+    scoring happens via `service_weights` — a dict where the primary gets
+    weight 1.0 and secondaries something in [0.2, 0.6]. Zeros effectively
+    drop the service from the demand map.
+    """
+
+    primary_product: str | None = None
+    service_weights: dict[str, float] = Field(default_factory=dict)
+    secondary_products: list[str] = Field(default_factory=list)
+
+
+class CompetitorsPatchBody(BaseModel):
+    """Body for PATCH /onboarding/competitors — step 3 output."""
+
+    competitor_domains: list[str] = Field(default_factory=list)
+    competitor_brands: list[str] = Field(default_factory=list)
+
+
+class ClusterReviewBody(BaseModel):
+    """Body for PATCH /onboarding/clusters/{id} — step 4 output.
+
+    Sent once per cluster when the owner reviews the demand map. `growth_intent`
+    (grow/ignore/not_mine) drives which clusters feed the scorer hot path.
+    """
+
+    user_confirmed: bool | None = None
+    growth_intent: str | None = None   # grow | ignore | not_mine
+
+
+class KPIPatchBody(BaseModel):
+    """Body for PATCH /onboarding/kpi — step 7 output."""
+
+    baseline: dict[str, Any] = Field(default_factory=dict)
+    target_3m: dict[str, Any] = Field(default_factory=dict)
+    target_6m: dict[str, Any] = Field(default_factory=dict)
+    target_12m: dict[str, Any] = Field(default_factory=dict)
+
+
+VALID_GROWTH_INTENTS = {"grow", "ignore", "not_mine"}
+
+
 VALID_ONBOARDING_STEPS = {
     "pending_analyze", "confirm_business", "confirm_products",
     "confirm_competitors", "confirm_queries", "confirm_positions",
@@ -414,6 +459,45 @@ async def patch_onboarding_step(
 
 
 @router.patch(
+    "/sites/{site_id}/onboarding/products",
+    dependencies=[Depends(_require_admin)],
+)
+async def patch_onboarding_products(
+    site_id: uuid.UUID,
+    body: ProductsPatchBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Step 2 — primary product + service weights.
+
+    Merges into sites.target_config (existing services, geo fields stay
+    intact). The demand-map builder's compute_relevance() already reads
+    service_weights, so this drives priority scoring directly.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    cfg = dict(site.target_config or {})
+    if body.primary_product is not None:
+        cfg["primary_product"] = body.primary_product
+    if body.secondary_products:
+        cfg["secondary_products"] = list(body.secondary_products)
+    if body.service_weights:
+        # Clip each weight into [0, 1] defensively — compute_relevance
+        # multiplies these into r_service, so out-of-range values would
+        # warp scoring silently.
+        cleaned = {
+            str(k): max(0.0, min(1.0, float(v)))
+            for k, v in body.service_weights.items()
+        }
+        cfg["service_weights"] = cleaned
+
+    site.target_config = cfg
+    await db.flush()
+    return {"site_id": str(site_id), "target_config": cfg}
+
+
+@router.patch(
     "/sites/{site_id}/onboarding/understanding",
     dependencies=[Depends(_require_admin)],
 )
@@ -438,6 +522,111 @@ async def patch_understanding(
     site.understanding = current
     await db.flush()
     return {"site_id": str(site_id), "understanding": current}
+
+
+@router.patch(
+    "/sites/{site_id}/onboarding/competitors",
+    dependencies=[Depends(_require_admin)],
+)
+async def patch_onboarding_competitors(
+    site_id: uuid.UUID,
+    body: CompetitorsPatchBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Step 3 — competitor domains + brands."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    site.competitor_domains = list(body.competitor_domains)
+    cfg = dict(site.target_config or {})
+    cfg["competitor_brands"] = list(body.competitor_brands)
+    site.target_config = cfg
+    await db.flush()
+    return {
+        "site_id": str(site_id),
+        "competitor_domains": site.competitor_domains,
+        "competitor_brands": cfg["competitor_brands"],
+    }
+
+
+@router.patch(
+    "/sites/{site_id}/onboarding/clusters/{cluster_id}",
+    dependencies=[Depends(_require_admin)],
+)
+async def patch_cluster_review(
+    site_id: uuid.UUID,
+    cluster_id: uuid.UUID,
+    body: ClusterReviewBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Step 4 — owner confirms/rejects a cluster and sets its growth intent."""
+    if body.growth_intent is not None and body.growth_intent not in VALID_GROWTH_INTENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"growth_intent must be one of {sorted(VALID_GROWTH_INTENTS)}",
+        )
+    cluster = (await db.execute(
+        select(TargetCluster).where(
+            TargetCluster.id == cluster_id,
+            TargetCluster.site_id == site_id,
+        )
+    )).scalar_one_or_none()
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="cluster not found")
+    if body.user_confirmed is not None:
+        cluster.user_confirmed = body.user_confirmed
+    if body.growth_intent is not None:
+        cluster.growth_intent = body.growth_intent
+    await db.flush()
+    return {
+        "id": str(cluster.id),
+        "user_confirmed": cluster.user_confirmed,
+        "growth_intent": cluster.growth_intent,
+    }
+
+
+@router.patch(
+    "/sites/{site_id}/onboarding/kpi",
+    dependencies=[Depends(_require_admin)],
+)
+async def patch_onboarding_kpi(
+    site_id: uuid.UUID,
+    body: KPIPatchBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Step 7 — persist KPI baseline + 3/6/12 month targets."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    site.kpi_targets = {
+        "baseline": body.baseline,
+        "target_3m": body.target_3m,
+        "target_6m": body.target_6m,
+        "target_12m": body.target_12m,
+    }
+    await db.flush()
+    return {"site_id": str(site_id), "kpi_targets": site.kpi_targets}
+
+
+@router.post(
+    "/sites/{site_id}/onboarding/complete",
+    dependencies=[Depends(_require_admin)],
+)
+async def complete_onboarding(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Finalize the wizard — flip onboarding_step to 'active'.
+
+    After this, nightly Celery pipelines start including the site. The
+    owner can still re-run individual steps later via PATCH /step.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    site.onboarding_step = "active"
+    await db.flush()
+    return {"site_id": str(site_id), "onboarding_step": "active"}
 
 
 def _cluster_dto(r: TargetCluster, queries_count: int) -> dict[str, Any]:
