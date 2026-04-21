@@ -53,26 +53,24 @@ async def trigger_full_pipeline(
     if site is None:
         raise HTTPException(status_code=404, detail="site not found")
 
-    from app.collectors.tasks import collect_site_webmaster, crawl_site
-    from app.core_audit.competitors.tasks import competitors_discover_site_task
-    from app.core_audit.demand_map.tasks import demand_map_build_site
+    from app.workers.celery_app import celery_app
 
     queued: list[str] = []
 
-    # 1. Refresh crawl (page titles/content) — immediately
-    crawl_site.apply_async(args=[str(site_id)])
+    # Queue by registered Celery name — avoids cross-module imports whose
+    # Python symbol name differs from the task's registered name.
+    celery_app.send_task("crawl_site", args=[str(site_id)])
     queued.append("crawl")
 
-    # 2. Pull fresh Webmaster data — +20s
-    collect_site_webmaster.apply_async(args=[str(site_id)], countdown=20)
+    celery_app.send_task("collect_site_webmaster", args=[str(site_id)], countdown=20)
     queued.append("webmaster")
 
-    # 3. Rebuild demand map after Webmaster lands — +60s
-    demand_map_build_site.apply_async(args=[str(site_id)], countdown=60)
+    celery_app.send_task("demand_map_build_site", args=[str(site_id)], countdown=60)
     queued.append("demand_map")
 
-    # 4. Competitor discovery (auto-chains deep-dive + opportunities) — +90s
-    competitors_discover_site_task.apply_async(args=[str(site_id)], countdown=90)
+    celery_app.send_task(
+        "competitors_discover_site", args=[str(site_id)], countdown=90,
+    )
     queued.append("competitor_discovery")
 
     await log_event(
