@@ -23,7 +23,7 @@ class SiteCreate(BaseModel):
 
 class SiteUpdate(BaseModel):
     display_name: str | None = Field(None, max_length=255)
-    operating_mode: str | None = Field(None, pattern="^(readonly|recommend|propose|autoexecute)$")
+    operating_mode: str | None = Field(None, pattern="^(readonly|recommend)$")
     yandex_webmaster_host_id: str | None = None
     yandex_metrica_counter_id: str | None = None
     yandex_oauth_token: str | None = None
