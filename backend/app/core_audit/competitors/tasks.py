@@ -47,16 +47,48 @@ def _run(coro):
         loop.close()
 
 
-async def _pick_top_queries(db, site_id: UUID, limit: int) -> list[str]:
+def _business_tokens(target_config: dict) -> set[str]:
+    """Union of service + geo tokens from target_config (lowercased).
+
+    Used as a relevance gate for observed queries — a query must contain
+    at least one of these tokens to count as "money". This drops noise
+    like "polaris slingshot" that some user once typed and accidentally
+    landed on the site.
+    """
+    tokens: set[str] = set()
+    for key in ("services", "secondary_products", "geo_primary", "geo_secondary"):
+        for v in (target_config or {}).get(key) or []:
+            # split multi-word entries into tokens so "морские прогулки"
+            # matches queries containing either "морские" or "прогулки"
+            for t in str(v).lower().split():
+                t = t.strip(".,!?«»\"'()[]{}")
+                if len(t) >= 3:
+                    tokens.add(t)
+    return tokens
+
+
+def _query_is_relevant(query: str, biz_tokens: set[str]) -> bool:
+    """True if query contains at least one business token."""
+    if not biz_tokens:
+        return True  # no profile yet — accept everything
+    q = query.lower()
+    return any(tok in q for tok in biz_tokens)
+
+
+async def _pick_top_queries(
+    db, site_id: UUID, limit: int, *, biz_tokens: set[str] | None = None,
+) -> list[str]:
     """Best-effort source ranking for 'which queries to probe SERP for'.
 
     Priority:
       1. Observed queries (from Webmaster) that actually brought impressions
-         in the last 14 days — these are guaranteed real demand, not our
-         guesses.
+         in the last 14 days AND contain at least one business token from
+         target_config. The business-token filter drops random queries
+         like 'polaris slingshot' that some visitor once typed and
+         accidentally landed on the site.
       2. If that's empty or too small, fall back to top TargetClusters by
-         business_relevance — these may include queries we target but don't
-         yet rank on, which is useful for early-stage sites with no traffic.
+         business_relevance — these may include queries we target but
+         don't yet rank on, useful for early-stage sites with no traffic.
     """
     from datetime import date, timedelta
     since = date.today() - timedelta(days=14)
@@ -80,7 +112,8 @@ async def _pick_top_queries(db, site_id: UUID, limit: int) -> list[str]:
         .group_by(SearchQuery.id, SearchQuery.query_text)
         .having(func.coalesce(func.sum(DailyMetric.impressions), 0) > 0)
         .order_by(desc("imp_sum"))
-        .limit(limit)
+        # pull a wide window then filter by business tokens in Python
+        .limit(limit * 5)
     )
     try:
         rows = (await db.execute(stmt)).all()
@@ -88,7 +121,11 @@ async def _pick_top_queries(db, site_id: UUID, limit: int) -> list[str]:
         log.warning("competitors.observed_query_pick_failed err=%s", exc)
         rows = []
 
-    observed = [r.query_text for r in rows if r.query_text]
+    tokens = biz_tokens or set()
+    observed = [
+        r.query_text for r in rows
+        if r.query_text and _query_is_relevant(r.query_text, tokens)
+    ][:limit]
 
     if len(observed) >= max(5, limit // 2):
         return observed
@@ -148,7 +185,10 @@ def competitors_discover_site_task(
                     if site is None:
                         return {"status": "skipped", "reason": "site_not_found"}
 
-                    queries = await _pick_top_queries(db, site.id, max_queries)
+                    queries = await _pick_top_queries(
+                        db, site.id, max_queries,
+                        biz_tokens=_business_tokens(site.target_config or {}),
+                    )
                     if not queries:
                         return {
                             "status": "skipped",

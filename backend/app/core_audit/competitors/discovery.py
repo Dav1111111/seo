@@ -58,17 +58,36 @@ DEFAULT_MAX_QUERIES = 30
 # Top K competitors to keep after aggregation.
 DEFAULT_TOP_K = 10
 
-# Domains to always drop from competitor results. Marketplaces and Yandex
-# own services never compete with a single tourism operator, they just
-# saturate the SERP.
-EXCLUDED_DOMAINS = frozenset({
-    "yandex.ru", "yandex.com", "ya.ru", "dzen.ru", "market.yandex.ru",
-    "wildberries.ru", "ozon.ru", "aliexpress.ru",
-    "avito.ru", "youla.ru",
-    "youtube.com", "vk.com", "vk.ru", "facebook.com", "instagram.com",
-    "tripadvisor.com", "tripadvisor.ru",  # aggregator, not a direct site operator
+# Domain suffixes to always drop from competitor results. Marketplaces,
+# big media/video portals and Yandex's own services saturate the SERP
+# but don't compete with a tourism operator. Matching is suffix-based so
+# that subdomains (m.avito.ru, vk.com, uslugi.yandex.ru) are caught too.
+EXCLUDED_DOMAIN_SUFFIXES: tuple[str, ...] = (
+    # Yandex own services
+    "yandex.ru", "yandex.com", "ya.ru", "dzen.ru",
+    # marketplaces
+    "wildberries.ru", "ozon.ru", "aliexpress.ru", "aliexpress.com",
+    "avito.ru", "youla.ru", "market.yandex.ru",
+    # socials / video
+    "youtube.com", "rutube.ru",
+    "vk.com", "vk.ru", "ok.ru",
+    "facebook.com", "instagram.com", "tiktok.com", "telegram.org",
+    # review aggregators / general media
+    "tripadvisor.com", "tripadvisor.ru",
     "2gis.ru", "2gis.com",
-})
+    "kp.ru", "lenta.ru", "ria.ru", "rbc.ru", "gazeta.ru",
+    # manufacturer / product sites (not service operators)
+    "polaris.com",
+)
+
+
+def _is_excluded(domain: str) -> bool:
+    """True if `domain` equals or is a subdomain of any excluded root."""
+    d = domain.lower().removeprefix("www.")
+    for sfx in EXCLUDED_DOMAIN_SUFFIXES:
+        if d == sfx or d.endswith("." + sfx):
+            return True
+    return False
 
 # Sleep between SERP requests to be polite to the API and avoid rate
 # spikes. Yandex Cloud doesn't publish hard limits for Search API but
@@ -182,7 +201,7 @@ def discover_competitors(
             unique_domains.add(dom)
             if dom == own:
                 continue
-            if dom in EXCLUDED_DOMAINS:
+            if _is_excluded(dom):
                 continue
             if dom in seen_in_this_serp:
                 continue
@@ -244,5 +263,5 @@ __all__ = [
     "discover_competitors",
     "DEFAULT_MAX_QUERIES",
     "DEFAULT_TOP_K",
-    "EXCLUDED_DOMAINS",
+    "EXCLUDED_DOMAIN_SUFFIXES",
 ]
