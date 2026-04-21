@@ -45,8 +45,12 @@ SEARCH_ENDPOINT = "https://searchapi.api.cloud.yandex.net/v2/web/searchAsync"
 OPERATION_ENDPOINT = "https://operation.api.cloud.yandex.net/operations"
 
 # Poll schedule — results usually ready in 3–5 s, but allow up to ~20 s.
-POLL_INTERVAL_SEC = 2.0
-POLL_MAX_ATTEMPTS = 12
+# Yandex async operations typically complete within ~1s. Polling at 2s
+# wasted ~1s per query; 0.7s hits the sweet spot where most operations
+# are ready on first poll. Keep max_attempts high so very slow ops
+# (rare, usually ~5s) still complete within budget.
+POLL_INTERVAL_SEC = 0.7
+POLL_MAX_ATTEMPTS = 30
 
 # Request defaults
 DEFAULT_REGION = "225"                   # 225 = Russia country-wide

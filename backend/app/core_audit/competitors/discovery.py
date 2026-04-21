@@ -41,8 +41,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable, Sequence
 
 from app.collectors.yandex_serp import SerpDoc, fetch_serp
@@ -92,7 +92,12 @@ def _is_excluded(domain: str) -> bool:
 # Sleep between SERP requests to be polite to the API and avoid rate
 # spikes. Yandex Cloud doesn't publish hard limits for Search API but
 # small spacing keeps us well clear of anything hostile.
-SLEEP_BETWEEN_CALLS_SEC = 0.5
+SLEEP_BETWEEN_CALLS_SEC = 0.1
+
+# Max queries in flight simultaneously. Each SERP request does a submit
+# then 1-5s of polling, so 4 concurrent workers turn a 90s serial walk
+# into a ~25s sprint without flooding Yandex.
+CONCURRENT_FETCHES = 4
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,8 +185,23 @@ def discover_competitors(
     cost_usd = 0.0
     query_serps: dict[str, list[dict]] = {}
 
-    for q in qs:
-        docs, err = fetcher(q)
+    # Fetch SERPs in parallel. Each fetch is IO-bound (submit + poll),
+    # so a small thread pool cuts wall time ~4x without GIL pain.
+    # Preserve original query order in results dict so callers that
+    # iterate by insertion order still see a stable sequence.
+    results: dict[str, tuple[list[SerpDoc], str | None]] = {}
+    with ThreadPoolExecutor(max_workers=CONCURRENT_FETCHES) as pool:
+        future_to_q = {pool.submit(fetcher, q): q for q in qs}
+        for fut in as_completed(future_to_q):
+            q = future_to_q[fut]
+            try:
+                results[q] = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("competitors.serp_exception query=%r err=%s", q, exc)
+                results[q] = ([], "fetch_exception")
+
+    for q in qs:  # walk in original order for deterministic aggregation
+        docs, err = results.get(q, ([], "no_result"))
         # cost estimation — 1 cent per call is the safe upper bound on
         # Yandex Cloud Search API at the time of writing. Real figure
         # in Q2 2026 is closer to $0.002, so this is a ceiling.
@@ -189,11 +209,9 @@ def discover_competitors(
         if err:
             errors[err] += 1
             log.info("competitors.serp_err query=%r err=%s", q, err)
-            time.sleep(sleep_between_calls)
             continue
         if not docs:
             errors["empty_docs"] += 1
-            time.sleep(sleep_between_calls)
             continue
         queries_with_results += 1
 
@@ -226,8 +244,6 @@ def discover_competitors(
             existing = best_url.get(dom)
             if existing is None or d.position < existing[0]:
                 best_url[dom] = (d.position, d.url, d.title, q)
-
-        time.sleep(sleep_between_calls)
 
     # rank domains: more SERP hits first, break ties by avg position asc
     ranked = sorted(
