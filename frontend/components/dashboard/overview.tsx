@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect } from "react";
 import useSWR from "swr";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useSite } from "@/lib/site-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,8 +13,7 @@ import { Button } from "@/components/ui/button";
 import { TrafficChart } from "@/components/dashboard/traffic-chart";
 import {
   TrendingUp, TrendingDown, Eye, MousePointer,
-  MapPin, FileSearch, ArrowRight, Flame, FileText, Target,
-  Sparkles,
+  MapPin, FileSearch, ArrowRight, Flame,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -44,20 +45,6 @@ function KpiCard({
   );
 }
 
-function SeasonBadge({ season, note }: { season: string; note: string }) {
-  const colorMap: Record<string, string> = {
-    summer_peak: "bg-orange-100 text-orange-800",
-    winter_peak: "bg-blue-100 text-blue-800",
-    spring_shoulder: "bg-green-100 text-green-800",
-    autumn_shoulder: "bg-amber-100 text-amber-800",
-  };
-  return (
-    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${colorMap[season] || "bg-gray-100 text-gray-800"}`}>
-      {note}
-    </span>
-  );
-}
-
 function HealthBadge({ score }: { score: number }) {
   const tone =
     score >= 80 ? "bg-emerald-100 text-emerald-800 border-emerald-300"
@@ -73,14 +60,10 @@ function HealthBadge({ score }: { score: number }) {
 export function OverviewPage() {
   const { currentSite } = useSite();
   const siteId = currentSite?.id || "";
+  const router = useRouter();
 
-  const { data: dash, isLoading } = useSWR(
-    siteId ? `dashboard-${siteId}` : null,
-    () => api.dashboard(siteId),
-    { refreshInterval: 60_000 },
-  );
-
-  // Onboarding state — shown as a banner when wizard isn't finished.
+  // Onboarding gate — if wizard isn't finished, redirect to it.
+  // Everything else on the dashboard assumes an active profile.
   const { data: onbState } = useSWR(
     siteId ? `onb-check-${siteId}` : null,
     () => api.onboardingState(siteId).catch(() => null),
@@ -88,17 +71,35 @@ export function OverviewPage() {
   );
   const onboardingActive = onbState?.onboarding_step === "active";
 
+  useEffect(() => {
+    if (onbState && !onboardingActive && siteId) {
+      router.replace(`/onboarding/${siteId}`);
+    }
+  }, [onbState, onboardingActive, siteId, router]);
+
+  const { data: dash, isLoading } = useSWR(
+    siteId && onboardingActive ? `dashboard-${siteId}` : null,
+    () => api.dashboard(siteId),
+    { refreshInterval: 60_000 },
+  );
+
   const { data: latestReport } = useSWR(
-    siteId ? `latest-report-${siteId}` : null,
+    siteId && onboardingActive ? `latest-report-${siteId}` : null,
     () => api.reportLatest(siteId).catch(() => null),
     { refreshInterval: 0 },
   );
 
   const { data: plan } = useSWR(
-    siteId ? `overview-plan-${siteId}` : null,
+    siteId && onboardingActive ? `overview-plan-${siteId}` : null,
     () => api.weeklyPlan(siteId, 3, 2).catch(() => null),
     { refreshInterval: 0 },
   );
+
+  // While we wait on the redirect decision, show nothing instead of a
+  // half-rendered dashboard that flashes and then disappears.
+  if (!onbState || !onboardingActive) {
+    return <Skeleton className="h-8 w-48" />;
+  }
 
   if (isLoading) {
     return (
@@ -113,7 +114,6 @@ export function OverviewPage() {
   }
 
   const kpis = dash?.kpis ?? {};
-  const season = dash?.season;
   const diagnostic = latestReport?.payload?.diagnostic;
   const hasDiagnostic = diagnostic?.available;
   const planItems: any[] = plan?.items ?? [];
@@ -126,34 +126,10 @@ export function OverviewPage() {
           <h1 className="text-2xl font-bold">Обзор</h1>
           <p className="text-sm text-muted-foreground">{currentSite?.domain ?? "—"}</p>
         </div>
-        <div className="flex items-center gap-2">
-          {latestReport?.health_score != null && <HealthBadge score={latestReport.health_score} />}
-          {season && <SeasonBadge season={season.season} note={season.note} />}
-        </div>
+        {latestReport?.health_score != null && <HealthBadge score={latestReport.health_score} />}
       </div>
 
-      {/* Onboarding banner — high-priority nudge when wizard isn't done */}
-      {onbState && !onboardingActive && (
-        <Card className="border-primary/40 bg-gradient-to-r from-primary/10 to-primary/5">
-          <CardContent className="py-4 flex items-center gap-4 flex-wrap">
-            <Sparkles className="h-6 w-6 text-primary shrink-0" />
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-semibold">Онбординг ещё не завершён</div>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Пока не пройдёшь 7 шагов — автоматический pipeline не запускается,
-                рекомендации строятся на догадках. Займёт ~20 минут.
-              </p>
-            </div>
-            <Link href={`/onboarding/${siteId}`}>
-              <Button size="sm">
-                Продолжить онбординг <ArrowRight className="ml-2 h-4 w-4" />
-              </Button>
-            </Link>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Root problem (Phase E diagnostic) */}
+      {/* Root problem */}
       {hasDiagnostic ? (
         <Card className="border-primary/40 bg-primary/5">
           <CardHeader className="flex flex-row items-start justify-between gap-4">
@@ -192,36 +168,28 @@ export function OverviewPage() {
         </Card>
       ) : !latestReport ? (
         <Card className="border-dashed">
-          <CardContent className="py-6 flex items-center justify-between gap-4 flex-wrap">
-            <div className="flex items-center gap-3">
-              <FileText className="h-5 w-5 text-muted-foreground" />
-              <div>
-                <div className="text-sm font-medium">Отчётов пока нет</div>
-                <div className="text-xs text-muted-foreground">
-                  Сформируйте первый — увидите корневую проблему и план.
-                </div>
-              </div>
-            </div>
-            <Link href="/reports"><Button size="sm">Перейти к отчётам</Button></Link>
+          <CardContent className="py-4 text-sm text-muted-foreground">
+            Отчётов пока нет. После первого сбора данных ночью — появится первый еженедельный
+            отчёт с корневой проблемой и планом.
           </CardContent>
         </Card>
       ) : null}
 
-      {/* KPI Cards */}
+      {/* KPIs */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <KpiCard title="Показы (7д)" value={kpis.impressions?.toLocaleString("ru") ?? "—"} change={kpis.impressions_change_pct} icon={Eye} />
-        <KpiCard title="Клики (7д)"  value={kpis.clicks?.toLocaleString("ru") ?? "—"} change={kpis.clicks_change_pct} icon={MousePointer} />
-        <KpiCard title="Средняя позиция" value={kpis.avg_position ?? "—"} icon={MapPin} />
-        <KpiCard title="Проиндексировано" value={kpis.pages_indexed ?? "—"} unit=" стр." icon={FileSearch} />
+        <KpiCard title="Показы (7д)"     value={kpis.impressions?.toLocaleString("ru") ?? "—"} change={kpis.impressions_change_pct} icon={Eye} />
+        <KpiCard title="Клики (7д)"      value={kpis.clicks?.toLocaleString("ru") ?? "—"}      change={kpis.clicks_change_pct}      icon={MousePointer} />
+        <KpiCard title="Средняя позиция" value={kpis.avg_position ?? "—"}                       icon={MapPin} />
+        <KpiCard title="Проиндексировано" value={kpis.pages_indexed ?? "—"} unit=" стр."         icon={FileSearch} />
       </div>
 
-      {/* Top priorities preview */}
+      {/* Top priorities */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-3">
           <CardTitle className="flex items-center gap-2 text-base">
-            <Flame className="h-4 w-4" /> Топ задач на эту неделю
+            <Flame className="h-4 w-4" /> План на эту неделю
             {plan?.total_in_backlog != null && (
-              <Badge variant="secondary" className="ml-1">всего в бэклоге: {plan.total_in_backlog}</Badge>
+              <Badge variant="secondary" className="ml-1">в бэклоге: {plan.total_in_backlog}</Badge>
             )}
           </CardTitle>
           <Link href="/priorities">
@@ -231,7 +199,7 @@ export function OverviewPage() {
         <CardContent className="space-y-2">
           {planItems.length === 0 ? (
             <p className="text-sm text-muted-foreground italic">
-              План пустой. Запустите пересчёт приоритетов в разделе «Приоритеты».
+              План пустой. Нажми «Пересчитать» в Приоритетах.
             </p>
           ) : (
             planItems.slice(0, 3).map((it, i) => (
@@ -259,38 +227,7 @@ export function OverviewPage() {
         </CardContent>
       </Card>
 
-      {/* Traffic chart */}
       <TrafficChart siteId={siteId} />
-
-      {/* Quick links */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <QuickLink href="/demand-profile" icon={Target} label="Профиль спроса" desc="Услуги, гео, конкуренты" />
-        <QuickLink href="/priorities" icon={Flame} label="Приоритеты" desc="План и бэклог" />
-        <QuickLink href="/reports" icon={FileText} label="Отчёты" desc="История недельных отчётов" />
-      </div>
     </div>
-  );
-}
-
-function QuickLink({
-  href, icon: Icon, label, desc,
-}: {
-  href: string;
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  desc: string;
-}) {
-  return (
-    <Link href={href}>
-      <Card className="hover:bg-accent transition-colors cursor-pointer h-full">
-        <CardContent className="py-4 flex items-center gap-3">
-          <Icon className="h-5 w-5 text-primary shrink-0" />
-          <div className="min-w-0">
-            <div className="text-sm font-medium">{label}</div>
-            <div className="text-xs text-muted-foreground truncate">{desc}</div>
-          </div>
-        </CardContent>
-      </Card>
-    </Link>
   );
 }

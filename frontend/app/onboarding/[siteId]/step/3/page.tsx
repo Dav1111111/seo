@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import useSWR from "swr";
 import { api } from "@/lib/api";
-import { ChipEditor } from "@/components/demand-profile/chip-editor";
+import { ChipEditor } from "@/components/onboarding/chip-editor";
 import { StepNav } from "@/components/onboarding/step-nav";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AlertCircle } from "lucide-react";
