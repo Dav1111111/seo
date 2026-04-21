@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # Admin API (header-gated endpoints for ops/manual re-runs)
     ADMIN_API_KEY: str = ""
 
+    # Yandex Cloud / AI Studio — Search API (successor to the legacy xml.yandex.ru).
+    # A single Api-Key can cover Search, YandexGPT and other Yandex Cloud services.
+    YANDEX_SEARCH_API_KEY: str = ""
+    # Folder id the API key is scoped to. Required for some async operations.
+    YANDEX_CLOUD_FOLDER_ID: str = "b1g5af8jsj8qhjecb4pi"
+
     # Demand Map — Phase B feature flag.
     # When False, Celery task runs Cartesian only (no Suggest / LLM).
     # Default True so Phase B pipeline is exercised in dev/tests.

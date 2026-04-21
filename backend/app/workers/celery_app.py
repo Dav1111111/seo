@@ -89,5 +89,5 @@ celery_app.autodiscover_tasks([
     "app.collectors", "app.agents", "app.fingerprint", "app.intent",
     "app.core_audit.review", "app.core_audit.priority", "app.core_audit.report",
     "app.core_audit.demand_map", "app.core_audit.draft_profile",
-    "app.core_audit.onboarding",
+    "app.core_audit.onboarding", "app.core_audit.competitors",
 ])

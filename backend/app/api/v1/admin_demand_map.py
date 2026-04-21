@@ -609,6 +609,48 @@ async def patch_onboarding_kpi(
 
 
 @router.post(
+    "/sites/{site_id}/competitors/discover",
+    response_model=QueuedResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_competitor_discovery(
+    site_id: uuid.UUID,
+    max_queries: int = Query(default=30, ge=5, le=100),
+    top_k: int = Query(default=10, ge=3, le=30),
+) -> QueuedResponse:
+    """Queue SERP-based competitor discovery for one site.
+
+    Result lands in sites.competitor_domains (list of strings) and
+    sites.target_config.competitor_profile (full dict with positions,
+    hit counts, example URLs).
+    """
+    from app.core_audit.competitors.tasks import competitors_discover_site_task
+    task = competitors_discover_site_task.delay(str(site_id), max_queries, top_k)
+    return QueuedResponse(task_id=task.id, status="queued")
+
+
+@router.get(
+    "/sites/{site_id}/competitors",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_competitors(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the persisted competitor profile for drill-down in the UI."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    profile = (site.target_config or {}).get("competitor_profile") or {}
+    return {
+        "site_id": str(site_id),
+        "domain": site.domain,
+        "competitor_domains": list(site.competitor_domains or []),
+        "profile": profile,
+    }
+
+
+@router.post(
     "/sites/{site_id}/onboarding/complete",
     dependencies=[Depends(_require_admin)],
 )
