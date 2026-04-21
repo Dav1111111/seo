@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { ActivityFeed } from "@/components/dashboard/activity-feed";
 import {
   RefreshCw, Search, ExternalLink, Swords,
   TrendingDown, Layers, Check, X, Target, CheckCircle2,
@@ -22,25 +23,38 @@ export default function CompetitorsPage() {
   const [tab, setTab] = useState<"opps" | "list" | "gaps" | "dive">("opps");
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
+  const activitySWR = useSWR(
+    siteId ? `cp-activity-${siteId}` : null,
+    () => api.getActivity(siteId, 5),
+    { refreshInterval: 5_000 },
+  );
+  const hasRunning = (activitySWR.data?.events ?? []).some(
+    (e) => e.status === "started" || e.status === "progress",
+  );
+
+  // While a task is active, poll data every 8s so the user sees fresh
+  // results as soon as Celery finishes. When idle, no polling.
+  const refreshInterval = hasRunning ? 8_000 : 0;
+
   const listSWR = useSWR(
     siteId ? `competitors-${siteId}` : null,
     () => api.getCompetitors(siteId),
-    { refreshInterval: 0 },
+    { refreshInterval },
   );
   const gapsSWR = useSWR(
     siteId ? `gaps-${siteId}` : null,
     () => api.getContentGaps(siteId, 25),
-    { refreshInterval: 0 },
+    { refreshInterval },
   );
   const diveSWR = useSWR(
     siteId ? `dive-${siteId}` : null,
     () => api.getCompetitorDeepDive(siteId),
-    { refreshInterval: 0 },
+    { refreshInterval },
   );
   const oppsSWR = useSWR(
     siteId ? `opps-${siteId}` : null,
     () => api.getGrowthOpportunities(siteId),
-    { refreshInterval: 0 },
+    { refreshInterval },
   );
   const outcomesSWR = useSWR(
     siteId ? `outcomes-${siteId}` : null,
@@ -53,7 +67,11 @@ export default function CompetitorsPage() {
     setDiscovering(true); setBanner(null);
     try {
       await api.triggerCompetitorDiscovery(siteId, 25, 10);
-      setBanner({ kind: "ok", msg: "Разведка в очереди. Обнови через 1–3 минуты." });
+      activitySWR.mutate();
+      setBanner({
+        kind: "ok",
+        msg: "Разведка запущена — следи за прогрессом в ленте ниже. Занимает 1–3 минуты, после неё автоматически пойдёт глубокий анализ и пересчёт точек роста.",
+      });
     } catch (e: any) {
       setBanner({ kind: "err", msg: e?.message ?? String(e) });
     } finally {
@@ -66,7 +84,11 @@ export default function CompetitorsPage() {
     setDiving(true); setBanner(null);
     try {
       await api.triggerCompetitorDeepDive(siteId);
-      setBanner({ kind: "ok", msg: "Глубокий анализ в очереди. Обнови через ~30 сек." });
+      activitySWR.mutate();
+      setBanner({
+        kind: "ok",
+        msg: "Глубокий анализ запущен — следи за прогрессом в ленте ниже.",
+      });
     } catch (e: any) {
       setBanner({ kind: "err", msg: e?.message ?? String(e) });
     } finally {
@@ -138,6 +160,9 @@ export default function CompetitorsPage() {
           {banner.msg}
         </div>
       )}
+
+      {/* Live progress — visible whenever discovery/deep-dive is running */}
+      {hasRunning && <ActivityFeed siteId={siteId} />}
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as any)}>
         <TabsList>

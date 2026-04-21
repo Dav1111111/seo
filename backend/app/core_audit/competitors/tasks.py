@@ -367,10 +367,13 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                 # site already has a page for each gap query. This turns
                 # "create new page" into "strengthen existing page" when
                 # we already cover the topic.
+                # Filter is intentionally loose: in_index comes from Yandex
+                # indexation polling and is often False for freshly crawled
+                # pages. A title is the minimal signal we need for matching.
                 page_stmt = select(
                     Page.url, Page.path, Page.title, Page.h1,
                     Page.meta_description, Page.content_text,
-                ).where(Page.site_id == site.id, Page.in_index.is_(True))
+                ).where(Page.site_id == site.id, Page.title.is_not(None))
                 page_rows = (await db.execute(page_stmt)).all()
                 own_pages_dicts = [
                     {
