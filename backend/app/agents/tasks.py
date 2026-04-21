@@ -64,10 +64,15 @@ async def _run_agent_for_site(agent_name: str, site_id: UUID, trigger: str) -> d
 
 
 async def _get_active_site_ids() -> list[UUID]:
+    """Nightly-eligible sites: active AND onboarding complete.
+
+    Sites mid-wizard are intentionally skipped — see
+    app.core_audit.onboarding.gate for rationale.
+    """
+    from app.core_audit.onboarding.gate import onboarded_site_ids
     session_factory = _make_session()
     async with session_factory() as db:
-        rows = await db.execute(select(Site.id).where(Site.is_active == True))  # noqa: E712
-        return [r[0] for r in rows]
+        return await onboarded_site_ids(db)
 
 
 @celery_app.task(name="run_search_visibility_all", bind=True, max_retries=1)

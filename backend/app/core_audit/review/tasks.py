@@ -75,10 +75,9 @@ def review_all_nightly_task(self, top_n: int = DEFAULT_TOP_N):
     """Nightly: iterate active sites, fire one review_site_decisions per site."""
 
     async def _inner():
+        from app.core_audit.onboarding.gate import onboarded_site_ids_with
         async with task_session() as db:
-            rows = await db.execute(
-                select(Site.id, Site.vertical).where(Site.is_active == True)  # noqa: E712
-            )
+            rows = await onboarded_site_ids_with(db, Site.vertical)
             active = [(sid, vert) for sid, vert in rows]
 
         dispatched = []

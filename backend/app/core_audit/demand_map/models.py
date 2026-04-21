@@ -17,6 +17,7 @@ from sqlalchemy import (
     Index,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -86,6 +87,23 @@ class TargetCluster(Base, TimestampMixin):
         Numeric(4, 3), nullable=False, default=0
     )
     source: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    # Этап 1 — user confirmation layer (step 4 of onboarding).
+    # user_confirmed: None = not yet reviewed, True = keep in map,
+    # False = rejected as irrelevant.
+    user_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 'grow' = target this cluster, 'ignore' = aware but not investing,
+    # 'not_mine' = actively remove from scoring
+    growth_intent: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 'info' | 'comm' | 'trans' | 'nav' — intent classification per seo-page
+    query_intent: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Peak demand months (1–12), e.g. [5,6,7,8,9] for summer tourism
+    seasonality_peak_months: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]",
+    )
+    # Step 5 — how well the currently-ranking page matches the query intent
+    page_intent_fit: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    page_intent_fit_reason_ru: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     queries = relationship(
         "TargetQuery",

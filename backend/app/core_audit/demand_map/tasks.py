@@ -149,11 +149,9 @@ def demand_map_build_all_weekly_task(self) -> dict:
     pipeline so downstream Phase C+ readers can consume fresh data).
     """
     async def _inner() -> dict:
+        from app.core_audit.onboarding.gate import onboarded_site_ids
         async with task_session() as db:
-            rows = await db.execute(
-                select(Site.id).where(Site.is_active == True)  # noqa: E712
-            )
-            site_ids = [r[0] for r in rows]
+            site_ids = await onboarded_site_ids(db)
         for sid in site_ids:
             demand_map_build_site_task.delay(str(sid))
         return {"dispatched": [str(s) for s in site_ids]}

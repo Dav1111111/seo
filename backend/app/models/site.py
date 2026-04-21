@@ -44,4 +44,23 @@ class Site(Base, TimestampMixin):
         server_default="{}",
     )
 
+    # Этап 1 — conversational onboarding state.
+    # onboarding_step walks through: pending_analyze → confirm_business →
+    # confirm_products → confirm_competitors → confirm_queries →
+    # confirm_positions → confirm_plan → confirm_kpi → active.
+    # Celery tasks check for "active" before running the nightly pipeline.
+    onboarding_step: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending_analyze",
+        server_default="pending_analyze",
+    )
+    understanding: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=lambda: {}, server_default="{}",
+    )
+    competitor_domains: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]",
+    )
+    kpi_targets: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=lambda: {}, server_default="{}",
+    )
+
     tenant = relationship("Tenant", back_populates="sites")

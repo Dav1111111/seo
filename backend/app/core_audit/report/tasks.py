@@ -48,11 +48,9 @@ def report_build_site(self, site_id: str, week_end_iso: str | None = None):
 @celery_app.task(name="report_build_all_weekly", bind=True, max_retries=1)
 def report_build_all_weekly(self):
     async def _inner():
+        from app.core_audit.onboarding.gate import onboarded_site_ids
         async with task_session() as db:
-            rows = await db.execute(
-                select(Site.id).where(Site.is_active == True)  # noqa: E712
-            )
-            site_ids = [r[0] for r in rows]
+            site_ids = await onboarded_site_ids(db)
         for sid in site_ids:
             report_build_site.delay(str(sid), None)
         return {"dispatched": [str(s) for s in site_ids]}
