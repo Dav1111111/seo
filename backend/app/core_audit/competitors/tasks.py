@@ -240,4 +240,87 @@ def competitors_discover_site_task(
     return _run(_inner())
 
 
-__all__ = ["competitors_discover_site_task"]
+@celery_app.task(name="competitors_deep_dive_site", bind=True, max_retries=0)
+def competitors_deep_dive_site_task(self, site_id: str) -> dict:
+    """Crawl top competitor sites and write a structural comparison.
+
+    Uses the persisted competitor_profile.competitors list — for each
+    top competitor, visits the homepage + the example_url captured
+    during discovery, then aggregates structural signals (price, CTA,
+    reviews, schema types). Also analyzes the OWN site with the same
+    extractor so the UI can show an apples-to-apples diff.
+
+    Persists to sites.target_config.competitor_deep_dive (list of site
+    reports, plus a 'self' entry).
+    """
+    from app.core_audit.competitors.deep_dive import (
+        analyze_competitor_site,
+        analyze_page,
+    )
+
+    async def _inner() -> dict:
+        try:
+            async with task_session() as db:
+                site = await db.get(Site, UUID(site_id))
+                if site is None:
+                    return {"status": "skipped", "reason": "site_not_found"}
+
+                cfg = dict(site.target_config or {})
+                profile = cfg.get("competitor_profile") or {}
+                competitors = profile.get("competitors") or []
+                if not competitors:
+                    return {
+                        "status": "skipped",
+                        "reason": "no_competitor_profile",
+                        "site_id": site_id,
+                    }
+
+                # Top 5 competitors — crawl each (homepage + example URL)
+                reports: list[dict] = []
+                for c in competitors[:5]:
+                    domain = c.get("domain")
+                    example_url = c.get("example_url") or ""
+                    if not domain:
+                        continue
+                    rep = analyze_competitor_site(
+                        domain=domain,
+                        urls=[example_url] if example_url else [],
+                        max_pages=2,
+                    )
+                    reports.append(rep.to_dict())
+
+                # Own site — homepage only, enough for feature-by-feature diff
+                own_url = f"https://{site.domain.removeprefix('www.')}/"
+                own_page = analyze_page(own_url).to_dict()
+
+                cfg["competitor_deep_dive"] = {
+                    "competitors": reports,
+                    "self": own_page,
+                }
+                site.target_config = cfg
+                await db.commit()
+
+                return {
+                    "status": "ok",
+                    "site_id": site_id,
+                    "competitors_crawled": len(reports),
+                    "successful_pages": sum(
+                        1 for r in reports
+                        for p in r.get("pages", [])
+                        if p.get("status") == "ok"
+                    ),
+                }
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "competitors.deep_dive.task_failed site=%s err=%s",
+                site_id, exc,
+            )
+            return {"status": "error", "site_id": site_id, "err": str(exc)}
+
+    return _run(_inner())
+
+
+__all__ = [
+    "competitors_discover_site_task",
+    "competitors_deep_dive_site_task",
+]

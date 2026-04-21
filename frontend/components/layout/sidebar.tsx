@@ -10,13 +10,15 @@ import {
   FileText,
   Settings,
   TrendingUp,
+  Swords,
 } from "lucide-react";
 
 const nav = [
-  { href: "/",           label: "Обзор",       icon: LayoutDashboard },
-  { href: "/priorities", label: "Приоритеты",  icon: Flame },
-  { href: "/reports",    label: "Отчёты",      icon: FileText },
-  { href: "/settings",   label: "Настройки",   icon: Settings },
+  { href: "/",            label: "Обзор",       icon: LayoutDashboard },
+  { href: "/priorities",  label: "Приоритеты",  icon: Flame },
+  { href: "/competitors", label: "Конкуренты",  icon: Swords },
+  { href: "/reports",     label: "Отчёты",      icon: FileText },
+  { href: "/settings",    label: "Настройки",   icon: Settings },
 ];
 
 export function Sidebar() {

@@ -650,6 +650,83 @@ async def get_competitors(
     }
 
 
+@router.get(
+    "/sites/{site_id}/competitors/content-gaps",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_content_gaps(
+    site_id: uuid.UUID,
+    top_k: int = Query(default=20, ge=3, le=50),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Content gaps — queries where a confirmed competitor ranks top-5 and we don't.
+
+    Reads the per-query SERP cache produced by the last discovery run
+    (sites.target_config.competitor_profile.query_serps). No new SERP
+    calls are made — pure in-memory analysis.
+    """
+    from app.core_audit.competitors.content_gap import analyze_gaps
+
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    profile = (site.target_config or {}).get("competitor_profile") or {}
+    query_serps = profile.get("query_serps") or {}
+    if not query_serps:
+        return {
+            "site_id": str(site_id),
+            "gaps": [],
+            "note": "No SERP cache yet — run competitor discovery first.",
+        }
+
+    gaps = analyze_gaps(
+        own_domain=site.domain,
+        competitor_domains=list(site.competitor_domains or []),
+        query_to_serp=query_serps,
+        top_k_gaps=top_k,
+    )
+    return {
+        "site_id": str(site_id),
+        "own_domain": site.domain,
+        "gaps_found": len(gaps),
+        "gaps": [g.to_dict() for g in gaps],
+    }
+
+
+@router.post(
+    "/sites/{site_id}/competitors/deep-dive",
+    response_model=QueuedResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_competitor_deep_dive(site_id: uuid.UUID) -> QueuedResponse:
+    """Crawl top competitor sites and extract structure/prices/schema."""
+    from app.core_audit.competitors.tasks import competitors_deep_dive_site_task
+    task = competitors_deep_dive_site_task.delay(str(site_id))
+    return QueuedResponse(task_id=task.id, status="queued")
+
+
+@router.get(
+    "/sites/{site_id}/competitors/deep-dive",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_competitor_deep_dive(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return last competitor_deep_dive blob, or empty shell if never run."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    blob = (site.target_config or {}).get("competitor_deep_dive") or {}
+    return {
+        "site_id": str(site_id),
+        "own_domain": site.domain,
+        "self": blob.get("self") or {},
+        "competitors": blob.get("competitors") or [],
+    }
+
+
 @router.post(
     "/sites/{site_id}/onboarding/complete",
     dependencies=[Depends(_require_admin)],

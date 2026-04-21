@@ -126,6 +126,11 @@ class CompetitorProfile:
     cost_usd: float                  # estimated — Search API calls
     errors: dict[str, int]           # error tag -> count
 
+    # Per-query SERP cache — enables content_gap analyzer to reuse the
+    # same SERP data without re-hitting the API. Kept compact: only
+    # domain/url/title/position per doc.
+    query_serps: dict[str, list[dict]] = dataclasses.field(default_factory=dict)
+
     def to_jsonb(self) -> dict:
         return {
             "site_id": self.site_id,
@@ -136,6 +141,7 @@ class CompetitorProfile:
             "unique_domains_seen": self.unique_domains_seen,
             "cost_usd": round(self.cost_usd, 4),
             "errors": dict(self.errors),
+            "query_serps": self.query_serps,
         }
 
 
@@ -172,6 +178,7 @@ def discover_competitors(
     errors: dict[str, int] = defaultdict(int)
     queries_with_results = 0
     cost_usd = 0.0
+    query_serps: dict[str, list[dict]] = {}
 
     for q in qs:
         docs, err = fetcher(q)
@@ -189,6 +196,13 @@ def discover_competitors(
             time.sleep(sleep_between_calls)
             continue
         queries_with_results += 1
+
+        # Cache a compact SERP snapshot for downstream content-gap analysis.
+        query_serps[q] = [
+            {"position": d.position, "domain": d.domain,
+             "url": d.url, "title": d.title}
+            for d in docs
+        ]
 
         # First occurrence per domain within a single SERP only — we
         # don't double-count a site that lists many subpages on one
@@ -244,6 +258,7 @@ def discover_competitors(
         unique_domains_seen=len(unique_domains),
         cost_usd=cost_usd,
         errors=dict(errors),
+        query_serps=query_serps,
     )
 
 

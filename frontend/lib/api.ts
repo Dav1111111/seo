@@ -280,6 +280,37 @@ export const api = {
         }>;
         cost_usd?: number;
         errors?: Record<string, number>;
+        query_serps?: Record<string, any[]>;
       };
     }>(`/sites/${siteId}/competitors`, { base: "admin" }),
+
+  getContentGaps: (siteId: string, topK = 20) =>
+    apiFetch<{
+      site_id: string;
+      own_domain?: string;
+      gaps_found?: number;
+      gaps?: Array<{
+        query: string;
+        site_position: number | null;
+        competitor_domain: string;
+        competitor_position: number;
+        competitor_url: string;
+        competitor_title: string;
+        other_competitors: string[];
+      }>;
+      note?: string;
+    }>(`/sites/${siteId}/competitors/content-gaps?top_k=${topK}`, { base: "admin" }),
+
+  triggerCompetitorDeepDive: (siteId: string) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/sites/${siteId}/competitors/deep-dive`,
+      { method: "POST", base: "admin" },
+    ),
+  getCompetitorDeepDive: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      own_domain: string;
+      self: any;
+      competitors: any[];
+    }>(`/sites/${siteId}/competitors/deep-dive`, { base: "admin" }),
 };
