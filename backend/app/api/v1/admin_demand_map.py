@@ -328,6 +328,118 @@ async def commit_draft_to_target_config(
     }
 
 
+# ---------- Этап 1 — Onboarding wizard endpoints --------------------------
+
+
+class OnboardingStepBody(BaseModel):
+    """Body for PATCH /onboarding/step — advance or rewind wizard state."""
+
+    onboarding_step: str
+
+
+class UnderstandingPatchBody(BaseModel):
+    """Body for PATCH /understanding — owner-edited version of the agent output."""
+
+    narrative_ru: str | None = None
+    detected_niche: str | None = None
+    detected_positioning: str | None = None
+    detected_usp: str | None = None
+
+
+VALID_ONBOARDING_STEPS = {
+    "pending_analyze", "confirm_business", "confirm_products",
+    "confirm_competitors", "confirm_queries", "confirm_positions",
+    "confirm_plan", "confirm_kpi", "active",
+}
+
+
+@router.post(
+    "/sites/{site_id}/onboarding/understanding/analyze",
+    response_model=QueuedResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_understanding_analyze(site_id: uuid.UUID) -> QueuedResponse:
+    """Queue the BusinessUnderstandingAgent for a site (step 1)."""
+    from app.core_audit.onboarding.tasks import onboarding_understand_site_task
+    task = onboarding_understand_site_task.delay(str(site_id))
+    return QueuedResponse(task_id=task.id, status="queued")
+
+
+@router.get(
+    "/sites/{site_id}/onboarding",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_onboarding_state(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Full onboarding state for a site — used by the wizard layout loader."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    return {
+        "site_id": str(site_id),
+        "domain": site.domain,
+        "display_name": site.display_name,
+        "onboarding_step": site.onboarding_step,
+        "understanding": dict(site.understanding or {}),
+        "target_config": dict(site.target_config or {}),
+        "target_config_draft": dict(site.target_config_draft or {}),
+        "competitor_domains": list(site.competitor_domains or []),
+        "kpi_targets": dict(site.kpi_targets or {}),
+    }
+
+
+@router.patch(
+    "/sites/{site_id}/onboarding/step",
+    dependencies=[Depends(_require_admin)],
+)
+async def patch_onboarding_step(
+    site_id: uuid.UUID,
+    body: OnboardingStepBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Advance or rewind the wizard state. Validates against allowed values."""
+    if body.onboarding_step not in VALID_ONBOARDING_STEPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"onboarding_step must be one of {sorted(VALID_ONBOARDING_STEPS)}",
+        )
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    site.onboarding_step = body.onboarding_step
+    await db.flush()
+    return {"site_id": str(site_id), "onboarding_step": site.onboarding_step}
+
+
+@router.patch(
+    "/sites/{site_id}/onboarding/understanding",
+    dependencies=[Depends(_require_admin)],
+)
+async def patch_understanding(
+    site_id: uuid.UUID,
+    body: UnderstandingPatchBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Owner-edited override on top of the agent output (step 1)."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+    current = dict(site.understanding or {})
+    for field_name in (
+        "narrative_ru", "detected_niche",
+        "detected_positioning", "detected_usp",
+    ):
+        value = getattr(body, field_name)
+        if value is not None:
+            current[field_name] = value
+    current["user_edited_at"] = True  # cheap marker; timestamp via updated_at
+    site.understanding = current
+    await db.flush()
+    return {"site_id": str(site_id), "understanding": current}
+
+
 def _cluster_dto(r: TargetCluster, queries_count: int) -> dict[str, Any]:
     return {
         "id": str(r.id),
