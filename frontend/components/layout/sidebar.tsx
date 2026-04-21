@@ -13,16 +13,24 @@ import {
   Activity,
   Settings,
   TrendingUp,
+  Target,
+  Flame,
+  FileText,
+  ClipboardList,
 } from "lucide-react";
 
 const nav = [
-  { href: "/",         label: "Обзор",    icon: LayoutDashboard },
-  { href: "/status",   label: "Статус",   icon: Activity },
-  { href: "/queries",  label: "Запросы",  icon: Search },
-  { href: "/tasks",    label: "Задачи",   icon: CheckSquare },
-  { href: "/issues",   label: "Проблемы", icon: AlertTriangle },
-  { href: "/pipeline", label: "Pipeline", icon: Workflow },
-  { href: "/settings", label: "Настройки",icon: Settings },
+  { href: "/",                label: "Обзор",          icon: LayoutDashboard },
+  { href: "/priorities",      label: "Приоритеты",     icon: Flame },
+  { href: "/reports",         label: "Отчёты",         icon: FileText },
+  { href: "/reviews",         label: "Ревью",          icon: ClipboardList },
+  { href: "/demand-profile",  label: "Профиль спроса", icon: Target },
+  { href: "/queries",         label: "Запросы",        icon: Search },
+  { href: "/status",          label: "Статус",         icon: Activity },
+  { href: "/tasks",           label: "Задачи",         icon: CheckSquare },
+  { href: "/issues",          label: "Проблемы",       icon: AlertTriangle },
+  { href: "/pipeline",        label: "Jobs",           icon: Workflow },
+  { href: "/settings",        label: "Настройки",      icon: Settings },
 ];
 
 export function Sidebar() {

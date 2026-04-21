@@ -3,7 +3,21 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
 // Default site ID — in Phase 9 this becomes dynamic
 export const SITE_ID = process.env.NEXT_PUBLIC_SITE_ID || "1e11339f-c87e-4742-9d38-6f79463b0d16";
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+function getAdminKey(): string {
+  if (typeof window !== "undefined") {
+    const saved = window.localStorage.getItem("gt_admin_key");
+    if (saved) return saved;
+  }
+  return process.env.NEXT_PUBLIC_ADMIN_KEY || "";
+}
+
+export function setAdminKey(key: string): void {
+  if (typeof window === "undefined") return;
+  if (key) window.localStorage.setItem("gt_admin_key", key);
+  else window.localStorage.removeItem("gt_admin_key");
+}
+
+async function apiFetch<T>(path: string, init?: RequestInit & { admin?: boolean }): Promise<T> {
   // Guard against empty siteId that would produce "/sites//..." URLs.
   // Happens when the SiteProvider context hasn't hydrated yet but a
   // component tries to fetch. Fail fast with a clear message.
@@ -13,13 +27,21 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
       "Wait for site to load and try again."
     );
   }
+  const extra: Record<string, string> = {};
+  if (init?.admin) {
+    const key = getAdminKey();
+    if (!key) throw new Error("Admin key not set. Откройте Настройки и введите X-Admin-Key.");
+    extra["X-Admin-Key"] = key;
+  }
+  const { admin: _drop, ...rest } = init || {};
   const res = await fetch(`${API_BASE}${path}`, {
     headers: {
       "Content-Type": "application/json",
       "ngrok-skip-browser-warning": "true",  // bypass ngrok interstitial
-      ...init?.headers,
+      ...extra,
+      ...rest?.headers,
     },
-    ...init,
+    ...rest,
   });
   if (!res.ok) {
     const text = await res.text();
@@ -115,4 +137,82 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message, history, issue_id: issueId }),
     }),
+
+  // Reviews (Module 3)
+  reviewsList: (siteId: string, params: Record<string, string | number> = {}) => {
+    const qs = new URLSearchParams(params as any).toString();
+    return apiFetch<{ total: number; items: any[] }>(
+      `/reviews/sites/${siteId}/reviews${qs ? `?${qs}` : ""}`,
+    );
+  },
+  review: (reviewId: string) =>
+    apiFetch<any>(`/reviews/${reviewId}`),
+  reviewsStats: (siteId: string) =>
+    apiFetch<any>(`/reviews/sites/${siteId}/reviews/stats`),
+  triggerSiteReview: (siteId: string, topN = 20) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/reviews/sites/${siteId}/run?top_n=${topN}`, { method: "POST" },
+    ),
+
+  // Reports (Module 5)
+  reportsList: (siteId: string, limit = 20) =>
+    apiFetch<{ total: number; items: any[] }>(`/reports/sites/${siteId}?limit=${limit}`),
+  reportLatest: (siteId: string) =>
+    apiFetch<any>(`/reports/sites/${siteId}/latest`),
+  report: (reportId: string) =>
+    apiFetch<any>(`/reports/${reportId}`),
+  triggerReport: (siteId: string, weekEnd?: string) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/reports/sites/${siteId}/run${weekEnd ? `?week_end=${encodeURIComponent(weekEnd)}` : ""}`,
+      { method: "POST" },
+    ),
+  reportMarkdownUrl: (reportId: string) => `${API_BASE}/reports/${reportId}/markdown`,
+
+  // Priorities (Module 4)
+  priorities: (siteId: string, params: Record<string, string | number | boolean> = {}) => {
+    const qs = new URLSearchParams(params as any).toString();
+    return apiFetch<{ total: number; items: any[] }>(
+      `/priorities/sites/${siteId}${qs ? `?${qs}` : ""}`,
+    );
+  },
+  weeklyPlan: (siteId: string, top_n = 10, max_per_page = 2) =>
+    apiFetch<{ total_in_backlog: number; pages_represented: number; max_per_page: number; items: any[] }>(
+      `/priorities/sites/${siteId}/weekly-plan?top_n=${top_n}&max_per_page=${max_per_page}`,
+    ),
+  triggerRescore: (siteId: string) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/priorities/sites/${siteId}/rescore`, { method: "POST" },
+    ),
+  patchRecommendation: (recId: string, body: { user_status: string; note?: string }) =>
+    apiFetch<any>(`/reviews/recommendations/${recId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  // Admin — Draft Profile (Phase F/G)
+  draftProfile: (siteId: string) =>
+    apiFetch<{ site_id: string; draft: any; has_draft: boolean }>(
+      `/admin/sites/${siteId}/draft-profile`,
+      { admin: true },
+    ),
+  triggerDraftRebuild: (siteId: string) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/admin/sites/${siteId}/draft-profile/rebuild`,
+      { method: "POST", admin: true },
+    ),
+  commitDraft: (
+    siteId: string,
+    body: { confirm: boolean; field_overrides?: Record<string, any> } = { confirm: true },
+  ) =>
+    apiFetch<{ committed: boolean; preview?: boolean; target_config: any }>(
+      `/admin/sites/${siteId}/target-config/commit-draft`,
+      { method: "POST", admin: true, body: JSON.stringify(body) },
+    ),
+  demandMap: (siteId: string, params: Record<string, string | number> = {}) => {
+    const qs = new URLSearchParams(params as any).toString();
+    return apiFetch<{ clusters_total: number; items: any[] }>(
+      `/admin/sites/${siteId}/demand-map${qs ? `?${qs}` : ""}`,
+      { admin: true },
+    );
+  },
 };

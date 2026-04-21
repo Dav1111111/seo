@@ -128,3 +128,11 @@
     @apply font-sans;
   }
 }
+
+@media print {
+  aside, nav, .print\:hidden { display: none !important; }
+  body { background: white !important; }
+  main, .main-content { padding: 0 !important; }
+  .break-inside-avoid { break-inside: avoid; page-break-inside: avoid; }
+  a { text-decoration: none; color: inherit; }
+}
