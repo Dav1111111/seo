@@ -12,6 +12,7 @@ import { TrafficChart } from "@/components/dashboard/traffic-chart";
 import {
   TrendingUp, TrendingDown, Eye, MousePointer,
   MapPin, FileSearch, ArrowRight, Flame, FileText, Target,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -79,6 +80,14 @@ export function OverviewPage() {
     { refreshInterval: 60_000 },
   );
 
+  // Onboarding state — shown as a banner when wizard isn't finished.
+  const { data: onbState } = useSWR(
+    siteId ? `onb-check-${siteId}` : null,
+    () => api.onboardingState(siteId).catch(() => null),
+    { refreshInterval: 0 },
+  );
+  const onboardingActive = onbState?.onboarding_step === "active";
+
   const { data: latestReport } = useSWR(
     siteId ? `latest-report-${siteId}` : null,
     () => api.reportLatest(siteId).catch(() => null),
@@ -122,6 +131,27 @@ export function OverviewPage() {
           {season && <SeasonBadge season={season.season} note={season.note} />}
         </div>
       </div>
+
+      {/* Onboarding banner — high-priority nudge when wizard isn't done */}
+      {onbState && !onboardingActive && (
+        <Card className="border-primary/40 bg-gradient-to-r from-primary/10 to-primary/5">
+          <CardContent className="py-4 flex items-center gap-4 flex-wrap">
+            <Sparkles className="h-6 w-6 text-primary shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-semibold">Онбординг ещё не завершён</div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Пока не пройдёшь 7 шагов — автоматический pipeline не запускается,
+                рекомендации строятся на догадках. Займёт ~20 минут.
+              </p>
+            </div>
+            <Link href={`/onboarding/${siteId}`}>
+              <Button size="sm">
+                Продолжить онбординг <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Root problem (Phase E diagnostic) */}
       {hasDiagnostic ? (

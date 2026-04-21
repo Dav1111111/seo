@@ -195,4 +195,63 @@ export const api = {
       `/sites/${siteId}/demand-map${qs ? `?${qs}` : ""}`, { base: "admin" },
     );
   },
+
+  // Этап 1 — Conversational Onboarding
+  onboardingState: (siteId: string) =>
+    apiFetch<any>(`/sites/${siteId}/onboarding`, { base: "admin" }),
+  triggerUnderstandingAnalyze: (siteId: string) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/sites/${siteId}/onboarding/understanding/analyze`,
+      { method: "POST", base: "admin" },
+    ),
+  patchOnboardingStep: (siteId: string, onboarding_step: string) =>
+    apiFetch<any>(`/sites/${siteId}/onboarding/step`, {
+      method: "PATCH",
+      base: "admin",
+      body: JSON.stringify({ onboarding_step }),
+    }),
+  patchUnderstanding: (siteId: string, body: Record<string, any>) =>
+    apiFetch<any>(`/sites/${siteId}/onboarding/understanding`, {
+      method: "PATCH",
+      base: "admin",
+      body: JSON.stringify(body),
+    }),
+  patchOnboardingProducts: (siteId: string, body: {
+    primary_product?: string | null;
+    service_weights?: Record<string, number>;
+    secondary_products?: string[];
+  }) =>
+    apiFetch<any>(`/sites/${siteId}/onboarding/products`, {
+      method: "PATCH",
+      base: "admin",
+      body: JSON.stringify(body),
+    }),
+  patchOnboardingCompetitors: (siteId: string, body: {
+    competitor_domains?: string[];
+    competitor_brands?: string[];
+  }) =>
+    apiFetch<any>(`/sites/${siteId}/onboarding/competitors`, {
+      method: "PATCH",
+      base: "admin",
+      body: JSON.stringify(body),
+    }),
+  patchClusterReview: (siteId: string, clusterId: string, body: {
+    user_confirmed?: boolean | null;
+    growth_intent?: string | null;
+  }) =>
+    apiFetch<any>(`/sites/${siteId}/onboarding/clusters/${clusterId}`, {
+      method: "PATCH",
+      base: "admin",
+      body: JSON.stringify(body),
+    }),
+  patchOnboardingKpi: (siteId: string, body: Record<string, any>) =>
+    apiFetch<any>(`/sites/${siteId}/onboarding/kpi`, {
+      method: "PATCH",
+      base: "admin",
+      body: JSON.stringify(body),
+    }),
+  completeOnboarding: (siteId: string) =>
+    apiFetch<any>(`/sites/${siteId}/onboarding/complete`, {
+      method: "POST", base: "admin",
+    }),
 };
