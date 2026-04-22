@@ -190,10 +190,12 @@ async def rebuild_business_truth(
         from app.core_audit.business_truth.traffic_reader import TrafficDistribution
         traffic = TrafficDistribution({}, 0, 0)
 
-    # Traffic queries per key — for evidence display we'd need to keep
-    # a reverse map. TrafficDistribution only stores weights today;
-    # leave queries empty and extend later if UI needs sample queries.
-    traffic_queries: dict[DirectionKey, tuple[str, ...]] = {}
+    # Item 3: TrafficDistribution now carries the reverse map. We keep
+    # top 10 queries per direction to bound blob size.
+    traffic_queries: dict[DirectionKey, tuple[str, ...]] = {
+        k: tuple(qs[:10])
+        for k, qs in traffic.queries_per_direction.items()
+    }
 
     sources_used = {
         "understanding": sum(1 for _ in u_weights),
@@ -201,12 +203,18 @@ async def rebuild_business_truth(
         "traffic": traffic.total_impressions,
     }
 
+    # Item 4: unclassified diagnostics travel with the truth.
     truth = reconcile(
         understanding_weights=u_weights,
         content_pages=content_pages,
         traffic_weights=traffic.direction_weights,
         traffic_queries=traffic_queries,
         sources_used=sources_used,
+        top_unclassified_queries=list(traffic.unclassified_queries[:20]),
+        unclassified_share=(
+            1.0 - traffic.coverage_share
+            if traffic.total_impressions > 0 else 0.0
+        ),
     )
 
     if persist:

@@ -163,6 +163,16 @@ class BusinessTruth:
     # Когда построено
     built_at_iso: str = ""
 
+    # Item 4: diagnostics — запросы из Вебмастера которые не попали
+    # ни в одно направление (словарь узкий / бизнес шире чем думает
+    # владелец). Кортежи (query, impressions), отсортированы по
+    # impressions desc. Truncated to top ~20 for blob size.
+    top_unclassified_queries: list[tuple[str, int]] = dataclasses.field(
+        default_factory=list,
+    )
+    # Доля показов, не попавших ни в одно направление. 0.0..1.0.
+    unclassified_share: float = 0.0
+
     def confirmed(self) -> list[DirectionEvidence]:
         """Направления, подтверждённые хотя бы двумя источниками."""
         return [d for d in self.directions if d.is_confirmed]
@@ -205,6 +215,11 @@ class BusinessTruth:
             ],
             "sources_used": dict(self.sources_used),
             "built_at": self.built_at_iso,
+            "unclassified_share": round(float(self.unclassified_share), 3),
+            "top_unclassified_queries": [
+                {"query": q, "impressions": int(imp)}
+                for q, imp in self.top_unclassified_queries[:20]
+            ],
         }
 
 

@@ -131,3 +131,36 @@ def test_jsonb_serialization_roundtrip_shape():
     assert d["strength_understanding"] == 0.5
     assert d["is_confirmed"] is True
     assert d["divergence_ru"] is None
+
+
+def test_jsonb_includes_unclassified_diagnostics():
+    """Item 4: top_unclassified_queries and unclassified_share travel
+    with the truth blob so UI can diagnose vocab narrowness."""
+    truth = BusinessTruth(
+        directions=[_mk("багги", "абхазия", u=0.5, c=0.6, t=0.9)],
+        sources_used={"understanding": 1, "content": 3, "traffic": 2},
+        built_at_iso="2026-04-22T20:00:00Z",
+        top_unclassified_queries=[
+            ("котики милые", 400),
+            ("жучок паучок", 100),
+        ],
+        unclassified_share=0.35,
+    )
+    blob = truth.to_jsonb()
+    assert blob["unclassified_share"] == 0.35
+    assert blob["top_unclassified_queries"] == [
+        {"query": "котики милые", "impressions": 400},
+        {"query": "жучок паучок", "impressions": 100},
+    ]
+
+
+def test_jsonb_defaults_when_unclassified_empty():
+    """Default empty: unclassified_share=0.0, queries=[]."""
+    truth = BusinessTruth(
+        directions=[_mk("багги", "абхазия", u=1.0)],
+        sources_used={"understanding": 1, "content": 0, "traffic": 0},
+        built_at_iso="2026-04-22T20:00:00Z",
+    )
+    blob = truth.to_jsonb()
+    assert blob["unclassified_share"] == 0.0
+    assert blob["top_unclassified_queries"] == []

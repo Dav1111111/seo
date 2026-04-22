@@ -39,6 +39,16 @@ class TrafficDistribution:
     direction_weights: dict[DirectionKey, float]
     total_impressions: int
     unclassified_impressions: int
+    # Item 3: reverse map. For each classified direction, the actual
+    # queries that produced it, ordered by impressions desc.
+    queries_per_direction: dict[DirectionKey, list[str]] = dataclasses.field(
+        default_factory=dict,
+    )
+    # Item 4: top unclassified queries, ordered by impressions desc.
+    # UI shows these as "your onboarding missed these" diagnostic.
+    unclassified_queries: list[tuple[str, int]] = dataclasses.field(
+        default_factory=list,
+    )
 
     @property
     def coverage_share(self) -> float:
@@ -69,6 +79,8 @@ def aggregate_traffic(
     geos_list = list(geos)
 
     direction_raw: dict[DirectionKey, float] = {}
+    direction_queries: dict[DirectionKey, list[tuple[str, int]]] = {}
+    unclassified_rows: list[tuple[str, int]] = []
     total = 0
     unclassified = 0
 
@@ -81,21 +93,39 @@ def aggregate_traffic(
         keys = classify_text(q or "", services_list, geos_list)
         if not keys:
             unclassified += imp
+            unclassified_rows.append((q, imp))
             continue
 
         share = imp / len(keys)
         for k in keys:
             direction_raw[k] = direction_raw.get(k, 0.0) + share
+            direction_queries.setdefault(k, []).append((q, imp))
+
+    # Sort per-direction queries by impressions descending
+    queries_per_direction = {
+        k: [q for q, _ in sorted(v, key=lambda x: -x[1])]
+        for k, v in direction_queries.items()
+    }
+    # Sort unclassified queries by impressions descending
+    unclassified_queries = sorted(unclassified_rows, key=lambda x: -x[1])
 
     classified = total - unclassified
     if classified <= 0:
-        return TrafficDistribution({}, total, unclassified)
+        return TrafficDistribution(
+            direction_weights={},
+            total_impressions=total,
+            unclassified_impressions=unclassified,
+            queries_per_direction={},
+            unclassified_queries=unclassified_queries,
+        )
 
     weights = {k: v / classified for k, v in direction_raw.items()}
     return TrafficDistribution(
         direction_weights=weights,
         total_impressions=total,
         unclassified_impressions=unclassified,
+        queries_per_direction=queries_per_direction,
+        unclassified_queries=unclassified_queries,
     )
 
 

@@ -98,6 +98,78 @@ def test_classifier_uses_shared_matcher_tolerates_endings():
     assert DirectionKey.of("багги", "абхазия") in weights
 
 
+# ── Item 3: queries_per_direction reverse map ────────────────────────
+
+def test_queries_per_direction_populated():
+    """For each classified direction, collect the actual query strings
+    that produced it. Lets UI show 'direction X came from queries [A,B,C]'."""
+    from app.core_audit.business_truth.traffic_reader import aggregate_traffic
+    out = aggregate_traffic(
+        [
+            ("багги абхазия",        300),
+            ("багги абхазия цена",   200),
+            ("багги сочи",           100),
+        ],
+        services={"багги"},
+        geos={"абхазия", "сочи"},
+    )
+    abk_queries = out.queries_per_direction[DirectionKey.of("багги", "абхазия")]
+    sochi_queries = out.queries_per_direction[DirectionKey.of("багги", "сочи")]
+    assert set(abk_queries) == {"багги абхазия", "багги абхазия цена"}
+    assert set(sochi_queries) == {"багги сочи"}
+
+
+# ── Item 4: unclassified traffic diagnostics ─────────────────────────
+
+def test_unclassified_queries_captured_with_impressions():
+    """Unclassified queries ranked by impressions — diagnostic signal
+    for 'your vocab is too narrow, here's what you're missing'."""
+    from app.core_audit.business_truth.traffic_reader import aggregate_traffic
+    out = aggregate_traffic(
+        [
+            ("багги абхазия",            500),   # classified
+            ("котики милые",             400),   # unclassified, top
+            ("случайный запрос",          50),   # unclassified, low
+            ("жучок паучок",             100),   # unclassified, mid
+        ],
+        services={"багги"},
+        geos={"абхазия"},
+    )
+    # Ranked by impressions desc
+    assert len(out.unclassified_queries) == 3
+    assert out.unclassified_queries[0] == ("котики милые", 400)
+    assert out.unclassified_queries[1] == ("жучок паучок", 100)
+    assert out.unclassified_queries[2] == ("случайный запрос", 50)
+
+
+def test_queries_per_direction_ordered_by_impressions():
+    """Highest-impression query for a direction comes first."""
+    from app.core_audit.business_truth.traffic_reader import aggregate_traffic
+    out = aggregate_traffic(
+        [
+            ("багги абхазия цена",   50),
+            ("багги абхазия",       500),
+            ("багги в абхазии 2025", 150),
+        ],
+        services={"багги"},
+        geos={"абхазия"},
+    )
+    qs = list(out.queries_per_direction[DirectionKey.of("багги", "абхазия")])
+    # Ordered by impressions descending
+    assert qs[0] == "багги абхазия"
+    assert qs[1] == "багги в абхазии 2025"
+    assert qs[2] == "багги абхазия цена"
+
+
+def test_unclassified_empty_when_everything_classified():
+    from app.core_audit.business_truth.traffic_reader import aggregate_traffic
+    out = aggregate_traffic(
+        [("багги абхазия", 100)],
+        services={"багги"}, geos={"абхазия"},
+    )
+    assert out.unclassified_queries == []
+
+
 # ── DB-backed integration: load_traffic_distribution ──────────────────
 
 async def test_load_traffic_distribution_pulls_from_webmaster(db, test_site):

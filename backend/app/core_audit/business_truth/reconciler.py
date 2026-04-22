@@ -25,6 +25,8 @@ def reconcile(
     traffic_weights: Mapping[DirectionKey, float],
     traffic_queries: Mapping[DirectionKey, tuple[str, ...]],
     sources_used: dict[str, int],
+    top_unclassified_queries: list[tuple[str, int]] | None = None,
+    unclassified_share: float = 0.0,
 ) -> BusinessTruth:
     """Merge 3 per-direction maps into a BusinessTruth.
 
@@ -81,6 +83,8 @@ def reconcile(
         # and produces ISO strings that downstream clients (Postgres
         # timestamptz, frontend JS) parse unambiguously.
         built_at_iso=datetime.now(timezone.utc).isoformat(),
+        top_unclassified_queries=list(top_unclassified_queries or []),
+        unclassified_share=float(unclassified_share or 0.0),
     )
 
 
