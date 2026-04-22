@@ -42,3 +42,14 @@ dev = [
 [build-system]
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+# Tests hit the real dev Postgres (fixtures roll back every transaction,
+# so DB stays clean). Canonical run:
+#   docker compose exec backend pytest tests -q
+# Local (requires matching Python 3.12 + SQLAlchemy 2 env):
+#   DATABASE_URL=postgresql+asyncpg://tower:devpassword@localhost/growthtower \
+#     pytest tests -q
