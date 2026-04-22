@@ -25,6 +25,29 @@ TERMINAL_STATUSES = ("done", "failed", "skipped")
 PIPELINE_STARTED_LOOKBACK_MINUTES = 10
 
 
+def _should_close_pipeline(stage: str, status: str) -> bool:
+    """Decide whether `stage:status` should close the wrapping pipeline.
+
+    The pipeline is a batch of ~6 parallel tasks; first-to-finish must
+    not close it prematurely. Rules:
+
+    - opportunities:done|failed|skipped is the canonical end (it's the
+      last task in the discovery→dive→opportunities chain), so always
+      close.
+    - competitor_discovery|competitor_deep_dive with failed|skipped
+      status → prerequisite broken, pipeline can't reach opportunities,
+      close with that status.
+    - Everything else (crawl done, webmaster done, demand_map done/
+      failed, plus happy-path discovery:done / deep_dive:done) → do
+      NOT close; the pipeline keeps going until opportunities.
+    """
+    if stage == "opportunities":
+        return True
+    if stage in ("competitor_discovery", "competitor_deep_dive"):
+        return status in ("failed", "skipped")
+    return False
+
+
 async def log_event(
     db: AsyncSession,
     site_id: UUID | str,
@@ -88,6 +111,12 @@ async def emit_terminal(
         )
 
     await log_event(db, site_id, stage, status, message, extra, run_id=run_id)
+
+    # Gate: only stages/statuses that truly end the pipeline close it.
+    # crawl:done finishing first must not close a pipeline that still
+    # has discovery and deep-dive to go.
+    if not _should_close_pipeline(stage, status):
+        return
 
     # Scope: match by run_id when supplied (precise), else time-window.
     stmt = (

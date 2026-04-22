@@ -102,3 +102,56 @@ async def test_emit_terminal_rejects_non_terminal_status(db, test_site: Site):
         await emit_terminal(
             db, test_site.id, "competitor_discovery", "progress", "x",
         )
+
+
+async def test_crawl_done_does_not_close_pipeline(db, test_site: Site):
+    """Regression: crawl:done MUST NOT close a pipeline that still has
+    discovery/deep-dive/opportunities queued. Before this guard, the
+    first-finishing fan-out task (crawl, ~0.5s) closed pipeline 20s
+    before competitors were done."""
+    await log_event(db, test_site.id, "pipeline", "started", "trigger")
+    await emit_terminal(
+        db, test_site.id, "crawl", "done",
+        "Краулинг: 15 страниц, 0 ошибок.",
+    )
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started"], (
+        "crawl:done should NOT have closed the pipeline"
+    )
+
+
+async def test_webmaster_done_does_not_close_pipeline(db, test_site: Site):
+    """Same gate: webmaster:done isn't the canonical end of the pipeline."""
+    await log_event(db, test_site.id, "pipeline", "started", "trigger")
+    await emit_terminal(db, test_site.id, "webmaster", "done", "42 queries")
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started"]
+
+
+async def test_demand_map_done_does_not_close_pipeline(db, test_site: Site):
+    """Same gate: demand_map is ancillary; opportunities is the true end."""
+    await log_event(db, test_site.id, "pipeline", "started", "trigger")
+    await emit_terminal(db, test_site.id, "demand_map", "done", "280 clusters")
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started"]
+
+
+async def test_discovery_done_does_not_close_pipeline(db, test_site: Site):
+    """discovery:done is expected mid-run; deep-dive still runs after it."""
+    await log_event(db, test_site.id, "pipeline", "started", "trigger")
+    await emit_terminal(
+        db, test_site.id, "competitor_discovery", "done",
+        "10 конкурентов",
+    )
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started"]
+
+
+async def test_opportunities_done_closes_pipeline(db, test_site: Site):
+    """opportunities is the canonical end — done status closes pipeline."""
+    await log_event(db, test_site.id, "pipeline", "started", "trigger")
+    await emit_terminal(
+        db, test_site.id, "opportunities", "done", "15 opps",
+    )
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started", "done"]
