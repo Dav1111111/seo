@@ -301,7 +301,9 @@ export default function CompetitorsPage() {
                         </div>
                       );
                     }
-                    const applied = new Date(out.applied_at);
+                    // Backend ts is naive UTC — force UTC parse.
+                    const _ap = out.applied_at;
+                    const applied = new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(_ap) ? _ap : _ap + "Z");
                     const daysAgo = Math.floor((Date.now() - applied.getTime()) / 86400000);
                     if (!out.followup_at) {
                       const daysLeft = Math.max(0, 14 - daysAgo);

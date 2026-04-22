@@ -25,7 +25,11 @@ const STAGE_LABEL: Record<string, string> = {
 };
 
 function timeAgo(iso: string): string {
-  const then = new Date(iso).getTime();
+  // Backend returns naive UTC iso ("2026-04-22T17:19:25.193") without
+  // timezone marker. JS Date() treats a marker-less ISO as LOCAL time,
+  // so an MSK user would see events 3 hours in the past. Force UTC.
+  const utcIso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+  const then = new Date(utcIso).getTime();
   const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000));
   if (diffSec < 60) return "только что";
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)} мин назад`;

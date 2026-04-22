@@ -300,7 +300,9 @@ function StageTimestamps({
   ];
 
   function ago(iso: string): string {
-    const then = new Date(iso).getTime();
+    // Backend serves naive UTC — force-parse as UTC. See activity-feed.tsx.
+    const utcIso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+    const then = new Date(utcIso).getTime();
     const sec = Math.max(0, Math.floor((Date.now() - then) / 1000));
     if (sec < 60) return "только что";
     if (sec < 3600) return `${Math.floor(sec / 60)} мин`;
