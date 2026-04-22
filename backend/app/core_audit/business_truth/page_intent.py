@@ -1,27 +1,12 @@
 """page_intent — вытащить (service, geo) из crawled страницы.
 
-Rules-based, без LLM. Принципы:
-  1. Алфавит сервисов и geo — только те, что владелец подтвердил в
-     онбординге (`services` + `geo_primary` + `geo_secondary`). Это
-     сразу исключает шум «полный набор туристических тем».
-  2. Источники матчинга внутри страницы (с весами):
-        title (×3)  — самый сильный сигнал
-        h1 (×3)
-        URL path (×2) — точные slug-и типа /sochi/ спасают даже при
-                        blend-ном title
-        meta_description (×1)
-        первые ~500 chars content (×1)
-  3. Морфология: упрощённо — сравниваем основы слов через
-     обрезку 1-2 последних символов. Без словаря (pymorphy2 есть, но
-     тяжёлый для hot-path; держим чистую функцию быстрой).
-  4. Multi-word geo вроде "красная поляна" матчится по нормализованному
-     тексту с удалением дефисов — чтобы URL slug /krasnaya-polyana/ или
-     "Красной Поляне" в заголовке оба попадали.
+Тонкая обёртка над shared matcher.classify_text: собирает haystack
+из title + h1 + URL path + meta + первые ~500 chars контента в один
+текст, затем просит matcher классифицировать.
 
-Результат — список всех `(service, geo)`, которые реально встретились
-на странице. Страница может покрывать несколько направлений (hub-
-страница «Багги-туры: Абхазия, Сочи, Красная Поляна» → 3 направления).
-Если ничего не совпало — пустой список (about/contact/misc).
+Возвращает список уникальных DirectionKey. Может быть пустым
+(about/contact/misc) или несколько (hub-страница, покрывающая много
+регионов).
 """
 
 from __future__ import annotations
@@ -30,102 +15,14 @@ import re
 from typing import Iterable
 
 from app.core_audit.business_truth.dto import DirectionKey
-
-
-# Стоп-токены — общие слова, которые сами по себе не несут направления.
-# Если владелец зачем-то положил такое в services, мы их игнорируем на
-# этапе матчинга страницы, чтобы "туры" не давали false positive.
-_NOISE_TOKENS = frozenset({
-    "туры", "тур", "отдых", "поездка", "путёвка", "цена", "цены",
-    "стоимость", "забронировать", "купить", "заказать",
-    "недорого", "дёшево", "2025", "2026", "2027",
-    "и", "а", "или", "в", "во", "на", "у", "по",
-    "из", "от", "до", "за", "для", "с", "со", "о", "об",
-})
-
-
-# Прямолинейная транслитерация RU→LAT для URL-slug'ов.
-# Зачем: URL /sochi/ не матчится с geo "сочи" без приведения.
-# Это не полная ГОСТ-транслитерация — покрывает частотные звуки
-# и работает для большинства городов/услуг. Особые случаи вроде
-# "abkhazia" (вместо "abhaziya") лечатся через явный alias в конфиге.
-_RU_TO_LAT = {
-    "а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"e","ж":"zh",
-    "з":"z","и":"i","й":"i","к":"k","л":"l","м":"m","н":"n","о":"o",
-    "п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"h","ц":"c",
-    "ч":"ch","ш":"sh","щ":"sch","ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya",
-}
-
-
-def _translit_ru_to_lat(s: str) -> str:
-    return "".join(_RU_TO_LAT.get(ch, ch) for ch in s)
-
-
-def _normalize_text(s: str) -> str:
-    """Нижний регистр, дефисы → пробелы, буквы/цифры/пробелы."""
-    s = (s or "").lower()
-    s = s.replace("-", " ").replace("_", " ")
-    s = re.sub(r"[^a-zа-яё0-9\s]", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
+from app.core_audit.business_truth.matcher import classify_text, normalize_text
 
 
 def _path_text(url: str) -> str:
-    """Вытащить из URL только path (без схемы/хоста) и нормализовать."""
     if not url:
         return ""
     path = re.sub(r"^https?://[^/]+", "", url)
-    return _normalize_text(path)
-
-
-def _token_stems(text: str) -> set[str]:
-    """Простая морфология: токен + его обрубленные формы.
-
-    Для русского достаточно убрать 1-2 последних символа чтобы
-    большинство падежных форм "абхазии"/"абхазию" сошлись с "абхазия".
-    """
-    out: set[str] = set()
-    for tok in text.split():
-        if len(tok) < 3:
-            continue
-        if tok in _NOISE_TOKENS:
-            continue
-        out.add(tok)
-        # агрессивные stem-ы: "абхазии" → "абхаз", "абхазия" → "абхаз"
-        if len(tok) >= 5:
-            out.add(tok[:-1])
-            out.add(tok[:-2])
-    return out
-
-
-def _matches_vocab(page_text: str, vocab_entry: str) -> bool:
-    """Проверка, встречается ли элемент словаря (например "красная поляна"
-    или "багги") в нормализованном тексте страницы.
-
-    Пробуем сам entry и его транслитерированную форму — чтобы URL
-    slug'и /sochi/ матчились с geo "сочи", а /krasnaya-polyana/ с
-    "красная поляна". Multi-word через substring, single-word через
-    stem-совпадение.
-    """
-    entry_ru = _normalize_text(vocab_entry)
-    if not entry_ru:
-        return False
-
-    entry_lat = _translit_ru_to_lat(entry_ru)
-    candidates = [entry_ru]
-    if entry_lat and entry_lat != entry_ru:
-        candidates.append(entry_lat)
-
-    page_stems = _token_stems(page_text)
-
-    for entry in candidates:
-        if " " in entry:
-            if entry in page_text:
-                return True
-        else:
-            entry_stems = _token_stems(entry) | {entry}
-            if page_stems & entry_stems:
-                return True
-    return False
+    return normalize_text(path)
 
 
 def extract_page_intents(
@@ -133,55 +30,17 @@ def extract_page_intents(
     services: Iterable[str],
     geos: Iterable[str],
 ) -> list[DirectionKey]:
-    """Найти все (service × geo), которые встречаются на странице.
+    """Найти все (service × geo) на странице.
 
     page: dict с ключами url, title, h1, meta_description, content_snippet.
-          Любой ключ может быть None/пустой — пропускаем.
-    services, geos: нормализованные словари из onboarding.
-
-    Возвращает список уникальных DirectionKey. Порядок стабильный —
-    сначала по сервису, потом по geo.
     """
-    services = [s for s in (services or []) if s and str(s).strip()]
-    geos = [g for g in (geos or []) if g and str(g).strip()]
-    if not services or not geos:
-        return []
-
-    # Собираем веса по источникам. Для простоты считаем matches как
-    # "есть/нет" — не нужна точная арифметика, нужно уверенное попадание.
-    title_t = _normalize_text(page.get("title") or "")
-    h1_t = _normalize_text(page.get("h1") or "")
+    title_t = normalize_text(page.get("title") or "")
+    h1_t = normalize_text(page.get("h1") or "")
     path_t = _path_text(page.get("url") or page.get("path") or "")
-    meta_t = _normalize_text(page.get("meta_description") or "")
-    body_t = _normalize_text((page.get("content_snippet") or "")[:500])
-
-    # Объединяем в один текст поиска. Вес неявен: title/h1/path
-    # вносят те же токены, так что если слово там есть, оно в поиске есть.
+    meta_t = normalize_text(page.get("meta_description") or "")
+    body_t = normalize_text((page.get("content_snippet") or "")[:500])
     haystack = " ".join([title_t, h1_t, path_t, meta_t, body_t])
-    if not haystack.strip():
-        return []
-
-    matched_services = [s for s in services if _matches_vocab(haystack, s)]
-    matched_geos = [g for g in geos if _matches_vocab(haystack, g)]
-
-    if not matched_services or not matched_geos:
-        return []
-
-    # Декартово произведение — каждая услуга в паре с каждым geo, если
-    # оба видны на странице. Это даёт hub-страницам корректную карту.
-    out: list[DirectionKey] = []
-    seen: set[tuple[str, str]] = set()
-    for s in matched_services:
-        for g in matched_geos:
-            key = DirectionKey.of(s, g)
-            tup = (key.service, key.geo)
-            if tup in seen:
-                continue
-            seen.add(tup)
-            out.append(key)
-
-    out.sort(key=lambda k: (k.service, k.geo))
-    return out
+    return classify_text(haystack, services, geos)
 
 
 __all__ = ["extract_page_intents"]
