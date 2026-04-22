@@ -16,6 +16,32 @@ celery_app.conf.update(
     accept_content=["json"],
     task_track_started=True,
     worker_max_tasks_per_child=50,
+
+    # Resilience: keep retrying broker connection instead of dying.
+    # Previously Celery died on `UNBLOCKED force unblock from blocking
+    # operation` when Redis transitioned master/replica — worker exited
+    # and (without restart policy) stayed dead overnight. With these,
+    # worker retries forever in the background on any connection glitch
+    # and resumes consuming when Redis is back.
+    broker_connection_retry_on_startup=True,
+    broker_connection_retry=True,
+    broker_connection_max_retries=None,
+
+    # If a task is running when connection drops, let it finish instead
+    # of being cancelled mid-flight — ours are short (SERP crawls,
+    # deep-dive) and don't benefit from an abort.
+    worker_cancel_long_running_tasks_on_connection_loss=False,
+
+    # Redis-specific transport hygiene.
+    broker_transport_options={
+        # ACKs aren't delivered for up to an hour after a restart
+        # (reclaim hung tasks that a dead worker left dangling).
+        "visibility_timeout": 3600,
+        # TCP keepalive — detects broker disappearances before BRPOP
+        # times out the hard way.
+        "socket_keepalive": True,
+        "socket_keepalive_options": {},
+    },
 )
 
 # Pipeline: collect → analyse (times in UTC; MSK = UTC+3)
@@ -102,6 +128,13 @@ celery_app.conf.beat_schedule = {
         "task": "outcomes_followup_daily",
         "schedule": crontab(hour=8, minute=0),
     },
+    # Queue depth watchdog — runs every 2 minutes, writes an alert event
+    # to every active site if Redis queue > STUCK_THRESHOLD. Makes worker
+    # outages visible on the dashboard instead of silent "nothing happens".
+    "queue-health-2min": {
+        "task": "queue_health_check",
+        "schedule": 120.0,  # seconds — plain float = every N sec
+    },
 }
 
 celery_app.autodiscover_tasks([
@@ -109,5 +142,5 @@ celery_app.autodiscover_tasks([
     "app.core_audit.review", "app.core_audit.priority", "app.core_audit.report",
     "app.core_audit.demand_map", "app.core_audit.draft_profile",
     "app.core_audit.onboarding", "app.core_audit.competitors",
-    "app.core_audit.outcomes",
+    "app.core_audit.outcomes", "app.core_audit.health",
 ])
