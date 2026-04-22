@@ -55,28 +55,25 @@ async def trigger_full_pipeline(
 
     from app.workers.celery_app import celery_app
 
+    # Previously these were staggered by 20/60/90s "just in case" one
+    # stage's output fed the next. In practice none of them depend on
+    # same-run output of another: crawl writes pages (nobody else reads
+    # them within this flow), webmaster pulls fresh queries (demand_map
+    # uses queries already in DB from prior nightly collects), and
+    # competitors reads target_config + search_queries already there.
+    # So fire them simultaneously — worker concurrency (-c 2) queues
+    # what it can't run in parallel. Total wall time drops from ~120s
+    # to ~30s.
     queued: list[str] = []
-
-    # Queue by registered Celery name — avoids cross-module imports whose
-    # Python symbol name differs from the task's registered name.
-    celery_app.send_task("crawl_site", args=[str(site_id)])
-    queued.append("crawl")
-
-    celery_app.send_task("collect_site_webmaster", args=[str(site_id)], countdown=20)
-    queued.append("webmaster")
-
-    celery_app.send_task("demand_map_build_site", args=[str(site_id)], countdown=60)
-    queued.append("demand_map")
-
-    celery_app.send_task(
-        "competitors_discover_site", args=[str(site_id)], countdown=90,
-    )
-    queued.append("competitor_discovery")
+    for task_name in ("crawl_site", "collect_site_webmaster",
+                      "demand_map_build_site", "competitors_discover_site"):
+        celery_app.send_task(task_name, args=[str(site_id)])
+        queued.append(task_name.replace("_site", "").replace("collect_", ""))
 
     await log_event(
         db, site_id, "pipeline", "started",
-        "Запустил полный анализ: краулю сайт → тяну Вебмастер → "
-        "строю карту спроса → ищу конкурентов. Занимает 3–5 минут.",
+        "Запустил полный анализ: краулю сайт, тяну Вебмастер, строю карту "
+        "спроса, ищу конкурентов. Обычно готово за 30–60 секунд.",
         extra={"queued": queued},
     )
 
