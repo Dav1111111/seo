@@ -217,3 +217,64 @@ def test_contract_preserves_order_stable_under_ties():
     r2 = allocate_quotas(truth, budget=5)
     assert r1 == r2  # deterministic
     assert sum(r1.values()) == 5
+
+
+# ── Item 2: aspiration penalty policy layer ──────────────────────
+
+def test_aspiration_penalty_shrinks_owner_only_directions():
+    """aspiration_penalty=0.1 means a pure-aspiration direction (only
+    u > 0) competes at 10% of its raw strength_understanding weight
+    when allocating. Raw strength stays untouched in the truth."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", "real",  u=0.5, c=0.5, t=0.5),  # evidenced
+        _dir("s", "dream", u=0.5),                # aspiration only
+    ])
+    # Without penalty: equal split, 5+5
+    raw = allocate_quotas(truth, budget=10)
+    assert raw[DirectionKey.of("s", "real")] == 5
+    assert raw[DirectionKey.of("s", "dream")] == 5
+
+    # With penalty: real = 1.5 vs dream = 0.05, proportional
+    # allocation of 10 budget → ~10 for real, 0 for dream
+    penalized = allocate_quotas(truth, budget=10, aspiration_penalty=0.1)
+    assert penalized[DirectionKey.of("s", "real")] > 8
+    assert penalized[DirectionKey.of("s", "dream")] < 2
+    assert sum(penalized.values()) == 10
+
+
+def test_aspiration_penalty_does_not_touch_raw_truth():
+    """Policy layer: raw DirectionEvidence strengths stay the same
+    regardless of penalty. Only the ALLOCATED slot count differs."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", "dream", u=0.9),
+    ])
+    raw_u_before = truth.directions[0].strength_understanding
+    allocate_quotas(truth, budget=10, aspiration_penalty=0.1)
+    assert truth.directions[0].strength_understanding == raw_u_before
+
+
+def test_aspiration_penalty_zero_keeps_evidenced_directions():
+    """A direction with content/traffic isn't an aspiration, so
+    aspiration_penalty doesn't reduce it."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", "a", u=0.3, t=0.7),  # evidenced by traffic
+        _dir("s", "b", u=0.3),         # aspiration
+    ])
+    penalized = allocate_quotas(truth, budget=10, aspiration_penalty=0.1)
+    # evidenced direction should dominate
+    assert penalized[DirectionKey.of("s", "a")] > penalized[DirectionKey.of("s", "b")]
+
+
+def test_aspiration_penalty_default_is_none_no_change():
+    """When not passed, allocation unchanged — backwards compatible."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", "a", u=0.5, c=0.5),
+        _dir("s", "b", u=0.5),
+    ])
+    default = allocate_quotas(truth, budget=10)
+    explicit_none = allocate_quotas(truth, budget=10, aspiration_penalty=None)
+    assert default == explicit_none

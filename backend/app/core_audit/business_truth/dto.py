@@ -112,6 +112,22 @@ class DirectionEvidence:
             and self.strength_content == 0
         )
 
+    @property
+    def is_aspiration(self) -> bool:
+        """Владелец объявил в онбординге, но ни страницы, ни трафика нет.
+
+        Policy-layer сигнал для allocate_quotas: такие направления
+        получают пониженный вес при распределении бюджета discovery,
+        чтобы амбиции без подтверждения не съедали слоты у реально
+        работающих направлений. Raw strength_understanding при этом
+        не меняется — это факт «что сказал владелец».
+        """
+        return (
+            self.strength_understanding > 0
+            and self.strength_content == 0
+            and self.strength_traffic == 0
+        )
+
     def divergence_ru(self) -> str | None:
         """Текстовое объяснение расхождения (или None, если всё ок)."""
         if self.is_blind_spot:
@@ -209,6 +225,7 @@ class BusinessTruth:
                     "is_blind_spot": d.is_blind_spot,
                     "is_content_only": d.is_content_only,
                     "is_traffic_only": d.is_traffic_only,
+                    "is_aspiration": d.is_aspiration,
                     "divergence_ru": d.divergence_ru(),
                 }
                 for d in self.directions

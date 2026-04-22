@@ -164,3 +164,46 @@ def test_jsonb_defaults_when_unclassified_empty():
     blob = truth.to_jsonb()
     assert blob["unclassified_share"] == 0.0
     assert blob["top_unclassified_queries"] == []
+
+
+# ── Item 2: is_aspiration property ─────────────────────────────────
+
+def test_is_aspiration_owner_only_direction():
+    """Owner declared it, nothing on site, no traffic → aspiration."""
+    d = _mk("багги", "крым", u=0.3)
+    assert d.is_aspiration is True
+    assert d.is_blind_spot is False
+    assert d.is_content_only is False
+    assert d.is_traffic_only is False
+
+
+def test_is_aspiration_false_when_content_present():
+    """Owner + content but no traffic = blind_spot, not aspiration."""
+    d = _mk("багги", "сочи", u=0.3, c=0.3)
+    assert d.is_aspiration is False
+    assert d.is_blind_spot is True
+
+
+def test_is_aspiration_false_when_traffic_present():
+    """Owner + traffic but no content isn't aspiration either."""
+    d = _mk("багги", "адлер", u=0.3, t=0.3)
+    assert d.is_aspiration is False
+
+
+def test_is_aspiration_false_when_owner_silent():
+    """Traffic-only case — aspiration requires u > 0."""
+    d = _mk("багги", "керчь", t=0.3)
+    assert d.is_aspiration is False
+
+
+def test_jsonb_includes_is_aspiration_flag():
+    """Serialization exposes is_aspiration so policy layers upstream
+    (UI ordering, quota penalty) can read it."""
+    truth = BusinessTruth(
+        directions=[_mk("багги", "крым", u=0.5)],
+        sources_used={"understanding": 1, "content": 0, "traffic": 0},
+        built_at_iso="2026-04-22T20:00:00Z",
+    )
+    blob = truth.to_jsonb()
+    d = blob["directions"][0]
+    assert d["is_aspiration"] is True

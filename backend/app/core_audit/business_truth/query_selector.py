@@ -27,12 +27,26 @@ DEFAULT_RELAX_FACTOR = 2.4   # cap × this if understanding + traffic both domin
 DEFAULT_MIN_SLOT = 1
 
 
-def _total_strength(d) -> float:
-    return (
-        float(d.strength_understanding or 0.0)
-        + float(d.strength_content or 0.0)
-        + float(d.strength_traffic or 0.0)
-    )
+def _total_strength(d, aspiration_penalty: float | None = None) -> float:
+    """Sum of 3-source strengths, optionally penalising aspirations.
+
+    When aspiration_penalty is set (e.g. 0.1), pure-aspiration
+    directions (is_aspiration True) get their understanding weight
+    reduced at allocation time only. Raw d.strength_* values remain
+    untouched — this function returns a derived allocation-score, not
+    a replacement for raw data.
+    """
+    u = float(d.strength_understanding or 0.0)
+    c = float(d.strength_content or 0.0)
+    t = float(d.strength_traffic or 0.0)
+    if (
+        aspiration_penalty is not None
+        and c == 0
+        and t == 0
+        and u > 0
+    ):
+        u = u * float(aspiration_penalty)
+    return u + c + t
 
 
 def allocate_quotas(
@@ -42,12 +56,19 @@ def allocate_quotas(
     min_slot: int = DEFAULT_MIN_SLOT,
     cap_single_direction: float | None = None,
     cap_relax_on_matching_traffic: bool = False,
+    aspiration_penalty: float | None = None,
 ) -> dict[DirectionKey, int]:
     """Turn direction strengths into integer slot counts summing to `budget`.
 
     Algorithm:
       1. Proportional raw share by total-strength across 3 sources.
-      2. Apply min_slot floor — every direction ≥ min_slot.
+         If `aspiration_penalty` is set, pure-aspiration directions
+         (owner-declared but no content, no traffic) see their
+         strength_understanding multiplied by the penalty factor for
+         allocation purposes. Raw DirectionEvidence strengths are NOT
+         mutated — this is a policy layer, not a data rewrite. UI
+         still shows the owner's original 'онб X%'.
+      2. Apply min_slot floor — every surviving direction ≥ min_slot.
       3. Apply cap_single_direction ceiling (if set).
       4. Largest-remainder rounding to integers summing to budget.
       5. Leftover distributed to directions that still have capacity
@@ -64,7 +85,7 @@ def allocate_quotas(
     max_slot_count = budget // max(min_slot, 1) if min_slot > 0 else budget
     directions_sorted = sorted(
         all_directions,
-        key=lambda d: (-_total_strength(d), d.key.service, d.key.geo),
+        key=lambda d: (-_total_strength(d, aspiration_penalty), d.key.service, d.key.geo),
     )
     directions = directions_sorted[:max_slot_count] if max_slot_count > 0 else directions_sorted
 
@@ -72,7 +93,7 @@ def allocate_quotas(
     # inspect them — currently returned as zero in the result dict.
     dropped = [d for d in all_directions if d not in directions]
 
-    strengths = {d.key: _total_strength(d) for d in directions}
+    strengths = {d.key: _total_strength(d, aspiration_penalty) for d in directions}
     total = sum(strengths.values())
 
     # Step 1: proportional allocation (equal split if all strengths zero)
