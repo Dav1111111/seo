@@ -134,3 +134,86 @@ def test_cap_relaxes_if_owner_explicitly_dominant():
     )
     # Abkhazia allowed past 50% because 3-way agreement
     assert quotas[DirectionKey.of("багги", "абхазия")] > 10
+
+
+# ── Contract: sum(quotas.values()) == budget, always ─────────────────
+
+def test_contract_sum_equals_budget_even_when_directions_exceed_budget():
+    """10 directions on 5-slot budget: some get 0 or 1, but sum == 5.
+
+    With min_slot=1 naively applied, this would sum to 10 (each
+    direction demands its floor). Correct behaviour: drop weakest
+    directions so total hits budget."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", f"geo{i}", u=1 - i * 0.05) for i in range(10)
+    ])
+    quotas = allocate_quotas(truth, budget=5, min_slot=1)
+    assert sum(quotas.values()) == 5, (
+        f"Contract broken: sum={sum(quotas.values())}, quotas={quotas}"
+    )
+    # Strongest directions should be the ones that survived
+    allocated = {k: v for k, v in quotas.items() if v > 0}
+    assert len(allocated) == 5
+
+
+def test_contract_sum_equals_budget_with_all_caps_hit():
+    """All directions hit the cap + still have leftover.
+
+    budget=30, 2 equal directions, cap=0.3 (so max 9 each, total 18
+    under cap). Remaining 12 must go somewhere — either bust the cap
+    or redistribute. Either way, sum must equal budget."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", "a", u=0.5),
+        _dir("s", "b", u=0.5),
+    ])
+    quotas = allocate_quotas(truth, budget=30, cap_single_direction=0.3)
+    assert sum(quotas.values()) == 30, (
+        f"Contract broken: sum={sum(quotas.values())}, quotas={quotas}"
+    )
+
+
+def test_contract_sum_equals_budget_on_zero_strength_truth():
+    """All directions have strength 0 → equal split, but still sums exactly."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", "a"),  # all zeros
+        _dir("s", "b"),
+        _dir("s", "c"),
+    ])
+    quotas = allocate_quotas(truth, budget=10)
+    assert sum(quotas.values()) == 10
+    # Equal split: 4/3/3 or similar
+    assert max(quotas.values()) - min(quotas.values()) <= 1
+
+
+def test_contract_budget_smaller_than_min_slot_sum_drops_weak_directions():
+    """budget=2, 3 directions with min_slot=1 can't all get slot.
+
+    Correct: keep top-2, third direction gets 0. Sum == 2."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", "strong", u=0.8),
+        _dir("s", "mid",    u=0.15),
+        _dir("s", "weak",   u=0.05),
+    ])
+    quotas = allocate_quotas(truth, budget=2, min_slot=1)
+    assert sum(quotas.values()) == 2
+    assert quotas[DirectionKey.of("s", "strong")] >= 1
+    # weakest gets dropped (0 allocation)
+    assert quotas[DirectionKey.of("s", "weak")] == 0
+
+
+def test_contract_preserves_order_stable_under_ties():
+    """Two equal-strength directions + odd budget → deterministic
+    winner, not random."""
+    from app.core_audit.business_truth.query_selector import allocate_quotas
+    truth = BusinessTruth(directions=[
+        _dir("s", "a", u=0.5),
+        _dir("s", "b", u=0.5),
+    ])
+    r1 = allocate_quotas(truth, budget=5)
+    r2 = allocate_quotas(truth, budget=5)
+    assert r1 == r2  # deterministic
+    assert sum(r1.values()) == 5
