@@ -40,7 +40,7 @@ from urllib.parse import urljoin
 log = logging.getLogger(__name__)
 
 
-REQUEST_TIMEOUT = 8.0
+REQUEST_TIMEOUT = 5.0
 MAX_HTML_BYTES = 2_000_000   # 2 MB hard cap
 USER_AGENT = (
     "Mozilla/5.0 (compatible; YandexGrowthTowerCompetitorAudit/1.0; "

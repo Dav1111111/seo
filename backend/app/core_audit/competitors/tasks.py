@@ -332,10 +332,14 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                 reports_by_domain: dict[str, dict] = {}
 
                 def _run_one(c: dict) -> tuple[str, dict]:
+                    # Homepage only — enough for every structural signal we
+                    # actually use (price/CTA/reviews/schema/contacts). The
+                    # second "example_url" fetch added ~5s to the slow-site
+                    # case without changing any diff we surface in the UI.
                     rep = analyze_competitor_site(
                         domain=c["domain"],
-                        urls=[c.get("example_url") or ""] if c.get("example_url") else [],
-                        max_pages=2,
+                        urls=[],
+                        max_pages=1,
                     )
                     return c["domain"], rep.to_dict()
 
