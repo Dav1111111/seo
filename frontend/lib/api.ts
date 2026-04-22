@@ -346,6 +346,7 @@ export const api = {
         message: string;
         ts: string;
         extra: Record<string, any>;
+        run_id: string | null;
       }>;
     }>(`/sites/${siteId}/activity?limit=${limit}`),
 
@@ -360,12 +361,29 @@ export const api = {
           message: string;
           ts: string;
           extra: Record<string, any>;
+          run_id: string | null;
         }
       >;
     }>(`/sites/${siteId}/activity/last`),
 
+  // Events of the latest pipeline run only — lets LastRunSummary show
+  // a single clean run without events from previous clicks mixing in.
+  getCurrentRun: (siteId: string) =>
+    apiFetch<{
+      run_id: string | null;
+      events: Array<{
+        id: number;
+        stage: string;
+        status: string;
+        message: string;
+        ts: string;
+        extra: Record<string, any>;
+        run_id: string | null;
+      }>;
+    }>(`/sites/${siteId}/activity/current-run`),
+
   triggerFullAnalysis: (siteId: string) =>
-    apiFetch<{ status: string; queued: string[] }>(
+    apiFetch<{ status: string; queued: string[]; run_id: string }>(
       `/sites/${siteId}/pipeline/full`,
       { method: "POST", base: "admin" },
     ),

@@ -13,6 +13,16 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+type Event = {
+  id: number;
+  stage: string;
+  status: string;
+  message: string;
+  ts: string;
+  extra: Record<string, any>;
+  run_id: string | null;
+};
+
 function timeAgo(iso: string | undefined | null): string {
   if (!iso) return "ни разу";
   const utcIso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
@@ -24,39 +34,49 @@ function timeAgo(iso: string | undefined | null): string {
   return `${Math.floor(sec / 86_400)} д назад`;
 }
 
+const TERMINAL = new Set(["done", "failed", "skipped"]);
+const WORK_STAGES = [
+  "crawl", "webmaster", "demand_map",
+  "competitor_discovery", "competitor_deep_dive", "opportunities",
+];
+
 export function LastRunSummary({ siteId }: { siteId: string }) {
+  // Current-run endpoint scopes to the latest run_id server-side, so
+  // two back-to-back pipeline clicks don't smear together in this card.
+  // Still poll every 4s so progress updates are visible during a run.
   const { data, isLoading } = useSWR(
-    siteId ? `last-run-${siteId}` : null,
-    () => api.getActivityByStage(siteId),
-    { refreshInterval: 10_000 },
+    siteId ? `current-run-${siteId}` : null,
+    () => api.getCurrentRun(siteId),
+    { refreshInterval: 4_000 },
   );
 
   if (isLoading) return <Skeleton className="h-48" />;
 
-  const stages = data?.by_stage ?? {};
-  const opps = stages["opportunities"];
-  const discovery = stages["competitor_discovery"];
-  const dive = stages["competitor_deep_dive"];
+  const events: Event[] = data?.events ?? [];
+  if (events.length === 0) return null;
 
-  // Nothing has ever run — don't show the empty card
-  if (!opps && !discovery) return null;
+  // Build per-stage latest for this run
+  const byStage = new Map<string, Event>();
+  for (const e of events) {
+    if (!byStage.has(e.stage)) byStage.set(e.stage, e);
+  }
 
-  // "Running" is decided only by the actual work stages. Earlier we
-  // also looked at `pipeline` — but that stage is a wrapper emitted by
-  // the trigger endpoint, and historical data has `pipeline: started`
-  // without a matching done. Backend now emits pipeline:done too, but
-  // we keep this filter as a defensive fallback against stale data.
-  const TERMINAL = new Set(["done", "failed", "skipped"]);
-  const WORK_STAGES = [
-    "crawl", "webmaster", "demand_map",
-    "competitor_discovery", "competitor_deep_dive", "opportunities",
-  ];
-  const running = WORK_STAGES.some((name) => {
-    const s = stages[name];
-    return s && !TERMINAL.has(s.status);
-  });
+  const opps = byStage.get("opportunities");
+  const discovery = byStage.get("competitor_discovery");
+  const dive = byStage.get("competitor_deep_dive");
+  const pipelineEvt = byStage.get("pipeline");
 
-  // Pull useful numbers from extras
+  // "Running" in THIS run only. Pipeline:started without pipeline:done
+  // is the cleanest signal — but if the run has no pipeline wrapper
+  // (standalone button press), fall back to checking work stages.
+  const running = pipelineEvt
+    ? !TERMINAL.has(pipelineEvt.status)
+    : WORK_STAGES.some((name) => {
+        const s = byStage.get(name);
+        return s && !TERMINAL.has(s.status);
+      });
+
+  // Pull useful numbers from extras (from this run's events only)
   const oppsCount = opps?.extra?.opportunities ?? null;
   const ownPages = opps?.extra?.own_pages ?? null;
   const crawled = opps?.extra?.competitors_crawled ?? null;
@@ -64,20 +84,26 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
   const top3: string[] = discovery?.extra?.top3 ?? [];
   const cost = discovery?.extra?.cost_usd ?? null;
 
-  const lastTs = opps?.ts ?? discovery?.ts;
+  const lastTs = pipelineEvt?.ts ?? opps?.ts ?? discovery?.ts;
 
   return (
-    <Card className="border-emerald-300 bg-emerald-50/50">
+    <Card className={cn(
+      "border-emerald-300 bg-emerald-50/50",
+      running && "border-primary/40 bg-primary/5",
+    )}>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <CardTitle className="text-base flex items-center gap-2">
-            <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-            Результат последнего анализа
+            <CheckCircle2 className={cn(
+              "h-5 w-5",
+              running ? "text-primary" : "text-emerald-600",
+            )} />
+            {running ? "Идёт анализ…" : "Результат последнего анализа"}
           </CardTitle>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Clock className="h-3.5 w-3.5" />
             {running ? (
-              <span className="text-primary font-medium">идёт сейчас…</span>
+              <span className="text-primary font-medium">работает сейчас</span>
             ) : (
               <span>{timeAgo(lastTs)}</span>
             )}
@@ -85,7 +111,6 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Headline numbers */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <MetricTile
             icon={Target}
@@ -117,7 +142,6 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
           />
         </div>
 
-        {/* Top-3 snapshot */}
         {top3.length > 0 && (
           <div className="text-xs">
             <span className="text-muted-foreground">Топ-3 конкурента: </span>
@@ -142,17 +166,16 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
           </div>
         )}
 
-        {/* Status chip per stage */}
+        {/* Status chip per stage of THIS run */}
         <div className="flex flex-wrap gap-1.5 pt-1">
-          <StageChip stage={stages["crawl"]} label="краулинг" />
-          <StageChip stage={stages["webmaster"]} label="вебмастер" />
-          <StageChip stage={stages["demand_map"]} label="карта спроса" />
-          <StageChip stage={discovery} label="разведка" />
-          <StageChip stage={dive} label="глубокий анализ" />
-          <StageChip stage={opps} label="точки роста" />
+          <StageChip stage={byStage.get("crawl")}                label="краулинг" />
+          <StageChip stage={byStage.get("webmaster")}            label="вебмастер" />
+          <StageChip stage={byStage.get("demand_map")}           label="карта спроса" />
+          <StageChip stage={discovery}                           label="разведка" />
+          <StageChip stage={dive}                                label="глубокий анализ" />
+          <StageChip stage={opps}                                label="точки роста" />
         </div>
 
-        {/* CTA */}
         <div className="pt-2 flex gap-2 flex-wrap">
           <Link href="/competitors">
             <Button size="sm">
@@ -161,7 +184,7 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
           </Link>
           <Link href="/priorities">
             <Button size="sm" variant="outline">
-              Приоритеты по странам и запросам <ArrowRight className="ml-2 h-4 w-4" />
+              Приоритеты по страницам и запросам <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </Link>
         </div>
@@ -171,11 +194,7 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
 }
 
 function MetricTile({
-  icon: Icon,
-  value,
-  label,
-  link,
-  tone,
+  icon: Icon, value, label, link, tone,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   value: string | number;
@@ -206,10 +225,9 @@ function MetricTile({
 }
 
 function StageChip({
-  stage,
-  label,
+  stage, label,
 }: {
-  stage: { status: string; ts: string } | undefined;
+  stage: Event | undefined;
   label: string;
 }) {
   if (!stage) {
