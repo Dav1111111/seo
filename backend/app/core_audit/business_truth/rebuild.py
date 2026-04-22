@@ -17,6 +17,9 @@ from typing import Iterable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core_audit.business_truth.auto_vocabulary import (
+    derive_vocabulary_from_data,
+)
 from app.core_audit.business_truth.dto import BusinessTruth, DirectionKey
 from app.core_audit.business_truth.page_intent import extract_page_intents
 from app.core_audit.business_truth.reconciler import reconcile
@@ -26,7 +29,9 @@ from app.core_audit.business_truth.traffic_reader import (
 from app.core_audit.business_truth.understanding_reader import (
     read_understanding,
 )
+from app.models.daily_metric import DailyMetric
 from app.models.page import Page
+from app.models.search_query import SearchQuery
 from app.models.site import Site
 
 
@@ -96,14 +101,76 @@ async def rebuild_business_truth(
         raise ValueError(f"site {site_id} not found")
 
     cfg = dict(site.target_config or {})
-    services, geos = _flatten_vocab(cfg)
 
-    # 1. Understanding — owner weights
+    # ── Auto-derive vocabulary from pages + queries, not from
+    # target_config. Onboarding LLMs hallucinated "экскурсии" and
+    # "туры" for Grand Tour that were never real services. We now
+    # trust what's ACTUALLY on the site + what traffic ACTUALLY
+    # searches. target_config.services stays as a secondary seed —
+    # it contributes to understanding_weights only when it overlaps
+    # with the auto-derived vocab.
+
+    # 1a. Load pages for vocab derivation
+    page_stmt = select(
+        Page.url, Page.path, Page.title, Page.h1,
+        Page.meta_description, Page.content_text,
+    ).where(Page.site_id == site_id, Page.title.is_not(None))
+    page_rows = (await db.execute(page_stmt)).all()
+    page_dicts_for_vocab = [
+        {
+            "url": r.url, "path": r.path,
+            "title": r.title, "h1": r.h1,
+            "meta_description": r.meta_description,
+            "content_snippet": (r.content_text or "")[:500],
+        }
+        for r in page_rows
+    ]
+
+    # 1b. Load queries for vocab derivation
+    from datetime import date, timedelta
+    from sqlalchemy import func
+    since = date.today() - timedelta(days=traffic_days_back)
+    q_stmt = (
+        select(
+            SearchQuery.query_text,
+            func.coalesce(func.sum(DailyMetric.impressions), 0).label("imp"),
+        )
+        .join(
+            DailyMetric,
+            (DailyMetric.site_id == SearchQuery.site_id)
+            & (DailyMetric.dimension_id == SearchQuery.id)
+            & (DailyMetric.metric_type == "query_performance")
+            & (DailyMetric.date >= since),
+        )
+        .where(
+            SearchQuery.site_id == site_id,
+            SearchQuery.is_branded.is_(False),
+        )
+        .group_by(SearchQuery.id, SearchQuery.query_text)
+    )
+    q_rows = (await db.execute(q_stmt)).all()
+    queries_for_vocab = [(r.query_text, int(r.imp or 0)) for r in q_rows]
+
+    # 1c. Derive vocabulary
+    auto_vocab = derive_vocabulary_from_data(
+        page_dicts_for_vocab, queries_for_vocab,
+    )
+    services = auto_vocab["services"]
+    geos = auto_vocab["geos"]
+
+    # 2. Understanding — owner weights (only for services/geos that
+    # the auto-derived vocab confirms — silent drops target_config
+    # entries that aren't backed by site reality).
+    cfg_filtered = dict(cfg)
+    cfg_filtered["services"] = [s for s in (cfg.get("services") or []) if s and s.lower() in services]
+    cfg_filtered["secondary_products"] = [s for s in (cfg.get("secondary_products") or []) if s and s.lower() in services]
+    cfg_filtered["geo_primary"] = [g for g in (cfg.get("geo_primary") or []) if g and g.lower() in geos]
+    cfg_filtered["geo_secondary"] = [g for g in (cfg.get("geo_secondary") or []) if g and g.lower() in geos]
     u_weights = dict(read_understanding(
-        site.understanding or {}, cfg,
-    ))  # list[(key, w)] → dict
+        site.understanding or {}, cfg_filtered,
+    ))
 
-    # 2. Content — classify crawled pages
+    # 2b. Content — classify crawled pages with the AUTO vocabulary
     if services and geos:
         content_map = await _build_content_map(db, site_id, services, geos)
     else:
