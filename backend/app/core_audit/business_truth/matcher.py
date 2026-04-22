@@ -67,8 +67,14 @@ def matches_vocab(haystack: str, vocab_entry: str) -> bool:
     """True if `vocab_entry` appears in `haystack`.
 
     `haystack` expected pre-normalized (via normalize_text). Tries
-    both Russian and transliterated Latin forms. Multi-word entries
-    via substring, single-word via stem intersection.
+    both Russian and transliterated Latin forms.
+
+    Single-word entries: stem intersection (handles "абхазии"/"абхазию"
+    → "абхазия").
+    Multi-word entries: two-pass. First try exact substring (handles
+    URL slug "krasnaya polyana"). If that misses, check each word's
+    stems separately — covers inflected forms where "красная поляна"
+    appears as "красной поляне" in the page text.
     """
     entry_ru = normalize_text(vocab_entry)
     if not entry_ru:
@@ -81,7 +87,20 @@ def matches_vocab(haystack: str, vocab_entry: str) -> bool:
     page_stems = _token_stems(haystack)
     for entry in candidates:
         if " " in entry:
+            # Try exact substring first (fast path, catches slugs)
             if entry in haystack:
+                return True
+            # Fallback: every word's stems must appear in haystack.
+            # Adjacency isn't required — adjacency rarely survives
+            # Russian inflection anyway ("в красной поляне зимой").
+            words = entry.split()
+            all_match = True
+            for w in words:
+                w_stems = _token_stems(w) | {w}
+                if not (page_stems & w_stems):
+                    all_match = False
+                    break
+            if all_match:
                 return True
         else:
             entry_stems = _token_stems(entry) | {entry}
