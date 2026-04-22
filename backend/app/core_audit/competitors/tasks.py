@@ -18,7 +18,7 @@ from uuid import UUID
 
 from sqlalchemy import desc, func, select, text
 
-from app.core_audit.activity import log_event
+from app.core_audit.activity import emit_terminal, log_event
 from app.core_audit.competitors.discovery import (
     DEFAULT_MAX_QUERIES,
     DEFAULT_TOP_K,
@@ -177,6 +177,10 @@ def competitors_discover_site_task(
                     text("SELECT pg_try_advisory_lock(:k)"), {"k": lock_key},
                 )).scalar_one()
                 if not locked:
+                    await emit_terminal(
+                        db, site_id, "competitor_discovery", "skipped",
+                        "Разведка уже идёт — второй запуск пропущен.",
+                    )
                     return {
                         "status": "skipped",
                         "reason": "concurrent_run",
@@ -185,6 +189,10 @@ def competitors_discover_site_task(
                 try:
                     site = await db.get(Site, UUID(site_id))
                     if site is None:
+                        await emit_terminal(
+                            db, site_id, "competitor_discovery", "failed",
+                            "Сайт не найден в базе.",
+                        )
                         return {"status": "skipped", "reason": "site_not_found"}
 
                     queries = await _pick_top_queries(
@@ -192,7 +200,7 @@ def competitors_discover_site_task(
                         biz_tokens=_business_tokens(site.target_config or {}),
                     )
                     if not queries:
-                        await log_event(
+                        await emit_terminal(
                             db, site_id, "competitor_discovery", "skipped",
                             "Нет запросов для разведки — сначала запусти сбор из Вебмастера.",
                         )
@@ -245,8 +253,6 @@ def competitors_discover_site_task(
                     # Chain: discovery done → fire deep-dive automatically
                     # so the comparison table and growth opportunities are
                     # ready without the user clicking a second button.
-                    # Skip the chain if we found nothing — deep-dive would
-                    # have nothing to crawl.
                     if profile.competitors:
                         try:
                             competitors_deep_dive_site_task.delay(site_id)
@@ -255,6 +261,20 @@ def competitors_discover_site_task(
                                 "competitors.discovery.chain_dive_failed "
                                 "site=%s err=%s", site_id, exc,
                             )
+                            # Can't chain to deep-dive → pipeline dies here.
+                            # Close it so the UI doesn't hang waiting.
+                            await emit_terminal(
+                                db, site_id, "competitor_deep_dive", "failed",
+                                "Не удалось запустить глубокий анализ "
+                                "(брокер задач недоступен).",
+                            )
+                    else:
+                        # Zero competitors found — skip deep-dive and close
+                        # the pipeline since there's nothing to compare.
+                        await emit_terminal(
+                            db, site_id, "competitor_deep_dive", "skipped",
+                            "Конкуренты не найдены — глубокий анализ пропущен.",
+                        )
 
                     return {
                         "status": "ok",
@@ -276,6 +296,16 @@ def competitors_discover_site_task(
                 "competitors.discover.task_failed site=%s err=%s",
                 site_id, exc,
             )
+            # Close the stage + pipeline (if open) — otherwise the UI
+            # stays in "идёт сейчас…" forever after a crash.
+            try:
+                async with task_session() as db2:
+                    await emit_terminal(
+                        db2, site_id, "competitor_discovery", "failed",
+                        f"Разведка остановлена с ошибкой: {str(exc)[:200]}",
+                    )
+            except Exception:  # noqa: BLE001
+                pass  # best-effort — already logging the real error above
             return {"status": "error", "site_id": site_id, "err": str(exc)}
 
     return _run(_inner())
@@ -306,12 +336,20 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
             async with task_session() as db:
                 site = await db.get(Site, UUID(site_id))
                 if site is None:
+                    await emit_terminal(
+                        db, site_id, "competitor_deep_dive", "failed",
+                        "Сайт не найден в базе.",
+                    )
                     return {"status": "skipped", "reason": "site_not_found"}
 
                 cfg = dict(site.target_config or {})
                 profile = cfg.get("competitor_profile") or {}
                 competitors = profile.get("competitors") or []
                 if not competitors:
+                    await emit_terminal(
+                        db, site_id, "competitor_deep_dive", "skipped",
+                        "Нет найденных конкурентов — сначала запусти разведку.",
+                    )
                     return {
                         "status": "skipped",
                         "reason": "no_competitor_profile",
@@ -422,7 +460,11 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                 site.target_config = cfg
                 await db.commit()
 
-                await log_event(
+                # Emit opportunities:done and close the pipeline (if one
+                # was opened by the full-analysis button). emit_terminal
+                # handles the "is there an open pipeline?" check — no
+                # ad-hoc lookups here anymore.
+                await emit_terminal(
                     db, site_id, "opportunities", "done",
                     (
                         f"Готово: {len(opportunities)} точек роста, "
@@ -434,34 +476,6 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                         "competitors_crawled": len(reports),
                     },
                 )
-
-                # Close the pipeline loop: if this run was triggered via
-                # the "full pipeline" button there's a recent pipeline:
-                # started event for this site. Emit a matching done so
-                # LastRunSummary stops showing "идёт сейчас…".
-                from datetime import datetime, timedelta
-                from app.models.analysis_event import AnalysisEvent
-                recent_pipeline_start = (await db.execute(
-                    select(AnalysisEvent.id)
-                    .where(
-                        AnalysisEvent.site_id == UUID(site_id),
-                        AnalysisEvent.stage == "pipeline",
-                        AnalysisEvent.status == "started",
-                        AnalysisEvent.ts >= datetime.utcnow() - timedelta(minutes=10),
-                    )
-                    .order_by(AnalysisEvent.ts.desc())
-                    .limit(1)
-                )).first()
-                if recent_pipeline_start is not None:
-                    await log_event(
-                        db, site_id, "pipeline", "done",
-                        "Полный анализ завершён.",
-                        extra={
-                            "opportunities": len(opportunities),
-                            "competitors_found": len(site.competitor_domains or []),
-                            "own_pages": len(own_pages_dicts),
-                        },
-                    )
 
                 return {
                     "status": "ok",
@@ -480,6 +494,14 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                 "competitors.deep_dive.task_failed site=%s err=%s",
                 site_id, exc,
             )
+            try:
+                async with task_session() as db2:
+                    await emit_terminal(
+                        db2, site_id, "competitor_deep_dive", "failed",
+                        f"Глубокий анализ остановлен: {str(exc)[:200]}",
+                    )
+            except Exception:  # noqa: BLE001
+                pass
             return {"status": "error", "site_id": site_id, "err": str(exc)}
 
     return _run(_inner())
