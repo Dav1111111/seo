@@ -117,31 +117,18 @@ _GAZETTEER_LAT_TO_RU = {
 def _find_geos_in_text(text: str) -> set[str]:
     """Walk the normalised text and return any gazetteer hit.
 
-    Handles multi-word entries by substring search. Matches by both
-    Cyrillic and Latin form (for URL slugs) because we bundled the
-    Latin translit table.
+    Delegates to the shared matcher.matches_vocab so we handle
+    Russian case endings ("красной поляне" → "красная поляна"),
+    Latin slugs ("/sochi/" → "сочи"), and multi-word entries
+    consistently with how page_intent + traffic_reader classify.
     """
     if not text:
         return set()
+    from app.core_audit.business_truth.matcher import matches_vocab
     hits: set[str] = set()
     for entry in _GAZETTEER_SET:
-        if " " in entry:
-            if entry in text:
-                hits.add(entry)
-        else:
-            # Single-word — match as whole token (not inside other words)
-            if re.search(rf"\b{re.escape(entry)}\b", text):
-                hits.add(entry)
-    # Latin slugs: also match transliterated forms
-    for lat_form, ru_form in _GAZETTEER_LAT_TO_RU.items():
-        if ru_form in hits:
-            continue
-        if " " in lat_form:
-            if lat_form in text:
-                hits.add(ru_form)
-        else:
-            if re.search(rf"\b{re.escape(lat_form)}\b", text):
-                hits.add(ru_form)
+        if matches_vocab(text, entry):
+            hits.add(entry)
     return hits
 
 
