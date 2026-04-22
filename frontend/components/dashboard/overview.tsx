@@ -106,7 +106,7 @@ export function OverviewPage() {
   const [runningFull, setRunningFull] = useState(false);
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
-  async function runFullAnalysis() {
+  async function runQuickAnalysis() {
     if (!siteId || runningFull) return;
     setRunningFull(true);
     setBanner(null);
@@ -114,7 +114,10 @@ export function OverviewPage() {
       await api.triggerFullAnalysis(siteId);
       setBanner({
         kind: "ok",
-        msg: "Полный анализ запущен — следи за лентой активности ниже. Обычно 3–5 минут.",
+        msg:
+          "Быстрый анализ запущен — 4 задачи одновременно. Обычно готово за 15–30 секунд. " +
+          "Карта спроса и часть метрик используют вчерашние данные, " +
+          "они обновляются автоматически ночью.",
       });
     } catch (e: any) {
       setBanner({ kind: "err", msg: e?.message ?? String(e) });
@@ -154,12 +157,18 @@ export function OverviewPage() {
           <h1 className="text-2xl font-bold">Обзор</h1>
           <p className="text-sm text-muted-foreground">{currentSite?.domain ?? "—"}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-start gap-3">
           {latestReport?.health_score != null && <HealthBadge score={latestReport.health_score} />}
-          <Button size="sm" onClick={runFullAnalysis} disabled={runningFull}>
-            <Play className={cn("mr-2 h-4 w-4", runningFull && "animate-pulse")} />
-            {runningFull ? "Запускаю…" : "Запустить полный анализ"}
-          </Button>
+          <div className="flex flex-col items-end gap-1">
+            <Button size="sm" onClick={runQuickAnalysis} disabled={runningFull}>
+              <Play className={cn("mr-2 h-4 w-4", runningFull && "animate-pulse")} />
+              {runningFull ? "Запускаю…" : "Быстрый анализ"}
+            </Button>
+            <p className="text-[11px] text-muted-foreground max-w-[240px] text-right leading-tight">
+              Свежие конкуренты + точки роста за ~20 сек.
+              Полное обновление карты спроса и Вебмастера — ночью автоматически.
+            </p>
+          </div>
         </div>
       </div>
 
