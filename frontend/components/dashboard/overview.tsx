@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { TrafficChart } from "@/components/dashboard/traffic-chart";
 import { ActivityFeed } from "@/components/dashboard/activity-feed";
 import { LastRunSummary } from "@/components/dashboard/last-run-summary";
+import { BusinessTruthCard } from "@/components/dashboard/business-truth-card";
 import {
   TrendingUp, TrendingDown, Eye, MousePointer,
   MapPin, FileSearch, ArrowRight, Flame, Play,
@@ -289,6 +290,8 @@ export function OverviewPage() {
       </Card>
 
       <LastRunSummary siteId={siteId} />
+
+      <BusinessTruthCard siteId={siteId} />
 
       <ActivityFeed siteId={siteId} />
 

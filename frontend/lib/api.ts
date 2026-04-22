@@ -388,6 +388,39 @@ export const api = {
       { method: "POST", base: "admin" },
     ),
 
+  // BusinessTruth — 3-picture reconciliation of the site as a business.
+  getBusinessTruth: (siteId: string) =>
+    apiFetch<{
+      directions: Array<{
+        service: string;
+        geo: string;
+        strength_understanding: number;
+        strength_content: number;
+        strength_traffic: number;
+        pages: string[];
+        queries_sample: string[];
+        mentioned_in: string[];
+        is_confirmed: boolean;
+        is_blind_spot: boolean;
+        is_content_only: boolean;
+        is_traffic_only: boolean;
+        divergence_ru: string | null;
+      }>;
+      sources_used: Record<string, number>;
+      built_at: string | null;
+      traffic_coverage?: {
+        total_impressions: number;
+        unclassified_impressions: number;
+        coverage_share: number;
+      } | null;
+    }>(`/sites/${siteId}/business-truth`, { base: "admin" }),
+
+  rebuildBusinessTruth: (siteId: string) =>
+    apiFetch<{ status: string; run_id: string }>(
+      `/sites/${siteId}/business-truth/rebuild`,
+      { method: "POST", base: "admin" },
+    ),
+
   markApplied: (siteId: string, recommendationId: string, source: string, pageUrl?: string) =>
     apiFetch<{ status: string; snapshot_id: string }>(
       `/sites/${siteId}/outcomes/applied`,
