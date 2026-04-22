@@ -55,29 +55,31 @@ async def trigger_full_pipeline(
 
     from app.workers.celery_app import celery_app
 
-    # Previously these were staggered by 20/60/90s "just in case" one
-    # stage's output fed the next. In practice none of them depend on
-    # same-run output of another: crawl writes pages (nobody else reads
-    # them within this flow), webmaster pulls fresh queries (demand_map
-    # uses queries already in DB from prior nightly collects), and
-    # competitors reads target_config + search_queries already there.
-    # So fire them simultaneously — worker concurrency (-c 2) queues
-    # what it can't run in parallel. Total wall time drops from ~120s
-    # to ~30s.
+    # One run_id ties together the 4 tasks + their downstream events
+    # (deep-dive, opportunities, pipeline terminal). UI groups events by
+    # this so two back-to-back clicks don't merge into one mess.
+    run_id = str(uuid.uuid4())
+
+    # All 4 stages fire simultaneously — worker concurrency queues what
+    # it can't run in parallel. None of them read same-run output of
+    # another, so no ordering needed.
     queued: list[str] = []
     for task_name in ("crawl_site", "collect_site_webmaster",
                       "demand_map_build_site", "competitors_discover_site"):
-        celery_app.send_task(task_name, args=[str(site_id)])
+        celery_app.send_task(
+            task_name, args=[str(site_id)], kwargs={"run_id": run_id},
+        )
         queued.append(task_name.replace("_site", "").replace("collect_", ""))
 
     await log_event(
         db, site_id, "pipeline", "started",
         "Запустил полный анализ: краулю сайт, тяну Вебмастер, строю карту "
         "спроса, ищу конкурентов. Обычно готово за 30–60 секунд.",
-        extra={"queued": queued},
+        extra={"queued": queued, "run_id": run_id},
+        run_id=run_id,
     )
 
-    return {"status": "queued", "queued": queued}
+    return {"status": "queued", "queued": queued, "run_id": run_id}
 
 
 # ── Outcome tracking ─────────────────────────────────────────────────────

@@ -51,7 +51,7 @@ def _run(coro):
 
 
 @celery_app.task(name="demand_map_build_site", bind=True, max_retries=1)
-def demand_map_build_site_task(self, site_id: str) -> dict:
+def demand_map_build_site_task(self, site_id: str, run_id: str | None = None) -> dict:
     """Build + persist the demand map for one site.
 
     Pipeline:

@@ -18,6 +18,7 @@ class AnalysisEvent(Base):
     __tablename__ = "analysis_events"
     __table_args__ = (
         Index("ix_analysis_events_site_ts", "site_id", "ts"),
+        Index("ix_analysis_events_site_run", "site_id", "run_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -35,3 +36,7 @@ class AnalysisEvent(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     # Optional extras (cost, counts, URLs)
     extra: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
+    # Groups events from a single pipeline run so the UI can show just
+    # "this run" without mixing two back-to-back clicks. Nullable for
+    # historical rows and standalone (non-pipeline) events.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)

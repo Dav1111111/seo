@@ -32,9 +32,15 @@ async def log_event(
     status: str,
     message: str,
     extra: dict | None = None,
+    run_id: UUID | str | None = None,
 ) -> None:
     """Write one event row. Best-effort: swallows errors so task flow
-    keeps going even if the event table is down."""
+    keeps going even if the event table is down.
+
+    `run_id` — pipelines pass their generated UUID through so the UI
+    can group a run's events together. Standalone events (not part of
+    a pipeline) leave it None, which is fine.
+    """
     try:
         ev = AnalysisEvent(
             site_id=UUID(str(site_id)),
@@ -42,6 +48,7 @@ async def log_event(
             status=status,
             message=message[:500],
             extra=extra or {},
+            run_id=UUID(str(run_id)) if run_id else None,
         )
         db.add(ev)
         await db.commit()
@@ -61,18 +68,16 @@ async def emit_terminal(
     status: str,
     message: str,
     extra: dict | None = None,
+    run_id: UUID | str | None = None,
 ) -> None:
     """Emit a stage terminal event and, if a pipeline was started for
     this site recently, also close the pipeline with a matching
-    terminal. Invariant enforced: every pipeline:started eventually
-    gets a pipeline:<terminal> within 10 minutes of its start.
+    terminal. Invariant: every pipeline:started eventually gets a
+    pipeline:<terminal> within 10 minutes of its start.
 
-    Call this at every early exit of discovery/deep-dive/opportunities:
-      - no queries available
-      - site not found
-      - no competitors yet
-      - top-level exception
-    Plus the natural done paths.
+    If `run_id` is provided, pipeline lookup scopes to that run_id
+    exactly — two concurrent pipelines won't close each other.
+    If `run_id` is None, falls back to time-window lookup (legacy).
 
     Does NOT emit for statuses outside ('done'|'failed'|'skipped') —
     those are started/progress rows that log_event handles directly.
@@ -82,38 +87,37 @@ async def emit_terminal(
             f"emit_terminal called with non-terminal status={status!r}",
         )
 
-    await log_event(db, site_id, stage, status, message, extra)
+    await log_event(db, site_id, stage, status, message, extra, run_id=run_id)
 
-    # Close the pipeline only if one is actually open (started and not
-    # yet terminated). Standalone runs from the per-feature buttons
-    # don't have an open pipeline, so no orphan terminal appears.
-    cutoff = datetime.utcnow() - timedelta(minutes=PIPELINE_STARTED_LOOKBACK_MINUTES)
-    # Find the newest pipeline event for this site within the window
-    newest = (await db.execute(
+    # Scope: match by run_id when supplied (precise), else time-window.
+    stmt = (
         select(AnalysisEvent.status)
         .where(
             AnalysisEvent.site_id == UUID(str(site_id)),
             AnalysisEvent.stage == "pipeline",
-            AnalysisEvent.ts >= cutoff,
         )
         .order_by(desc(AnalysisEvent.ts))
         .limit(1)
-    )).scalar_one_or_none()
+    )
+    if run_id is not None:
+        stmt = stmt.where(AnalysisEvent.run_id == UUID(str(run_id)))
+    else:
+        cutoff = datetime.utcnow() - timedelta(
+            minutes=PIPELINE_STARTED_LOOKBACK_MINUTES,
+        )
+        stmt = stmt.where(AnalysisEvent.ts >= cutoff)
 
+    newest = (await db.execute(stmt)).scalar_one_or_none()
     if newest != "started":
-        # No open pipeline — either never started, already terminated,
-        # or too old to count. Don't write a duplicate close.
         return
 
-    # Pipeline status mirrors the most severe stage outcome in this run.
-    # Simpler for v1: mirror the stage status verbatim.
     pipeline_msg = {
         "done":    "Полный анализ завершён.",
         "failed":  "Полный анализ остановлен: ошибка на одном из этапов.",
         "skipped": "Полный анализ завершён без новых данных.",
     }[status]
     await log_event(
-        db, site_id, "pipeline", status, pipeline_msg, extra,
+        db, site_id, "pipeline", status, pipeline_msg, extra, run_id=run_id,
     )
 
 

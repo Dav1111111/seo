@@ -166,6 +166,7 @@ def competitors_discover_site_task(
     site_id: str,
     max_queries: int = DEFAULT_MAX_QUERIES,
     top_k: int = DEFAULT_TOP_K,
+    run_id: str | None = None,
 ) -> dict:
     """Discover competitors for one site via SERP. Returns a summary dict."""
 
@@ -180,6 +181,7 @@ def competitors_discover_site_task(
                     await emit_terminal(
                         db, site_id, "competitor_discovery", "skipped",
                         "Разведка уже идёт — второй запуск пропущен.",
+                        run_id=run_id,
                     )
                     return {
                         "status": "skipped",
@@ -192,6 +194,7 @@ def competitors_discover_site_task(
                         await emit_terminal(
                             db, site_id, "competitor_discovery", "failed",
                             "Сайт не найден в базе.",
+                            run_id=run_id,
                         )
                         return {"status": "skipped", "reason": "site_not_found"}
 
@@ -203,6 +206,7 @@ def competitors_discover_site_task(
                         await emit_terminal(
                             db, site_id, "competitor_discovery", "skipped",
                             "Нет запросов для разведки — сначала запусти сбор из Вебмастера.",
+                            run_id=run_id,
                         )
                         return {
                             "status": "skipped",
@@ -214,6 +218,7 @@ def competitors_discover_site_task(
                         db, site_id, "competitor_discovery", "started",
                         f"Ищу конкурентов в Яндекс-выдаче по {len(queries)} запросам…",
                         extra={"queries_count": len(queries)},
+                        run_id=run_id,
                     )
 
                     profile = discover_competitors(
@@ -248,32 +253,34 @@ def competitors_discover_site_task(
                             "top3": [c.domain for c in profile.competitors[:3]],
                             "cost_usd": round(profile.cost_usd, 4),
                         },
+                        run_id=run_id,
                     )
 
                     # Chain: discovery done → fire deep-dive automatically
-                    # so the comparison table and growth opportunities are
-                    # ready without the user clicking a second button.
+                    # Pass run_id through so the chained task's events
+                    # join the same run group on the dashboard.
                     if profile.competitors:
                         try:
-                            competitors_deep_dive_site_task.delay(site_id)
+                            competitors_deep_dive_site_task.apply_async(
+                                args=[site_id],
+                                kwargs={"run_id": run_id},
+                            )
                         except Exception as exc:  # noqa: BLE001
                             log.warning(
                                 "competitors.discovery.chain_dive_failed "
                                 "site=%s err=%s", site_id, exc,
                             )
-                            # Can't chain to deep-dive → pipeline dies here.
-                            # Close it so the UI doesn't hang waiting.
                             await emit_terminal(
                                 db, site_id, "competitor_deep_dive", "failed",
                                 "Не удалось запустить глубокий анализ "
                                 "(брокер задач недоступен).",
+                                run_id=run_id,
                             )
                     else:
-                        # Zero competitors found — skip deep-dive and close
-                        # the pipeline since there's nothing to compare.
                         await emit_terminal(
                             db, site_id, "competitor_deep_dive", "skipped",
                             "Конкуренты не найдены — глубокий анализ пропущен.",
+                            run_id=run_id,
                         )
 
                     return {
@@ -303,6 +310,7 @@ def competitors_discover_site_task(
                     await emit_terminal(
                         db2, site_id, "competitor_discovery", "failed",
                         f"Разведка остановлена с ошибкой: {str(exc)[:200]}",
+                        run_id=run_id,
                     )
             except Exception:  # noqa: BLE001
                 pass  # best-effort — already logging the real error above
@@ -312,7 +320,7 @@ def competitors_discover_site_task(
 
 
 @celery_app.task(name="competitors_deep_dive_site", bind=True, max_retries=0)
-def competitors_deep_dive_site_task(self, site_id: str) -> dict:
+def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = None) -> dict:
     """Crawl top competitor sites and write a structural comparison.
 
     Uses the persisted competitor_profile.competitors list — for each
@@ -339,6 +347,7 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                     await emit_terminal(
                         db, site_id, "competitor_deep_dive", "failed",
                         "Сайт не найден в базе.",
+                        run_id=run_id,
                     )
                     return {"status": "skipped", "reason": "site_not_found"}
 
@@ -349,6 +358,7 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                     await emit_terminal(
                         db, site_id, "competitor_deep_dive", "skipped",
                         "Нет найденных конкурентов — сначала запусти разведку.",
+                        run_id=run_id,
                     )
                     return {
                         "status": "skipped",
@@ -359,6 +369,7 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                 await log_event(
                     db, site_id, "competitor_deep_dive", "started",
                     f"Глубокий анализ: читаю сайты {min(5, len(competitors))} конкурентов…",
+                    run_id=run_id,
                 )
 
                 # Top 5 competitors — crawl in parallel so one slow site
@@ -397,6 +408,7 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                         await log_event(
                             db, site_id, "competitor_deep_dive", "progress",
                             f"Готов {domain} ({done_count}/{len(targets)})…",
+                            run_id=run_id,
                         )
                     own_page = own_future.result()
 
@@ -475,6 +487,7 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                         "own_pages": len(own_pages_dicts),
                         "competitors_crawled": len(reports),
                     },
+                    run_id=run_id,
                 )
 
                 return {
@@ -499,6 +512,7 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                     await emit_terminal(
                         db2, site_id, "competitor_deep_dive", "failed",
                         f"Глубокий анализ остановлен: {str(exc)[:200]}",
+                        run_id=run_id,
                     )
             except Exception:  # noqa: BLE001
                 pass

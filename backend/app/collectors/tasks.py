@@ -136,7 +136,7 @@ def collect_metrica_all(self):
 
 
 @celery_app.task(name="collect_site_webmaster")
-def collect_site_webmaster(site_id: str):
+def collect_site_webmaster(site_id: str, run_id: str | None = None):
     """Collect Webmaster data for a specific site (for manual trigger)."""
     from app.config import settings
 
@@ -162,7 +162,7 @@ def collect_site_webmaster(site_id: str):
 
 
 @celery_app.task(name="crawl_site")
-def crawl_site(site_id: str):
+def crawl_site(site_id: str, run_id: str | None = None):
     """Crawl a site — fetch sitemap + all pages, extract SEO data.
 
     After crawl completes, automatically chains fingerprint_site with 10s countdown.
