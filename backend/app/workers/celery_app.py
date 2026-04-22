@@ -143,4 +143,5 @@ celery_app.autodiscover_tasks([
     "app.core_audit.demand_map", "app.core_audit.draft_profile",
     "app.core_audit.onboarding", "app.core_audit.competitors",
     "app.core_audit.outcomes", "app.core_audit.health",
+    "app.core_audit.business_truth",
 ])
