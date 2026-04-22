@@ -198,11 +198,13 @@ def derive_vocabulary_from_data(
     for q, imp in queries:
         if not q or imp is None or imp <= 0:
             continue
-        weight = 1 if imp >= query_impression_floor else 1
-        # Each query contributes each token once, weighted by weight
+        # Impression-based weight: strong queries (≥ floor) contribute
+        # full vote; rare ones half. Suppresses 1-impression noise.
+        # (Previous bug: both branches returned 1 — the floor did nothing.)
+        weight = 1 if imp >= query_impression_floor else 0.5
         tokens = set(_tokenize_content(q))
         for tok in tokens:
-            service_counts[tok] = service_counts.get(tok, 0) + weight
+            service_counts[tok] = service_counts.get(tok, 0.0) + weight
 
     services: set[str] = {
         tok for tok, n in service_counts.items() if n >= min_frequency

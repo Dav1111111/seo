@@ -141,6 +141,37 @@ def test_url_slug_geo_detected_without_title_mention():
     assert "сочи" in vocab["geos"]
 
 
+def test_low_impression_queries_count_less_than_strong_ones():
+    """Regression: query_impression_floor actually weighs queries now.
+
+    Pre-fix, both branches of the weight ternary returned 1 — so a
+    1-impression fluke carried the same signal as a 1000-impression
+    workhorse. After fix, below-floor queries count 0.5.
+    """
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги Абхазия", "h1": "Багги", "url": "https://x/a"},
+    ]
+    # 'фигня' appears in 3 different rare queries (1 impression each).
+    # Without weighting fix, that'd bank 3 points and pass min_frequency=2.
+    # With weighting, 3 × 0.5 = 1.5, correctly below threshold.
+    queries = [
+        ("багги абхазия",       500),  # real service
+        ("фигня абхазия",         1),  # rare noise 1
+        ("фигня абхазия 2",       1),  # rare noise 2
+        ("фигня абхазия 3",       1),  # rare noise 3
+    ]
+    vocab = derive_vocabulary_from_data(
+        pages, queries,
+        min_frequency=2,
+        query_impression_floor=50,
+    )
+    assert "багги" in vocab["services"]
+    assert "фигня" not in vocab["services"]
+
+
 def test_only_gazetteer_geos_returned():
     """Random non-gazetteer word shouldn't leak into geos even if
     it looks like a location."""
