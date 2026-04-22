@@ -151,9 +151,12 @@ async def rebuild_business_truth(
     q_rows = (await db.execute(q_stmt)).all()
     queries_for_vocab = [(r.query_text, int(r.imp or 0)) for r in q_rows]
 
-    # 1c. Derive vocabulary
+    # 1c. Derive vocabulary (site_domain passed so brand tokens like
+    # "grand", "tour", "spirit", "gts" from "grandtourspirit.ru" get
+    # filtered from the service candidates).
     auto_vocab = derive_vocabulary_from_data(
         page_dicts_for_vocab, queries_for_vocab,
+        site_domain=site.domain,
     )
     services = auto_vocab["services"]
     geos = auto_vocab["geos"]

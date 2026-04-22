@@ -82,6 +82,16 @@ _NOISE_TOKENS = frozenset({
     "все", "новый", "новая", "лучший", "лучшая", "топ",
     "фото", "видео", "цены", "купить", "заказ",
     "россия", "семьи", "детей",
+    # Question words / interrogatives — observed in real traffic as
+    # "как", "что", "какая категория" etc., never a real service.
+    "как", "что", "какой", "какая", "какие", "какое", "где", "когда",
+    "почему", "зачем", "сколько", "кто", "куда", "откуда",
+    "так", "тут", "там", "уже", "ещё", "еще", "лишь",
+    # Prepositional forms that slipped past stopword list when matched
+    # from titles like "Поехали в Абхазию" (here "абхазию" is a
+    # morphological form, not a service).
+    "абхазию", "абхазии", "сочи", "крыму", "крыма", "крыму",
+    "сочах", "гагре", "гагру", "пицунде", "сухуму", "сухум",
 })
 
 
@@ -132,14 +142,89 @@ def _find_geos_in_text(text: str) -> set[str]:
     return hits
 
 
-def _tokenize_content(text: str) -> list[str]:
-    """Extract meaningful content tokens — lowercase, ≥3 chars, not noise."""
+# Derived at module load — every gazetteer entry's token stems
+# become blocked as service candidates. "абхазии" / "абхазию" /
+# "сочами" all truncate to stems that match "абхазия" / "сочи".
+def _geo_stems() -> frozenset[str]:
+    from app.core_audit.business_truth.matcher import _token_stems
+    out: set[str] = set()
+    for entry in _GAZETTEER_SET:
+        out.update(_token_stems(entry))
+        for word in entry.split():
+            out.update(_token_stems(word))
+    return frozenset(out)
+
+_GEO_STEMS: frozenset[str] = _geo_stems()
+
+
+def _brand_tokens_for_domain(domain: str | None) -> frozenset[str]:
+    """Tokens derived from the site's own domain — never services.
+
+    grandtourspirit.ru → {grand, tour, spirit, grandtour, tourspirit,
+    grandtourspirit, gts}. Protects against domain-echo words
+    appearing in page titles/headers.
+    """
+    if not domain:
+        return frozenset()
+    d = domain.lower()
+    # Strip TLD
+    for tld in (".ru", ".com", ".рф", ".net", ".org", ".io"):
+        if d.endswith(tld):
+            d = d[: -len(tld)]
+            break
+    # Drop www prefix
+    d = d.removeprefix("www.")
+    parts = [p for p in d.split(".") if p]
+    out: set[str] = set()
+    for part in parts:
+        out.add(part)
+        # Best-effort substring splits — e.g. grandtourspirit →
+        # the full token. Crude but cheap for English-ish domains.
+        if len(part) > 10:
+            # Heuristic: try to split on common English word junctures.
+            for split_word in ("tour", "spirit", "grand", "tower", "club",
+                               "house", "group", "team", "service"):
+                idx = part.find(split_word)
+                if idx > 0:
+                    out.add(part[:idx])
+                    out.add(part[idx:])
+                    out.add(split_word)
+    # Also acronyms: first letters of camelCase-ish or word-parts
+    if parts:
+        # "grandtourspirit" → "gts" (first letter of each split)
+        combined = parts[0]
+        pieces = []
+        for sw in ("grand", "tour", "spirit", "tower", "club"):
+            if sw in combined:
+                pieces.append(sw[0])
+        if len(pieces) >= 2:
+            out.add("".join(pieces))
+    return frozenset(t for t in out if len(t) >= 2)
+
+
+def _tokenize_content(
+    text: str,
+    brand_tokens: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Extract meaningful content tokens — lowercase, ≥3 chars, not noise,
+    not a gazetteer-derived form, not a brand fragment."""
     if not text:
         return []
     norm = _normalize(text)
     out: list[str] = []
     for tok in norm.split():
-        if len(tok) < 3 or tok in _NOISE_TOKENS or tok in _GAZETTEER_SET:
+        if len(tok) < 3:
+            continue
+        if tok in _NOISE_TOKENS or tok in _GAZETTEER_SET:
+            continue
+        # Kill morphological forms of gazetteer entries: "абхазии",
+        # "абхазию" share stems with "абхазия" and shouldn't be
+        # treated as standalone services.
+        from app.core_audit.business_truth.matcher import _token_stems
+        stems = _token_stems(tok) | {tok}
+        if stems & _GEO_STEMS:
+            continue
+        if tok in brand_tokens:
             continue
         out.append(tok)
     return out
@@ -151,6 +236,7 @@ def derive_vocabulary_from_data(
     *,
     min_frequency: int = 2,
     query_impression_floor: int = 50,
+    site_domain: str | None = None,
 ) -> dict:
     """Produce (services, geos, evidence) from pages + queries.
 
@@ -163,6 +249,7 @@ def derive_vocabulary_from_data(
     """
     pages = list(pages or [])
     queries = list(queries or [])
+    brand_tokens = _brand_tokens_for_domain(site_domain)
 
     # ── 1. Geos: collect from page text + URL + queries. All hits
     #       against gazetteer.
@@ -191,7 +278,7 @@ def derive_vocabulary_from_data(
         # with 5 repeats doesn't inflate the score)
         tokens: set[str] = set()
         for field in ("title", "h1"):
-            tokens.update(_tokenize_content(p.get(field) or ""))
+            tokens.update(_tokenize_content(p.get(field) or "", brand_tokens))
         for tok in tokens:
             service_counts[tok] = service_counts.get(tok, 0) + 1
 
@@ -202,7 +289,7 @@ def derive_vocabulary_from_data(
         # full vote; rare ones half. Suppresses 1-impression noise.
         # (Previous bug: both branches returned 1 — the floor did nothing.)
         weight = 1 if imp >= query_impression_floor else 0.5
-        tokens = set(_tokenize_content(q))
+        tokens = set(_tokenize_content(q, brand_tokens))
         for tok in tokens:
             service_counts[tok] = service_counts.get(tok, 0.0) + weight
 

@@ -172,6 +172,68 @@ def test_low_impression_queries_count_less_than_strong_ones():
     assert "фигня" not in vocab["services"]
 
 
+def test_brand_tokens_from_domain_blocked_as_services():
+    """grandtourspirit.ru → 'grand', 'tour', 'spirit' NOT in services."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Grand Tour Spirit — багги Абхазия", "h1": "Grand",
+         "url": "https://grandtourspirit.ru/"},
+        {"title": "Grand Tour Spirit — багги Сочи",    "h1": "Tour",
+         "url": "https://grandtourspirit.ru/sochi/"},
+    ]
+    vocab = derive_vocabulary_from_data(
+        pages, [("багги абхазия", 500)],
+        site_domain="grandtourspirit.ru",
+    )
+    assert "grand" not in vocab["services"]
+    assert "tour" not in vocab["services"]
+    assert "spirit" not in vocab["services"]
+    # But real service still passes
+    assert "багги" in vocab["services"]
+
+
+def test_morphological_forms_of_gazetteer_not_services():
+    """'Абхазии' appears in a query but shouldn't spawn a fake
+    service token — its stems match gazetteer entry 'абхазия'."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги в Абхазии", "h1": "Багги Абхазия", "url": "https://x/"},
+        {"title": "Багги Абхазия",   "h1": "Багги",        "url": "https://x/a"},
+    ]
+    queries = [("багги в абхазии цена", 500), ("багги в абхазию туры", 200)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "абхазия" in vocab["geos"]
+    assert "абхазии" not in vocab["services"]
+    assert "абхазию" not in vocab["services"]
+
+
+def test_question_words_not_services():
+    """'как', 'что', 'какая' etc. blocked."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги в Абхазии", "h1": "Багги",
+         "url": "https://x/"},
+        {"title": "Багги в Абхазии 2", "h1": "Багги",
+         "url": "https://x/a"},
+    ]
+    queries = [
+        ("какая нужна категория для багги", 100),
+        ("как забронировать багги", 200),
+        ("что такое багги тур", 150),
+    ]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "какая" not in vocab["services"]
+    assert "как" not in vocab["services"]
+    assert "что" not in vocab["services"]
+    assert "багги" in vocab["services"]
+
+
 def test_only_gazetteer_geos_returned():
     """Random non-gazetteer word shouldn't leak into geos even if
     it looks like a location."""
