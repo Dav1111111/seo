@@ -144,9 +144,10 @@ def test_url_slug_geo_detected_without_title_mention():
 def test_low_impression_queries_count_less_than_strong_ones():
     """Regression: query_impression_floor actually weighs queries now.
 
-    Pre-fix, both branches of the weight ternary returned 1 — so a
-    1-impression fluke carried the same signal as a 1000-impression
-    workhorse. After fix, below-floor queries count 0.5.
+    Pre-fix, both branches of the weight ternary returned 1. After
+    fix, below-floor queries count 0.5. Default floor lowered from
+    50 to 5 (production data: low-traffic sites have few queries
+    above 50 impressions, so 50 killed real business signals).
     """
     from app.core_audit.business_truth.auto_vocabulary import (
         derive_vocabulary_from_data,
@@ -154,20 +155,15 @@ def test_low_impression_queries_count_less_than_strong_ones():
     pages = [
         {"title": "Багги Абхазия", "h1": "Багги", "url": "https://x/a"},
     ]
-    # 'фигня' appears in 3 different rare queries (1 impression each).
-    # Without weighting fix, that'd bank 3 points and pass min_frequency=2.
-    # With weighting, 3 × 0.5 = 1.5, correctly below threshold.
+    # 'фигня' appears in 3 different 1-impression queries. At
+    # weight=0.5, 3 × 0.5 = 1.5 below min_frequency=2 → blocked.
     queries = [
-        ("багги абхазия",       500),  # real service
-        ("фигня абхазия",         1),  # rare noise 1
-        ("фигня абхазия 2",       1),  # rare noise 2
-        ("фигня абхазия 3",       1),  # rare noise 3
+        ("багги абхазия",       500),
+        ("фигня абхазия",         1),
+        ("фигня абхазия 2",       1),
+        ("фигня абхазия 3",       1),
     ]
-    vocab = derive_vocabulary_from_data(
-        pages, queries,
-        min_frequency=2,
-        query_impression_floor=50,
-    )
+    vocab = derive_vocabulary_from_data(pages, queries, min_frequency=2)
     assert "багги" in vocab["services"]
     assert "фигня" not in vocab["services"]
 

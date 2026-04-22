@@ -235,7 +235,7 @@ def derive_vocabulary_from_data(
     queries: Iterable[tuple[str, int]],
     *,
     min_frequency: int = 2,
-    query_impression_floor: int = 50,
+    query_impression_floor: int = 5,
     site_domain: str | None = None,
 ) -> dict:
     """Produce (services, geos, evidence) from pages + queries.
