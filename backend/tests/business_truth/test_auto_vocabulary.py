@@ -1,0 +1,156 @@
+"""Auto-derive vocabulary from site data, no onboarding input.
+
+Principle: platform reads title+h1 of every page + recent queries from
+Webmaster, and figures out WHAT the business actually does — based on
+what's actually there, not what the owner (or an onboarding LLM)
+typed once.
+
+Geos are matched against a bundled Russian tourism gazetteer. Anything
+else that co-occurs with a geo and appears frequently enough is a
+service candidate.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+
+def test_single_direction_site_derives_it():
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги-туры в Абхазии", "h1": "Багги Абхазия", "url": "https://x/a"},
+        {"title": "Багги в Абхазии цена",  "h1": "Багги",        "url": "https://x/b"},
+    ]
+    queries = [("багги абхазия", 500), ("багги абхазия цена", 200)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "багги" in vocab["services"]
+    assert "абхазия" in vocab["geos"]
+
+
+def test_blog_mentions_dont_become_services():
+    """A word mentioned once in a single blog URL slug shouldn't
+    become a declared service."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги Абхазия",      "h1": "Багги",         "url": "https://x/"},
+        {"title": "Багги Абхазия 2",    "h1": "Багги туры",    "url": "https://x/a"},
+        {"title": "Кейс клиента",       "h1": "Наш кейс",      "url": "https://x/stories/seo-abkhazia-excursions"},
+    ]
+    queries = [("багги абхазия", 500)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    # Багги — real service (2 pages, query traffic)
+    assert "багги" in vocab["services"]
+    # "экскурсии" — only in one URL slug, no query traffic → NOT a service
+    assert "экскурсии" not in vocab["services"]
+
+
+def test_multi_geo_site_extracts_all_present_geos():
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги в Абхазии",     "h1": "Багги Абхазия", "url": "https://x/a"},
+        {"title": "Багги в Сочи",        "h1": "Багги Сочи",    "url": "https://x/b"},
+        {"title": "Багги в Красной Поляне","h1": "Багги",        "url": "https://x/c"},
+    ]
+    queries = [("багги абхазия", 500), ("багги сочи", 100)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "абхазия" in vocab["geos"]
+    assert "сочи" in vocab["geos"]
+    assert "красная поляна" in vocab["geos"]
+
+
+def test_noise_and_stopwords_excluded():
+    """'туры', 'цена', 'отдых' are noise — shouldn't end up as services."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Туры и отдых в Абхазии цена", "h1": "Туры", "url": "https://x/"},
+        {"title": "Багги Абхазия туры",           "h1": "Багги", "url": "https://x/a"},
+    ]
+    queries = [("багги абхазия цена", 500), ("туры в абхазии", 200)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "багги" in vocab["services"]
+    assert "туры" not in vocab["services"]
+    assert "отдых" not in vocab["services"]
+    assert "цена" not in vocab["services"]
+
+
+def test_services_require_minimum_frequency():
+    """A word appearing on exactly 1 page with 0 traffic isn't a service."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги в Абхазии", "h1": "Багги", "url": "https://x/a"},
+        {"title": "Багги в Абхазии", "h1": "Багги", "url": "https://x/b"},
+        {"title": "Кейтеринг на выезде", "h1": "Кейтеринг", "url": "https://x/c"},  # 1 page, 0 queries
+    ]
+    queries = [("багги абхазия", 500)]
+    vocab = derive_vocabulary_from_data(pages, queries, min_frequency=2)
+    assert "багги" in vocab["services"]
+    assert "кейтеринг" not in vocab["services"]  # doesn't pass threshold
+
+
+def test_traffic_only_service_still_captured():
+    """Word doesn't appear on pages but gets heavy Webmaster queries —
+    THAT is the classic 'traffic-only' signal. Include in vocab so
+    BusinessTruth can surface it as traffic_only direction."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги Абхазия", "h1": "Багги", "url": "https://x/"},
+    ]
+    # Many queries for "джиппинг", none on the site
+    queries = [
+        ("джиппинг абхазия", 800),
+        ("джиппинг абхазия цена", 400),
+    ]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "джиппинг" in vocab["services"]
+
+
+def test_empty_input_returns_empty_vocab():
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    vocab = derive_vocabulary_from_data([], [])
+    assert vocab["services"] == set()
+    assert vocab["geos"] == set()
+
+
+def test_url_slug_geo_detected_without_title_mention():
+    """/sochi/ path → sochi is a geo even if title is generic."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Активный отдых", "h1": "Активный отдых",
+         "url": "https://x/sochi/"},
+        {"title": "Активный отдых", "h1": "Активный отдых",
+         "url": "https://x/sochi/2"},
+    ]
+    queries = [("багги сочи", 200)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "сочи" in vocab["geos"]
+
+
+def test_only_gazetteer_geos_returned():
+    """Random non-gazetteer word shouldn't leak into geos even if
+    it looks like a location."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги в Бомбее", "h1": "Бомбей", "url": "https://x/"},
+    ]
+    queries = [("багги бомбей", 100)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    # Bombay isn't in the Russian tourism gazetteer
+    assert "бомбей" not in vocab["geos"]
