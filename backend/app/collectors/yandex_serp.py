@@ -51,7 +51,11 @@ OPERATION_ENDPOINT = "https://operation.api.cloud.yandex.net/operations"
 # sweet spot: first poll usually hits a ready op, and we stay below
 # the rate ceiling even with 4-5 concurrent discovery threads.
 POLL_INTERVAL_SEC = 0.7
-POLL_MAX_ATTEMPTS = 30
+# Previously 30 attempts × 0.7s = 21s per-query ceiling. One stuck
+# query then dominated the whole discovery wall time. Cut to 15 so a
+# single rotten query contributes at most ~10.5s. Real ops complete
+# in 1-3 polls, so this loses nothing in the common case.
+POLL_MAX_ATTEMPTS = 15
 
 # Request defaults
 DEFAULT_REGION = "225"                   # 225 = Russia country-wide
