@@ -435,6 +435,34 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                     },
                 )
 
+                # Close the pipeline loop: if this run was triggered via
+                # the "full pipeline" button there's a recent pipeline:
+                # started event for this site. Emit a matching done so
+                # LastRunSummary stops showing "идёт сейчас…".
+                from datetime import datetime, timedelta
+                from app.models.analysis_event import AnalysisEvent
+                recent_pipeline_start = (await db.execute(
+                    select(AnalysisEvent.id)
+                    .where(
+                        AnalysisEvent.site_id == UUID(site_id),
+                        AnalysisEvent.stage == "pipeline",
+                        AnalysisEvent.status == "started",
+                        AnalysisEvent.ts >= datetime.utcnow() - timedelta(minutes=10),
+                    )
+                    .order_by(AnalysisEvent.ts.desc())
+                    .limit(1)
+                )).first()
+                if recent_pipeline_start is not None:
+                    await log_event(
+                        db, site_id, "pipeline", "done",
+                        "Полный анализ завершён.",
+                        extra={
+                            "opportunities": len(opportunities),
+                            "competitors_found": len(site.competitor_domains or []),
+                            "own_pages": len(own_pages_dicts),
+                        },
+                    )
+
                 return {
                     "status": "ok",
                     "site_id": site_id,

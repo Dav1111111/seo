@@ -41,10 +41,20 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
   // Nothing has ever run — don't show the empty card
   if (!opps && !discovery) return null;
 
+  // "Running" is decided only by the actual work stages. Earlier we
+  // also looked at `pipeline` — but that stage is a wrapper emitted by
+  // the trigger endpoint, and historical data has `pipeline: started`
+  // without a matching done. Backend now emits pipeline:done too, but
+  // we keep this filter as a defensive fallback against stale data.
   const TERMINAL = new Set(["done", "failed", "skipped"]);
-  const running = Object.values(stages).some(
-    (s: any) => !TERMINAL.has(s.status),
-  );
+  const WORK_STAGES = [
+    "crawl", "webmaster", "demand_map",
+    "competitor_discovery", "competitor_deep_dive", "opportunities",
+  ];
+  const running = WORK_STAGES.some((name) => {
+    const s = stages[name];
+    return s && !TERMINAL.has(s.status);
+  });
 
   // Pull useful numbers from extras
   const oppsCount = opps?.extra?.opportunities ?? null;
