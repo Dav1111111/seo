@@ -80,7 +80,10 @@ async def test_webmaster_emits_started_and_done_with_counts(db, test_site: Site)
 
 
 async def test_demand_map_skipped_without_target_config(db, test_site: Site):
-    """No target_config → stage skipped (not failed, not done)."""
+    """No target_config → stage skipped. Per Day 5 gate, demand_map is
+    ancillary to the pipeline (competitors can still run without a
+    fresh map), so pipeline keeps running and only closes when
+    opportunities finishes."""
     await log_event(db, test_site.id, "pipeline", "started", "trigger")
     await emit_terminal(
         db, test_site.id, "demand_map", "skipped",
@@ -88,9 +91,9 @@ async def test_demand_map_skipped_without_target_config(db, test_site: Site):
     )
     evts = await _events_for_stage(db, test_site.id, "demand_map")
     assert [e.status for e in evts] == ["skipped"]
-    # And pipeline closed accordingly
+    # Pipeline stays open — demand_map isn't in the closing-stages set
     pipe = await _events_for_stage(db, test_site.id, "pipeline")
-    assert [e.status for e in pipe] == ["started", "skipped"]
+    assert [e.status for e in pipe] == ["started"]
 
 
 async def test_demand_map_done_with_cluster_counts(db, test_site: Site):
