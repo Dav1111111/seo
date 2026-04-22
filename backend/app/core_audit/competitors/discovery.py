@@ -94,11 +94,11 @@ def _is_excluded(domain: str) -> bool:
 # small spacing keeps us well clear of anything hostile.
 SLEEP_BETWEEN_CALLS_SEC = 0.1
 
-# Max queries in flight simultaneously. 8 threads hit HTTP 429 "Too
-# Many Requests" from Yandex Search API — retries pushed wall time
-# UP, not down. 5 is the measured sweet spot: enough parallelism to
-# beat serial, below the rate ceiling so no 429 retries.
-CONCURRENT_FETCHES = 5
+# Max queries in flight simultaneously. Anything above 4 trips Yandex
+# HTTP 429 rate limits on the /operations/{id} poll endpoint and
+# retries pile up. 4 is the measured cap — discovery of 30 queries
+# in ~10s with zero 429s.
+CONCURRENT_FETCHES = 4
 
 
 @dataclasses.dataclass(frozen=True)

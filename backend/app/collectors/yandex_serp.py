@@ -45,13 +45,13 @@ SEARCH_ENDPOINT = "https://searchapi.api.cloud.yandex.net/v2/web/searchAsync"
 OPERATION_ENDPOINT = "https://operation.api.cloud.yandex.net/operations"
 
 # Poll schedule — results usually ready in 3–5 s, but allow up to ~20 s.
-# Yandex async operations typically complete within ~1s. We tried 0.7
-# but measured queries that needed only 1 poll were effectively waiting
-# half a second extra. 0.4s catches ready ops with ~250ms of wasted
-# waiting average. Max attempts bumped to 60 so the 21s budget still
-# holds for tail-latency ops that really do take 15–20s.
-POLL_INTERVAL_SEC = 0.4
-POLL_MAX_ATTEMPTS = 60
+# Yandex async operations typically complete within ~1s. Tried 0.4s
+# and got hammered with HTTP 429 (Too Many Requests) because the poll
+# endpoint rate-limits aggressive re-polling. 0.7s is the measured
+# sweet spot: first poll usually hits a ready op, and we stay below
+# the rate ceiling even with 4-5 concurrent discovery threads.
+POLL_INTERVAL_SEC = 0.7
+POLL_MAX_ATTEMPTS = 30
 
 # Request defaults
 DEFAULT_REGION = "225"                   # 225 = Russia country-wide
