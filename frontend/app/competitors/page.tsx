@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ActivityFeed } from "@/components/dashboard/activity-feed";
+import { LastRunSummary } from "@/components/dashboard/last-run-summary";
 import {
   RefreshCw, Search, ExternalLink, Swords,
   TrendingDown, Layers, Check, X, Target, CheckCircle2,
@@ -168,6 +169,10 @@ export default function CompetitorsPage() {
           {banner.msg}
         </div>
       )}
+
+      {/* Last-run summary card — always on top so the user sees results
+          at a glance without hunting through tabs. */}
+      <LastRunSummary siteId={siteId} />
 
       {/* Live progress — visible whenever discovery/deep-dive is running */}
       {hasRunning && <ActivityFeed siteId={siteId} />}

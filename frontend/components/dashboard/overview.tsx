@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { TrafficChart } from "@/components/dashboard/traffic-chart";
 import { ActivityFeed } from "@/components/dashboard/activity-feed";
+import { LastRunSummary } from "@/components/dashboard/last-run-summary";
 import {
   TrendingUp, TrendingDown, Eye, MousePointer,
   MapPin, FileSearch, ArrowRight, Flame, Play,
@@ -277,6 +278,8 @@ export function OverviewPage() {
           )}
         </CardContent>
       </Card>
+
+      <LastRunSummary siteId={siteId} />
 
       <ActivityFeed siteId={siteId} />
 
