@@ -424,6 +424,31 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                     "self": own_page,
                 }
 
+                # Close the deep-dive stage BEFORE moving on to build
+                # opportunities. Without this, /activity/last returns
+                # a stale "progress" as the stage's latest status, and
+                # any hasRunning() check across work stages would keep
+                # the UI in a spinner forever.
+                # Note: this does NOT close the pipeline — pipeline
+                # waits for opportunities per _should_close_pipeline().
+                successful_pages = sum(
+                    1 for r in reports
+                    for p in r.get("pages", [])
+                    if p.get("status") == "ok"
+                )
+                await emit_terminal(
+                    db, site_id, "competitor_deep_dive", "done",
+                    (
+                        f"Глубокий анализ: {len(reports)} конкурентов "
+                        f"разобрано ({successful_pages} страниц успешно)."
+                    ),
+                    extra={
+                        "competitors_crawled": len(reports),
+                        "successful_pages": successful_pages,
+                    },
+                    run_id=run_id,
+                )
+
                 # Build growth opportunities from (cached gaps + fresh deep-dive).
                 # Gaps come from the per-query SERP cache captured by discovery.
                 query_serps = profile.get("query_serps") or {}

@@ -113,3 +113,57 @@ async def test_demand_map_done_with_cluster_counts(db, test_site: Site):
     evts = await _events_for_stage(db, test_site.id, "demand_map")
     assert [e.status for e in evts] == ["started", "done"]
     assert evts[1].extra["clusters"] == 280
+
+
+async def test_every_work_stage_terminates_in_happy_path(db, test_site: Site):
+    """Regression: the bug discovered post-Day-5 — deep_dive emitted
+    started + 5×progress and then the task went straight to
+    opportunities:done, leaving deep_dive's last status = 'progress'
+    forever. Frontend hasRunning=true loop followed.
+
+    This test simulates the full happy-path event sequence and asserts
+    that EVERY work stage that started has a terminal (done/failed/
+    skipped) as its newest status. No stage should be left hanging.
+    """
+    from app.core_audit.activity import TERMINAL_STATUSES
+
+    run = uuid.uuid4()
+
+    # Simulate a full successful pipeline
+    await log_event(db, test_site.id, "pipeline", "started", "trigger", run_id=run)
+    for stage in ("crawl", "webmaster", "demand_map",
+                  "competitor_discovery", "competitor_deep_dive"):
+        await log_event(db, test_site.id, stage, "started", "go", run_id=run)
+
+    # Deep-dive writes per-site progress rows (like tasks.py does)
+    for i in range(5):
+        await log_event(
+            db, test_site.id, "competitor_deep_dive", "progress",
+            f"Готов example{i}.com ({i + 1}/5)…", run_id=run,
+        )
+
+    # Terminals — crawl/webmaster/demand_map/discovery/deep_dive/opps
+    # all must land in terminal state before opportunities:done fires.
+    await emit_terminal(db, test_site.id, "crawl", "done", "15 pages", run_id=run)
+    await emit_terminal(db, test_site.id, "webmaster", "done", "42 q", run_id=run)
+    await emit_terminal(db, test_site.id, "demand_map", "done", "280 c", run_id=run)
+    await log_event(
+        db, test_site.id, "competitor_discovery", "done", "10 comps", run_id=run,
+    )
+    await emit_terminal(
+        db, test_site.id, "competitor_deep_dive", "done", "5 crawled", run_id=run,
+    )
+    await emit_terminal(
+        db, test_site.id, "opportunities", "done", "15 opps", run_id=run,
+    )
+
+    # For each work stage, assert the newest-event status is terminal
+    for stage in ("crawl", "webmaster", "demand_map",
+                  "competitor_discovery", "competitor_deep_dive",
+                  "opportunities"):
+        evts = await _events_for_stage(db, test_site.id, stage)
+        assert evts, f"stage {stage} has no events"
+        newest = evts[-1]
+        assert newest.status in TERMINAL_STATUSES, (
+            f"stage {stage} left in non-terminal state: {newest.status!r}"
+        )
