@@ -25,12 +25,20 @@ export default function CompetitorsPage() {
 
   const activitySWR = useSWR(
     siteId ? `cp-activity-${siteId}` : null,
-    () => api.getActivity(siteId, 5),
+    () => api.getActivity(siteId, 15),
     { refreshInterval: 5_000 },
   );
-  const hasRunning = (activitySWR.data?.events ?? []).some(
-    (e) => e.status === "started" || e.status === "progress",
-  );
+  // Running = per-stage the newest event is not terminal. Prevents old
+  // "progress" rows from pinning the page in a spinning state forever.
+  const hasRunning = (() => {
+    const events = activitySWR.data?.events ?? [];
+    const TERMINAL = new Set(["done", "failed", "skipped"]);
+    const latest = new Map<string, string>();
+    for (const e of events) {
+      if (!latest.has(e.stage)) latest.set(e.stage, e.status);
+    }
+    return [...latest.values()].some((s) => !TERMINAL.has(s));
+  })();
 
   // While a task is active, poll data every 8s so the user sees fresh
   // results as soon as Celery finishes. When idle, no polling.

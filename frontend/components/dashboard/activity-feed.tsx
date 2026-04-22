@@ -51,8 +51,18 @@ export function ActivityFeed({ siteId }: { siteId: string }) {
   );
 
   const events = data?.events ?? [];
-  const hasRunning = events.some(
-    (e) => e.status === "started" || e.status === "progress",
+
+  // "Running" = per stage, the most recent event is NOT terminal.
+  // A single stale "progress" row left in the feed shouldn't keep the
+  // whole dashboard in a spinning state forever.
+  const TERMINAL = new Set(["done", "failed", "skipped"]);
+  const latestPerStage = new Map<string, string>();
+  // Walk newest → oldest; first hit per stage wins.
+  for (const e of events) {
+    if (!latestPerStage.has(e.stage)) latestPerStage.set(e.stage, e.status);
+  }
+  const hasRunning = [...latestPerStage.values()].some(
+    (s) => !TERMINAL.has(s),
   );
 
   return (
