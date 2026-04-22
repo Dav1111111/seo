@@ -95,9 +95,10 @@ def _is_excluded(domain: str) -> bool:
 SLEEP_BETWEEN_CALLS_SEC = 0.1
 
 # Max queries in flight simultaneously. Each SERP request does a submit
-# then 1-5s of polling, so 4 concurrent workers turn a 90s serial walk
-# into a ~25s sprint without flooding Yandex.
-CONCURRENT_FETCHES = 4
+# then 1-5s of polling, so a thread pool cuts wall time linearly.
+# 8 concurrent workers push a 25-query run from ~10s to ~5s and still
+# stays well under any observed Yandex rate ceiling.
+CONCURRENT_FETCHES = 8
 
 
 @dataclasses.dataclass(frozen=True)

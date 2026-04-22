@@ -323,27 +323,47 @@ def competitors_deep_dive_site_task(self, site_id: str) -> dict:
                     f"Глубокий анализ: читаю сайты {min(5, len(competitors))} конкурентов…",
                 )
 
-                # Top 5 competitors — crawl each (homepage + example URL)
-                reports: list[dict] = []
-                for i, c in enumerate(competitors[:5]):
-                    domain = c.get("domain")
-                    example_url = c.get("example_url") or ""
-                    if not domain:
-                        continue
-                    await log_event(
-                        db, site_id, "competitor_deep_dive", "progress",
-                        f"Читаю {domain} ({i + 1}/{min(5, len(competitors))})…",
-                    )
+                # Top 5 competitors — crawl in parallel so one slow site
+                # (findgid.ru observed at 10s while 4 others finished in 3s)
+                # doesn't block the pipeline.
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                targets = [c for c in competitors[:5] if c.get("domain")]
+                reports_by_domain: dict[str, dict] = {}
+
+                def _run_one(c: dict) -> tuple[str, dict]:
                     rep = analyze_competitor_site(
-                        domain=domain,
-                        urls=[example_url] if example_url else [],
+                        domain=c["domain"],
+                        urls=[c.get("example_url") or ""] if c.get("example_url") else [],
                         max_pages=2,
                     )
-                    reports.append(rep.to_dict())
+                    return c["domain"], rep.to_dict()
 
-                # Own site — homepage only, enough for feature-by-feature diff
-                own_url = f"https://{site.domain.removeprefix('www.')}/"
-                own_page = analyze_page(own_url).to_dict()
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    fut_map = {pool.submit(_run_one, c): c for c in targets}
+                    # Also kick off the own-site crawl alongside the
+                    # competitors — it's just one more HTTP fetch.
+                    own_url = f"https://{site.domain.removeprefix('www.')}/"
+                    own_future = pool.submit(
+                        lambda: analyze_page(own_url).to_dict(),
+                    )
+                    done_count = 0
+                    for fut in as_completed(fut_map):
+                        domain, rep_dict = fut.result()
+                        reports_by_domain[domain] = rep_dict
+                        done_count += 1
+                        await log_event(
+                            db, site_id, "competitor_deep_dive", "progress",
+                            f"Готов {domain} ({done_count}/{len(targets)})…",
+                        )
+                    own_page = own_future.result()
+
+                # Preserve original ranking order when emitting reports.
+                reports = [
+                    reports_by_domain[c["domain"]]
+                    for c in targets
+                    if c["domain"] in reports_by_domain
+                ]
 
                 cfg["competitor_deep_dive"] = {
                     "competitors": reports,
