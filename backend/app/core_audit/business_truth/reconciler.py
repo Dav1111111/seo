@@ -10,7 +10,7 @@ platform. No I/O, no classification — that's all done upstream.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Mapping
 
 from app.core_audit.business_truth.dto import (
@@ -77,7 +77,10 @@ def reconcile(
     return BusinessTruth(
         directions=directions,
         sources_used=dict(sources_used or {}),
-        built_at_iso=datetime.utcnow().isoformat() + "Z",
+        # Timezone-aware UTC — avoids Python 3.12 deprecation warning
+        # and produces ISO strings that downstream clients (Postgres
+        # timestamptz, frontend JS) parse unambiguously.
+        built_at_iso=datetime.now(timezone.utc).isoformat(),
     )
 
 

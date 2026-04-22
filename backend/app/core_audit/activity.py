@@ -11,7 +11,7 @@ writing an event never blocks the main flow on failure.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import desc, select
@@ -131,7 +131,10 @@ async def emit_terminal(
     if run_id is not None:
         stmt = stmt.where(AnalysisEvent.run_id == UUID(str(run_id)))
     else:
-        cutoff = datetime.utcnow() - timedelta(
+        # AnalysisEvent.ts is stored as TIMESTAMP WITHOUT TIME ZONE
+        # (naive UTC). Keep comparison naive — matching the storage
+        # convention avoids mixed-aware/naive errors from SQLAlchemy.
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
             minutes=PIPELINE_STARTED_LOOKBACK_MINUTES,
         )
         stmt = stmt.where(AnalysisEvent.ts >= cutoff)
