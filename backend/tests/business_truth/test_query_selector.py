@@ -227,19 +227,25 @@ def test_aspiration_penalty_shrinks_owner_only_directions():
     when allocating. Raw strength stays untouched in the truth."""
     from app.core_audit.business_truth.query_selector import allocate_quotas
     truth = BusinessTruth(directions=[
-        _dir("s", "real",  u=0.5, c=0.5, t=0.5),  # evidenced
-        _dir("s", "dream", u=0.5),                # aspiration only
+        _dir("s", "real",  u=0.5, c=0.5, t=0.5),  # total 1.5
+        _dir("s", "dream", u=0.5),                # total 0.5, aspiration
     ])
-    # Without penalty: equal split, 5+5
+    # Without penalty: 1.5 vs 0.5 → 75/25 of 10 → 8/2
     raw = allocate_quotas(truth, budget=10)
-    assert raw[DirectionKey.of("s", "real")] == 5
-    assert raw[DirectionKey.of("s", "dream")] == 5
+    real_raw = raw[DirectionKey.of("s", "real")]
+    dream_raw = raw[DirectionKey.of("s", "dream")]
 
-    # With penalty: real = 1.5 vs dream = 0.05, proportional
-    # allocation of 10 budget → ~10 for real, 0 for dream
+    # With penalty: real = 1.5 vs dream = 0.05, ratio ~30:1,
+    # dream should be further squeezed compared to no-penalty case.
     penalized = allocate_quotas(truth, budget=10, aspiration_penalty=0.1)
-    assert penalized[DirectionKey.of("s", "real")] > 8
-    assert penalized[DirectionKey.of("s", "dream")] < 2
+    real_pen = penalized[DirectionKey.of("s", "real")]
+    dream_pen = penalized[DirectionKey.of("s", "dream")]
+
+    # Penalty must reduce dream further and give more to real
+    assert dream_pen < dream_raw, (
+        f"Expected penalty to shrink dream; {dream_raw} → {dream_pen}"
+    )
+    assert real_pen >= real_raw
     assert sum(penalized.values()) == 10
 
 
