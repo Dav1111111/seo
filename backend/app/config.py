@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     # it in a later phase.
     USE_TARGET_DEMAND_MAP: bool = False
 
+    # BusinessTruth discovery — Week 2 shadow-mode flag.
+    # False: old _pick_top_queries is the source of truth for discovery,
+    #        query_picker_v2 runs alongside and only logs diff into
+    #        analysis_events.extra for comparison.
+    # True:  query_picker_v2 drives discovery queries.
+    # Keep False until shadow data confirms new picker produces at
+    # least parity coverage + reduces the Abkhazia skew.
+    USE_BUSINESS_TRUTH_DISCOVERY: bool = False
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

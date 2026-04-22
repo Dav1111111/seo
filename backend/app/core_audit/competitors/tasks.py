@@ -160,6 +160,66 @@ async def _pick_top_queries(
     return merged[:limit]
 
 
+def _compute_shadow_picks(
+    bt_blob: dict,
+    budget: int,
+    old_queries: list[str],
+) -> tuple[dict, list]:
+    """Build v2 picks from a persisted BusinessTruth blob + old queries.
+
+    Returns (diff_for_logging, picks_list). The caller logs the diff
+    unconditionally (shadow mode) and decides via the feature flag
+    whether to use picks_list as actual discovery queries.
+    """
+    from app.core_audit.business_truth.dto import (
+        BusinessTruth, DirectionEvidence, DirectionKey,
+    )
+    from app.core_audit.business_truth.query_picker_v2 import (
+        pick_queries_from_truth,
+    )
+
+    # Rehydrate minimal BusinessTruth from JSONB — we only need
+    # DirectionEvidence.key + queries_sample + strengths for the picker.
+    directions: list[DirectionEvidence] = []
+    for d in bt_blob.get("directions") or []:
+        directions.append(DirectionEvidence(
+            key=DirectionKey.of(d.get("service", ""), d.get("geo", "")),
+            strength_understanding=float(d.get("strength_understanding", 0.0)),
+            strength_content=float(d.get("strength_content", 0.0)),
+            strength_traffic=float(d.get("strength_traffic", 0.0)),
+            pages=tuple(d.get("pages") or ()),
+            queries=tuple(d.get("queries_sample") or ()),
+        ))
+    truth = BusinessTruth(directions=directions)
+
+    result = pick_queries_from_truth(truth, budget=budget)
+    new_queries = [p.query for p in result.queries]
+
+    old_set = set(old_queries)
+    new_set = set(new_queries)
+    overlap = old_set & new_set
+    diff = {
+        "old_count": len(old_queries),
+        "new_count": len(new_queries),
+        "overlap_count": len(overlap),
+        "overlap_pct": (
+            round(len(overlap) / max(len(new_set), 1) * 100, 1)
+            if new_set else 0.0
+        ),
+        "old_only_sample": sorted(old_set - new_set)[:5],
+        "new_only_sample": sorted(new_set - old_set)[:5],
+        "direction_budget": {
+            f"{k.service}·{k.geo}": v
+            for k, v in result.direction_budget.items()
+        },
+        "deficit": {
+            f"{k.service}·{k.geo}": v
+            for k, v in result.deficit.items()
+        } if result.deficit else None,
+    }
+    return diff, result.queries
+
+
 @celery_app.task(name="competitors_discover_site", bind=True, max_retries=0)
 def competitors_discover_site_task(
     self,
@@ -198,10 +258,36 @@ def competitors_discover_site_task(
                         )
                         return {"status": "skipped", "reason": "site_not_found"}
 
-                    queries = await _pick_top_queries(
+                    old_queries = await _pick_top_queries(
                         db, site.id, max_queries,
                         biz_tokens=_business_tokens(site.target_config or {}),
                     )
+
+                    # Shadow-mode: if the site has a BusinessTruth blob,
+                    # compute the new direction-aware picks alongside,
+                    # log the diff, and optionally use them as the
+                    # actual discovery queries (gated by feature flag).
+                    shadow_diff = None
+                    new_picks = None
+                    cfg = site.target_config or {}
+                    bt_blob = cfg.get("business_truth") if isinstance(cfg, dict) else None
+                    if bt_blob and bt_blob.get("directions"):
+                        try:
+                            shadow_diff, new_picks = _compute_shadow_picks(
+                                bt_blob, max_queries, old_queries,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning(
+                                "competitors.shadow_pick_failed site=%s err=%s",
+                                site_id, exc,
+                            )
+
+                    from app.config import settings as _settings
+                    use_v2 = _settings.USE_BUSINESS_TRUTH_DISCOVERY and bool(new_picks)
+                    queries = (
+                        [p.query for p in new_picks] if use_v2 else old_queries
+                    )
+
                     if not queries:
                         await emit_terminal(
                             db, site_id, "competitor_discovery", "skipped",
@@ -214,10 +300,16 @@ def competitors_discover_site_task(
                             "site_id": site_id,
                         }
 
+                    started_extra: dict = {
+                        "queries_count": len(queries),
+                        "picker": "business_truth_v2" if use_v2 else "legacy",
+                    }
+                    if shadow_diff is not None:
+                        started_extra["shadow_diff"] = shadow_diff
                     await log_event(
                         db, site_id, "competitor_discovery", "started",
                         f"Ищу конкурентов в Яндекс-выдаче по {len(queries)} запросам…",
-                        extra={"queries_count": len(queries)},
+                        extra=started_extra,
                         run_id=run_id,
                     )
 
