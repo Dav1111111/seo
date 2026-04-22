@@ -29,22 +29,21 @@ DATABASE_URL = os.environ.get(
 )
 
 
-@pytest_asyncio.fixture(scope="session")
-async def engine():
-    """One AsyncEngine for the test session."""
-    eng = create_async_engine(DATABASE_URL, echo=False)
-    yield eng
-    await eng.dispose()
-
-
 @pytest_asyncio.fixture
-async def db(engine) -> AsyncIterator[AsyncSession]:
+async def db() -> AsyncIterator[AsyncSession]:
     """An AsyncSession bound to a transaction that's rolled back on exit.
 
-    Use this in any test that touches tables — inserts, events, updates
-    to sites, whatever. Nothing persists past the test.
+    The engine is created per-test, not session-scoped: asyncpg
+    connections hold a reference to the event loop they were created
+    in, and pytest-asyncio uses a fresh loop per test by default — so
+    a session-scoped engine produces "attached to a different loop"
+    errors on the second test.
+
+    Use this in any test that touches tables. Nothing persists past
+    the test.
     """
-    conn = await engine.connect()
+    eng = create_async_engine(DATABASE_URL, echo=False)
+    conn = await eng.connect()
     trans = await conn.begin()
     maker = async_sessionmaker(bind=conn, expire_on_commit=False)
     session = maker()
@@ -52,8 +51,10 @@ async def db(engine) -> AsyncIterator[AsyncSession]:
         yield session
     finally:
         await session.close()
-        await trans.rollback()
+        if trans.is_active:
+            await trans.rollback()
         await conn.close()
+        await eng.dispose()
 
 
 @pytest_asyncio.fixture
