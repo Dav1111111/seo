@@ -139,6 +139,7 @@ def collect_metrica_all(self):
 def collect_site_webmaster(site_id: str, run_id: str | None = None):
     """Collect Webmaster data for a specific site (for manual trigger)."""
     from app.config import settings
+    from app.core_audit.activity import emit_terminal, log_event
 
     async def _run():
         session_factory = _make_session()
@@ -146,17 +147,50 @@ def collect_site_webmaster(site_id: str, run_id: str | None = None):
             result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
             site = result.scalar_one_or_none()
             if not site:
+                await emit_terminal(
+                    db, site_id, "webmaster", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
                 return {"error": "Site not found"}
 
+            await log_event(
+                db, site_id, "webmaster", "started",
+                "Тяну данные из Яндекс.Вебмастера…",
+                run_id=run_id,
+            )
             collector = WebmasterCollector(
                 oauth_token=site.yandex_oauth_token or settings.YANDEX_OAUTH_TOKEN,
                 user_id=settings.YANDEX_WEBMASTER_USER_ID,
                 host_id=site.yandex_webmaster_host_id or settings.YANDEX_WEBMASTER_HOST_ID,
             )
             try:
-                return await collector.collect_and_store(db, site.id, days_back=7)
+                out = await collector.collect_and_store(db, site.id, days_back=7)
+            except Exception as exc:  # noqa: BLE001
+                await emit_terminal(
+                    db, site_id, "webmaster", "failed",
+                    f"Вебмастер ответил ошибкой: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                raise
             finally:
                 await collector.close()
+
+            await emit_terminal(
+                db, site_id, "webmaster", "done",
+                (
+                    f"Вебмастер: +{out.get('queries', 0)} запросов, "
+                    f"{out.get('metrics', 0)} замеров, "
+                    f"{out.get('indexing', 0)} индекс-событий."
+                ),
+                extra={
+                    "queries": out.get("queries", 0),
+                    "metrics": out.get("metrics", 0),
+                    "indexing": out.get("indexing", 0),
+                },
+                run_id=run_id,
+            )
+            return out
 
     return _run_async(_run())
 
@@ -168,6 +202,7 @@ def crawl_site(site_id: str, run_id: str | None = None):
     After crawl completes, automatically chains fingerprint_site with 10s countdown.
     """
     from app.collectors.site_crawler import SiteCrawler
+    from app.core_audit.activity import emit_terminal, log_event
     from app.fingerprint.tasks import fingerprint_site
 
     async def _run():
@@ -176,13 +211,47 @@ def crawl_site(site_id: str, run_id: str | None = None):
             result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
             site = result.scalar_one_or_none()
             if not site:
+                await emit_terminal(
+                    db, site_id, "crawl", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
                 return {"error": "Site not found"}
 
-            # Figure out base URL — for punycode domains, use the ascii form
+            await log_event(
+                db, site_id, "crawl", "started",
+                "Обхожу sitemap и собираю HTML страниц…",
+                run_id=run_id,
+            )
+
             domain = site.domain
             base_url = f"https://{domain}" if not domain.startswith("xn--") and "." in domain else f"https://{domain}"
             crawler = SiteCrawler(domain=domain, base_url=base_url, max_pages=50)
-            return await crawler.crawl_and_store(db, site.id)
+            try:
+                out = await crawler.crawl_and_store(db, site.id)
+            except Exception as exc:  # noqa: BLE001
+                await emit_terminal(
+                    db, site_id, "crawl", "failed",
+                    f"Краулинг остановлен с ошибкой: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                raise
+
+            await emit_terminal(
+                db, site_id, "crawl", "done",
+                (
+                    f"Краулинг: {out.get('pages_crawled', 0)} страниц, "
+                    f"{out.get('pages_failed', 0)} ошибок, "
+                    f"sitemap: {out.get('sitemap_urls', 0)} URL."
+                ),
+                extra={
+                    "pages_crawled": out.get("pages_crawled", 0),
+                    "pages_failed": out.get("pages_failed", 0),
+                    "sitemap_urls": out.get("sitemap_urls", 0),
+                },
+                run_id=run_id,
+            )
+            return out
 
     result = _run_async(_run())
 

@@ -66,26 +66,52 @@ def demand_map_build_site_task(self, site_id: str, run_id: str | None = None) ->
 
     Returns a summary dict for Flower / alerting.
     """
+    from app.core_audit.activity import emit_terminal, log_event
+
     async def _inner() -> dict:
         async with task_session() as db:
             site = await db.get(Site, UUID(site_id))
             if site is None:
+                await emit_terminal(
+                    db, site_id, "demand_map", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
                 return {"status": "skipped", "reason": "site_not_found"}
 
             target_config: dict = dict(site.target_config or {})
             if not target_config:
+                await emit_terminal(
+                    db, site_id, "demand_map", "skipped",
+                    "Нет target_config — заверши онбординг.",
+                    run_id=run_id,
+                )
                 return {
                     "status": "skipped",
                     "reason": "no_target_config",
                     "site_id": site_id,
                 }
 
+            await log_event(
+                db, site_id, "demand_map", "started",
+                "Строю карту спроса: услуги × гео × сезонность…",
+                run_id=run_id,
+            )
+
             profile = get_profile(site.vertical, site.business_model)
 
             # 1. Cartesian expansion (Phase A — pure, no network).
-            clusters = expand_for_site(
-                profile, target_config, site_id=UUID(site_id)
-            )
+            try:
+                clusters = expand_for_site(
+                    profile, target_config, site_id=UUID(site_id)
+                )
+            except Exception as exc:  # noqa: BLE001
+                await emit_terminal(
+                    db, site_id, "demand_map", "failed",
+                    f"Карта спроса остановлена: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                raise
 
             # 2. Enrichment stages (gated by feature flag).
             queries: list = []
@@ -130,6 +156,21 @@ def demand_map_build_site_task(self, site_id: str, run_id: str | None = None) ->
                 db, UUID(site_id), clusters, queries
             )
 
+            await emit_terminal(
+                db, site_id, "demand_map", "done",
+                (
+                    f"Карта спроса: {stats.get('clusters', 0)} кластеров, "
+                    f"{stats.get('queries', 0)} запросов "
+                    f"(Suggest: {enrichment_stats['suggest_queries']}, "
+                    f"LLM: {enrichment_stats['llm_queries']})."
+                ),
+                extra={
+                    "clusters": stats.get("clusters", 0),
+                    "queries": stats.get("queries", 0),
+                    **enrichment_stats,
+                },
+                run_id=run_id,
+            )
             return {
                 "status": "ok",
                 "site_id": site_id,
