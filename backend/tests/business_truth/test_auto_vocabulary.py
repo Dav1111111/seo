@@ -207,6 +207,45 @@ def test_morphological_forms_of_gazetteer_not_services():
     assert "абхазию" not in vocab["services"]
 
 
+def test_cross_validation_boost_rescues_thin_signals():
+    """Low-traffic site: 'багги' appears once in a page title and
+    once in a query, both 1-impression. Without cross-validation it'd
+    score 1 + 0.5 = 1.5 (below min_freq=2). With cross-validation:
+    query token matches page token → weight=1.5 → total 2.5 → passes."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги-экспедиции в Абхазии", "h1": "Багги",
+         "url": "https://x/"},
+    ]
+    queries = [("багги абхазия цена", 1)]
+    vocab = derive_vocabulary_from_data(
+        pages, queries, min_frequency=2,
+    )
+    assert "багги" in vocab["services"]
+
+
+def test_cross_validation_does_not_help_site_absent_tokens():
+    """Token in queries only, never on site → stays at 0.5 weight
+    and gets filtered. Noise protection preserved."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги Абхазия", "h1": "Багги", "url": "https://x/"},
+        {"title": "Багги Абхазия 2", "h1": "Багги", "url": "https://x/a"},
+    ]
+    queries = [
+        ("случайное слово абхазия",  1),
+        ("случайное слово абхазия 2", 1),
+        ("случайное слово абхазия 3", 1),
+    ]
+    vocab = derive_vocabulary_from_data(pages, queries, min_frequency=2)
+    assert "багги" in vocab["services"]  # page-anchored, passes
+    assert "случайное" not in vocab["services"]  # queries-only at 0.5 = 1.5, below
+
+
 def test_question_words_not_services():
     """'как', 'что', 'какая' etc. blocked."""
     from app.core_audit.business_truth.auto_vocabulary import (

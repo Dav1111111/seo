@@ -251,6 +251,20 @@ def derive_vocabulary_from_data(
     queries = list(queries or [])
     brand_tokens = _brand_tokens_for_domain(site_domain)
 
+    # Cross-validation helper: collect ALL page tokens up-front so we
+    # can boost query weight for tokens that also appear on the site.
+    # A token that shows in BOTH site content AND user queries is a
+    # high-confidence business signal; a token that only appears in
+    # rare queries stays low-weight (spam protection).
+    page_tokens_all: set[str] = set()
+    for p in pages:
+        page_tokens_all.update(
+            _tokenize_content(p.get("title") or "", brand_tokens),
+        )
+        page_tokens_all.update(
+            _tokenize_content(p.get("h1") or "", brand_tokens),
+        )
+
     # ── 1. Geos: collect from page text + URL + queries. All hits
     #       against gazetteer.
     geos: set[str] = set()
@@ -285,12 +299,21 @@ def derive_vocabulary_from_data(
     for q, imp in queries:
         if not q or imp is None or imp <= 0:
             continue
-        # Impression-based weight: strong queries (≥ floor) contribute
-        # full vote; rare ones half. Suppresses 1-impression noise.
-        # (Previous bug: both branches returned 1 — the floor did nothing.)
-        weight = 1 if imp >= query_impression_floor else 0.5
         tokens = set(_tokenize_content(q, brand_tokens))
         for tok in tokens:
+            # Three-tier weight:
+            #   1.5 — cross-validated (token on site AND in query) —
+            #         strongest business signal, passes threshold
+            #         even if query is 1-impression.
+            #   1.0 — query ≥ floor impressions but token not on site
+            #         (real user demand the site isn't addressing).
+            #   0.5 — below-floor, site-absent — noise-y.
+            if tok in page_tokens_all:
+                weight = 1.5
+            elif imp >= query_impression_floor:
+                weight = 1.0
+            else:
+                weight = 0.5
             service_counts[tok] = service_counts.get(tok, 0.0) + weight
 
     services: set[str] = {
