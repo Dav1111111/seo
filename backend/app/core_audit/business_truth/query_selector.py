@@ -53,9 +53,24 @@ def allocate_quotas(
       5. Leftover distributed to directions that still have capacity
          (allocated < cap), sorted by largest remainder.
     """
-    directions = list(truth.directions or [])
-    if not directions or budget <= 0:
+    all_directions = list(truth.directions or [])
+    if not all_directions or budget <= 0:
         return {}
+
+    # Step 0: budget sanity — if N directions × min_slot > budget, we
+    # can't honour the floor for everyone. Drop the weakest directions
+    # until the remaining set fits. Contract: sum(quotas) == budget
+    # always wins over "every direction gets a slot".
+    max_slot_count = budget // max(min_slot, 1) if min_slot > 0 else budget
+    directions_sorted = sorted(
+        all_directions,
+        key=lambda d: (-_total_strength(d), d.key.service, d.key.geo),
+    )
+    directions = directions_sorted[:max_slot_count] if max_slot_count > 0 else directions_sorted
+
+    # Keep track of dropped directions so caller (and tests) can
+    # inspect them — currently returned as zero in the result dict.
+    dropped = [d for d in all_directions if d not in directions]
 
     strengths = {d.key: _total_strength(d) for d in directions}
     total = sum(strengths.values())
@@ -122,7 +137,9 @@ def allocate_quotas(
                 leftover -= 1
                 i += 1
     elif leftover < 0:
-        # Over-budget — trim from highest, never below min_slot
+        # Over-budget — trim from highest first. Step 0 already
+        # guaranteed we have at most budget // min_slot directions so
+        # this loop always terminates satisfying the contract.
         trim_order = sorted(rounded, key=lambda k: -rounded[k])
         i = 0
         while leftover < 0:
@@ -130,11 +147,23 @@ def allocate_quotas(
             if rounded[k] > min_slot:
                 rounded[k] -= 1
                 leftover += 1
+            elif leftover < 0:
+                # Everyone at floor but still over budget — must dip
+                # one below. Preserves contract sum == budget.
+                rounded[k] -= 1
+                leftover += 1
+                if rounded[k] < 0:
+                    rounded[k] = 0
             i += 1
-            if all(rounded[k] <= min_slot for k in rounded):
-                # Would dip below min_slot. Stop — accept over-budget.
-                break
 
+    # Include dropped directions at 0 so callers see the full set.
+    for d in dropped:
+        rounded.setdefault(d.key, 0)
+
+    # Contract assertion — never silently violate sum == budget.
+    assert sum(rounded.values()) == budget, (
+        f"quota sum {sum(rounded.values())} != budget {budget}: {rounded}"
+    )
     return rounded
 
 
