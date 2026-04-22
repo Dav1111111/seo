@@ -44,6 +44,23 @@ _NOISE_TOKENS = frozenset({
 })
 
 
+# Прямолинейная транслитерация RU→LAT для URL-slug'ов.
+# Зачем: URL /sochi/ не матчится с geo "сочи" без приведения.
+# Это не полная ГОСТ-транслитерация — покрывает частотные звуки
+# и работает для большинства городов/услуг. Особые случаи вроде
+# "abkhazia" (вместо "abhaziya") лечатся через явный alias в конфиге.
+_RU_TO_LAT = {
+    "а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"e","ж":"zh",
+    "з":"z","и":"i","й":"i","к":"k","л":"l","м":"m","н":"n","о":"o",
+    "п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"h","ц":"c",
+    "ч":"ch","ш":"sh","щ":"sch","ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya",
+}
+
+
+def _translit_ru_to_lat(s: str) -> str:
+    return "".join(_RU_TO_LAT.get(ch, ch) for ch in s)
+
+
 def _normalize_text(s: str) -> str:
     """Нижний регистр, дефисы → пробелы, буквы/цифры/пробелы."""
     s = (s or "").lower()
@@ -84,21 +101,31 @@ def _matches_vocab(page_text: str, vocab_entry: str) -> bool:
     """Проверка, встречается ли элемент словаря (например "красная поляна"
     или "багги") в нормализованном тексте страницы.
 
-    Multi-word entries — ищем подстроку. Single-word — смотрим на
-    stem-совпадение через `_token_stems`.
+    Пробуем сам entry и его транслитерированную форму — чтобы URL
+    slug'и /sochi/ матчились с geo "сочи", а /krasnaya-polyana/ с
+    "красная поляна". Multi-word через substring, single-word через
+    stem-совпадение.
     """
-    entry = _normalize_text(vocab_entry)
-    if not entry:
+    entry_ru = _normalize_text(vocab_entry)
+    if not entry_ru:
         return False
-    if " " in entry:
-        # multi-word — ищем подстроку
-        return entry in page_text
-    # single-word: строгий токен-матч или stem-совпадение
-    stems = _token_stems(page_text)
-    # дополнительно строим stem-ы от самого entry (чтобы "экскурсии"
-    # матчило и stem "экскурс")
-    entry_stems = _token_stems(entry) | {entry}
-    return bool(stems & entry_stems)
+
+    entry_lat = _translit_ru_to_lat(entry_ru)
+    candidates = [entry_ru]
+    if entry_lat and entry_lat != entry_ru:
+        candidates.append(entry_lat)
+
+    page_stems = _token_stems(page_text)
+
+    for entry in candidates:
+        if " " in entry:
+            if entry in page_text:
+                return True
+        else:
+            entry_stems = _token_stems(entry) | {entry}
+            if page_stems & entry_stems:
+                return True
+    return False
 
 
 def extract_page_intents(
