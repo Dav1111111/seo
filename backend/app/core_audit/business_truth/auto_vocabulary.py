@@ -246,6 +246,11 @@ def _tokenize_content(
             continue
         if tok in _NOISE_TOKENS or tok in _GAZETTEER_SET:
             continue
+        # Pure-numeric tokens (e.g. "800", "2300") appear in queries
+        # like "тур до 800" or page titles like "Top-100" — never a
+        # real service name.
+        if tok.isdigit():
+            continue
         # Kill morphological forms of gazetteer entries: "абхазии",
         # "абхазию" share stems with "абхазия" and shouldn't be
         # treated as standalone services.

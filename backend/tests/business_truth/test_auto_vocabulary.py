@@ -246,6 +246,24 @@ def test_cross_validation_does_not_help_site_absent_tokens():
     assert "случайное" not in vocab["services"]  # queries-only at 0.5 = 1.5, below
 
 
+def test_pure_numeric_tokens_not_services():
+    """'800', '900', '2300' — price/phone/year fragments, never services."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Экскурсии в Абхазию от 800₽", "h1": "Экскурсии",
+         "url": "https://x/a"},
+        {"title": "Экскурсии до 2300", "h1": "Экскурсии", "url": "https://x/b"},
+    ]
+    queries = [("экскурсии 800", 100), ("тур 900", 50)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "800" not in vocab["services"]
+    assert "900" not in vocab["services"]
+    assert "2300" not in vocab["services"]
+    assert "экскурсии" in vocab["services"]
+
+
 def test_punycode_domain_brand_decoded_and_filtered():
     """Site with punycode domain (xn--...) → brand tokens still filtered
     via IDNA decode. Real case: ЮК domain xn----jtbbjdhsdbbg3ce9iub.xn--p1ai
