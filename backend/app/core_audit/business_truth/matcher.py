@@ -51,7 +51,11 @@ def normalize_text(s: str) -> str:
 
 
 def _token_stems(text: str) -> set[str]:
-    """Token + 1-2 char trailing truncations for Russian inflections."""
+    """Token + trailing truncations for Russian inflections.
+
+    Minimum stem length is 4 — shorter prefixes collide across unrelated
+    words (e.g. "судно" and "судак" both reduce to "суд").
+    """
     out: set[str] = set()
     for tok in text.split():
         if len(tok) < 3 or tok in _NOISE_TOKENS:
@@ -59,6 +63,7 @@ def _token_stems(text: str) -> set[str]:
         out.add(tok)
         if len(tok) >= 5:
             out.add(tok[:-1])
+        if len(tok) >= 6:
             out.add(tok[:-2])
     return out
 

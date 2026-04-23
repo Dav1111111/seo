@@ -114,6 +114,8 @@ async def persist_demand_map(
     await db.commit()
 
     stats = {
+        "clusters": len(orm_clusters),
+        "queries": len(orm_queries),
         "clusters_written": len(orm_clusters),
         "queries_written": len(orm_queries),
         "clusters_deleted": int(deleted),
