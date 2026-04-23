@@ -10,6 +10,8 @@ Each test here models one of those paths and asserts the invariant.
 
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import select
 
 from app.core_audit.activity import emit_terminal, log_event
@@ -155,3 +157,57 @@ async def test_opportunities_done_closes_pipeline(db, test_site: Site):
     )
     pipe = await _events(db, test_site.id, stage="pipeline")
     assert [e.status for e in pipe] == ["started", "done"]
+
+
+async def test_queued_pipeline_closes_only_after_last_stage(db, test_site: Site):
+    """New full-analysis contract: pipeline closes when all queued
+    stages for the same run_id reached terminal state."""
+    run = uuid.uuid4()
+    await log_event(
+        db,
+        test_site.id,
+        "pipeline",
+        "started",
+        "trigger",
+        extra={"queued": ["crawl", "webmaster", "demand_map"]},
+        run_id=run,
+    )
+
+    await emit_terminal(db, test_site.id, "crawl", "done", "15 pages", run_id=run)
+    await emit_terminal(db, test_site.id, "webmaster", "done", "42 q", run_id=run)
+
+    pipe_mid = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe_mid] == ["started"]
+
+    await emit_terminal(
+        db, test_site.id, "demand_map", "done", "280 clusters", run_id=run,
+    )
+    pipe_end = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe_end] == ["started", "done"]
+
+
+async def test_queued_pipeline_collapses_failure_status(db, test_site: Site):
+    """If any queued stage fails, pipeline closes failed once the last
+    queued stage finishes."""
+    run = uuid.uuid4()
+    await log_event(
+        db,
+        test_site.id,
+        "pipeline",
+        "started",
+        "trigger",
+        extra={"queued": ["crawl", "webmaster", "demand_map"]},
+        run_id=run,
+    )
+
+    await emit_terminal(db, test_site.id, "crawl", "done", "15 pages", run_id=run)
+    await emit_terminal(db, test_site.id, "webmaster", "failed", "500", run_id=run)
+
+    pipe_mid = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe_mid] == ["started"]
+
+    await emit_terminal(
+        db, test_site.id, "demand_map", "done", "280 clusters", run_id=run,
+    )
+    pipe_end = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe_end] == ["started", "failed"]

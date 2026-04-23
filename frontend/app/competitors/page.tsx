@@ -25,8 +25,8 @@ export default function CompetitorsPage() {
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
   const activitySWR = useSWR(
-    siteId ? `cp-activity-${siteId}` : null,
-    () => api.getActivity(siteId, 15),
+    siteId ? `cp-current-run-${siteId}` : null,
+    () => api.getCurrentRun(siteId),
     { refreshInterval: 5_000 },
   );
   // Running = per-stage the newest event is not terminal. Prevents old

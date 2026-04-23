@@ -60,10 +60,34 @@ function HealthBadge({ score }: { score: number }) {
   );
 }
 
+type WeeklyPlanItem = {
+  recommendation_id: string;
+  priority: "critical" | "high" | "medium" | "low" | string;
+  priority_score: number;
+  category: string;
+  page_url?: string | null;
+  reasoning_ru: string;
+};
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
 export function OverviewPage() {
-  const { currentSite } = useSite();
+  const { currentSite, loading: siteLoading } = useSite();
   const siteId = currentSite?.id || "";
   const router = useRouter();
+  const [nowTs, setNowTs] = useState(0);
+
+  useEffect(() => {
+    const updateNow = () => setNowTs(Date.now());
+    updateNow();
+    const timer = window.setInterval(updateNow, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Onboarding gate — if wizard isn't finished, redirect to it.
   // Everything else on the dashboard assumes an active profile.
@@ -120,17 +144,53 @@ export function OverviewPage() {
           "Карта спроса и часть метрик используют вчерашние данные, " +
           "они обновляются автоматически ночью.",
       });
-    } catch (e: any) {
-      setBanner({ kind: "err", msg: e?.message ?? String(e) });
+    } catch (error: unknown) {
+      setBanner({ kind: "err", msg: getErrorMessage(error) });
     } finally {
       setRunningFull(false);
     }
   }
 
+  if (siteLoading) {
+    return null;
+  }
+
+  if (!currentSite) {
+    return (
+      <Card className="border-dashed max-w-2xl">
+        <CardHeader>
+          <CardTitle>Сайт Не Выбран</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Дашборд появится после выбора сайта. Если список пустой, проверь,
+            что backend отвечает и сайт создан в системе.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
+            Обновить Страницу
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
   // While we wait on the redirect decision, show nothing instead of a
   // half-rendered dashboard that flashes and then disappears.
   if (!onbState || !onboardingActive) {
-    return <Skeleton className="h-8 w-48" />;
+    return (
+      <Card className="border-dashed max-w-2xl">
+        <CardHeader>
+          <CardTitle>Подготавливаю Дашборд</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Проверяю онбординг и загружаю состояние сайта. Это займёт несколько секунд.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Skeleton className="h-8 w-40" />
+          <Skeleton className="h-24" />
+        </CardContent>
+      </Card>
+    );
   }
 
   if (isLoading) {
@@ -148,7 +208,7 @@ export function OverviewPage() {
   const kpis = dash?.kpis ?? {};
   const diagnostic = latestReport?.payload?.diagnostic;
   const hasDiagnostic = diagnostic?.available;
-  const planItems: any[] = plan?.items ?? [];
+  const planItems: WeeklyPlanItem[] = plan?.items ?? [];
 
   return (
     <div className="space-y-6">
@@ -188,7 +248,7 @@ export function OverviewPage() {
 
       {/* Last-updated strip */}
       {activityByStage?.by_stage && Object.keys(activityByStage.by_stage).length > 0 && (
-        <StageTimestamps byStage={activityByStage.by_stage} />
+        <StageTimestamps byStage={activityByStage.by_stage} nowTs={nowTs} />
       )}
 
       {/* Root problem */}
@@ -302,8 +362,10 @@ export function OverviewPage() {
 
 function StageTimestamps({
   byStage,
+  nowTs,
 }: {
   byStage: Record<string, { ts: string; stage: string; status: string; message: string }>;
+  nowTs: number;
 }) {
   const rows = [
     { key: "crawl",                label: "Страницы сайта" },
@@ -318,7 +380,8 @@ function StageTimestamps({
     // Backend serves naive UTC — force-parse as UTC. See activity-feed.tsx.
     const utcIso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
     const then = new Date(utcIso).getTime();
-    const sec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+    if (!nowTs) return "недавно";
+    const sec = Math.max(0, Math.floor((nowTs - then) / 1000));
     if (sec < 60) return "только что";
     if (sec < 3600) return `${Math.floor(sec / 60)} мин`;
     if (sec < 86_400) return `${Math.floor(sec / 3600)} ч`;

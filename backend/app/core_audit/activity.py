@@ -25,6 +25,15 @@ TERMINAL_STATUSES = ("done", "failed", "skipped")
 PIPELINE_STARTED_LOOKBACK_MINUTES = 10
 
 
+def _pipeline_terminal_status(statuses: list[str]) -> str:
+    """Collapse queued-stage terminals into one pipeline terminal."""
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if any(status == "skipped" for status in statuses):
+        return "skipped"
+    return "done"
+
+
 def _should_close_pipeline(stage: str, status: str) -> bool:
     """Decide whether `stage:status` should close the wrapping pipeline.
 
@@ -46,6 +55,61 @@ def _should_close_pipeline(stage: str, status: str) -> bool:
     if stage in ("competitor_discovery", "competitor_deep_dive"):
         return status in ("failed", "skipped")
     return False
+
+
+async def _active_pipeline_started(
+    db: AsyncSession,
+    site_id: UUID | str,
+    run_id: UUID | str | None = None,
+) -> AnalysisEvent | None:
+    """Newest pipeline event if the run is still open (`started`)."""
+    stmt = (
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == UUID(str(site_id)),
+            AnalysisEvent.stage == "pipeline",
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(1)
+    )
+    if run_id is not None:
+        stmt = stmt.where(AnalysisEvent.run_id == UUID(str(run_id)))
+    else:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            minutes=PIPELINE_STARTED_LOOKBACK_MINUTES,
+        )
+        stmt = stmt.where(AnalysisEvent.ts >= cutoff)
+
+    newest = (await db.execute(stmt)).scalar_one_or_none()
+    if newest is None or newest.status != "started":
+        return None
+    return newest
+
+
+async def _latest_stage_statuses(
+    db: AsyncSession,
+    site_id: UUID | str,
+    stages: list[str],
+    run_id: UUID | str,
+) -> dict[str, str]:
+    """Latest status per queued stage for one pipeline run."""
+    stmt = (
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == UUID(str(site_id)),
+            AnalysisEvent.run_id == UUID(str(run_id)),
+            AnalysisEvent.stage.in_(stages),
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(max(50, len(stages) * 10))
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+
+    latest: dict[str, str] = {}
+    for ev in rows:
+        if ev.stage not in latest:
+            latest[ev.stage] = ev.status
+    return latest
 
 
 async def log_event(
@@ -112,44 +176,46 @@ async def emit_terminal(
 
     await log_event(db, site_id, stage, status, message, extra, run_id=run_id)
 
-    # Gate: only stages/statuses that truly end the pipeline close it.
-    # crawl:done finishing first must not close a pipeline that still
-    # has discovery and deep-dive to go.
-    if not _should_close_pipeline(stage, status):
+    pipeline_started = await _active_pipeline_started(db, site_id, run_id=run_id)
+    if pipeline_started is None:
         return
 
-    # Scope: match by run_id when supplied (precise), else time-window.
-    stmt = (
-        select(AnalysisEvent.status)
-        .where(
-            AnalysisEvent.site_id == UUID(str(site_id)),
-            AnalysisEvent.stage == "pipeline",
-        )
-        .order_by(desc(AnalysisEvent.ts))
-        .limit(1)
-    )
-    if run_id is not None:
-        stmt = stmt.where(AnalysisEvent.run_id == UUID(str(run_id)))
-    else:
-        # AnalysisEvent.ts is stored as TIMESTAMP WITHOUT TIME ZONE
-        # (naive UTC). Keep comparison naive — matching the storage
-        # convention avoids mixed-aware/naive errors from SQLAlchemy.
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-            minutes=PIPELINE_STARTED_LOOKBACK_MINUTES,
-        )
-        stmt = stmt.where(AnalysisEvent.ts >= cutoff)
+    pipeline_status: str | None = None
+    queued = pipeline_started.extra.get("queued") if pipeline_started.extra else None
 
-    newest = (await db.execute(stmt)).scalar_one_or_none()
-    if newest != "started":
-        return
+    # New pipeline contract: full analysis declares its queued stages
+    # up front. Close the wrapper only after ALL queued stages for this
+    # exact run_id reached terminal status.
+    if run_id is not None and isinstance(queued, list) and queued:
+        queued_stages = [str(name) for name in queued if str(name).strip()]
+        latest = await _latest_stage_statuses(db, site_id, queued_stages, run_id)
+        if len(latest) != len(queued_stages):
+            return
+        statuses = list(latest.values())
+        if not all(stage_status in TERMINAL_STATUSES for stage_status in statuses):
+            return
+        pipeline_status = _pipeline_terminal_status(statuses)
+
+    # Legacy fallback: old pipelines didn't declare `queued`, so keep
+    # the previous close-on-canonical-end behavior for compatibility.
+    if pipeline_status is None:
+        if not _should_close_pipeline(stage, status):
+            return
+        pipeline_status = status
 
     pipeline_msg = {
-        "done":    "Полный анализ завершён.",
-        "failed":  "Полный анализ остановлен: ошибка на одном из этапов.",
+        "done": "Полный анализ завершён.",
+        "failed": "Полный анализ остановлен: ошибка на одном из этапов.",
         "skipped": "Полный анализ завершён без новых данных.",
-    }[status]
+    }[pipeline_status]
     await log_event(
-        db, site_id, "pipeline", status, pipeline_msg, extra, run_id=run_id,
+        db,
+        site_id,
+        "pipeline",
+        pipeline_status,
+        pipeline_msg,
+        extra,
+        run_id=run_id,
     )
 
 

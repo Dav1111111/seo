@@ -847,7 +847,8 @@ async def onboarding_chat_finalize(
     # Queue a fresh BusinessTruth rebuild so the dashboard reflects the
     # confirmed target_config immediately — not on the next nightly run.
     from app.core_audit.business_truth.tasks import business_truth_rebuild_site_task
-    business_truth_rebuild_site_task.delay(str(site_id))
+    run_id = str(uuid.uuid4())
+    business_truth_rebuild_site_task.delay(str(site_id), run_id=run_id)
 
     return {
         "site_id": str(site_id),

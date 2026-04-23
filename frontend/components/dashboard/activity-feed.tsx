@@ -49,8 +49,8 @@ function StatusIcon({ status }: { status: string }) {
 
 export function ActivityFeed({ siteId }: { siteId: string }) {
   const { data, isLoading } = useSWR(
-    siteId ? `activity-${siteId}` : null,
-    () => api.getActivity(siteId, 15),
+    siteId ? `current-run-feed-${siteId}` : null,
+    () => api.getCurrentRun(siteId),
     { refreshInterval: 5_000 },
   );
 

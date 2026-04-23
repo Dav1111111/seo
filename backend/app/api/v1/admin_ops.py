@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core_audit.activity import log_event
 from app.database import get_db
+from app.models.analysis_event import AnalysisEvent
 from app.models.daily_metric import DailyMetric
 from app.models.outcome_snapshot import OutcomeSnapshot
 from app.models.search_query import SearchQuery
@@ -53,6 +54,26 @@ async def trigger_full_pipeline(
     if site is None:
         raise HTTPException(status_code=404, detail="site not found")
 
+    recent_cutoff = datetime.utcnow() - timedelta(minutes=2)
+    latest_pipeline = (await db.execute(
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == site_id,
+            AnalysisEvent.stage == "pipeline",
+            AnalysisEvent.ts >= recent_cutoff,
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(1)
+    )).scalar_one_or_none()
+    if latest_pipeline is not None and latest_pipeline.status == "started":
+        queued = latest_pipeline.extra.get("queued", []) if latest_pipeline.extra else []
+        return {
+            "status": "queued",
+            "queued": queued,
+            "run_id": str(latest_pipeline.run_id) if latest_pipeline.run_id else None,
+            "deduped": True,
+        }
+
     from app.workers.celery_app import celery_app
 
     # One run_id ties together the 4 tasks + their downstream events
@@ -69,13 +90,17 @@ async def trigger_full_pipeline(
     # (sputnik8, tripster), and the owner ends up staring at domains they
     # don't recognize. Owner triggers it manually from /competitors when
     # they want to.
+    task_to_stage = {
+        "crawl_site": "crawl",
+        "collect_site_webmaster": "webmaster",
+        "demand_map_build_site": "demand_map",
+    }
     queued: list[str] = []
-    for task_name in ("crawl_site", "collect_site_webmaster",
-                      "demand_map_build_site"):
+    for task_name in task_to_stage:
         celery_app.send_task(
             task_name, args=[str(site_id)], kwargs={"run_id": run_id},
         )
-        queued.append(task_name.replace("_site", "").replace("collect_", ""))
+        queued.append(task_to_stage[task_name])
 
     await log_event(
         db, site_id, "pipeline", "started",
