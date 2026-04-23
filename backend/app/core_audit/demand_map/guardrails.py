@@ -16,7 +16,11 @@ from app.core_audit.demand_map.dto import QualityTier, TargetClusterDTO
 log = logging.getLogger(__name__)
 
 # Hard caps — exceeding raises or truncates.
-MAX_CLUSTERS_PER_SITE = 500
+# Raised 500 → 900 after Grand Tour (3 services × 12 geos × modifiers
+# = 561) kept failing every nightly run. 900 covers realistic tourism
+# businesses (5 services × 15 geos × 2 modifiers ≤ 900) without
+# explosive growth.
+MAX_CLUSTERS_PER_SITE = 900
 MAX_CARTESIAN_DEPTH = 3         # e.g. service x geo x modifier, no deeper
 MAX_GEO_PERMUTATIONS = 50       # primary + secondary combined, deduped
 MAX_PER_TEMPLATE = 30
