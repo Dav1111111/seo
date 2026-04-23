@@ -29,14 +29,15 @@ from typing import Any, Sequence
 
 log = logging.getLogger(__name__)
 
-# Upper bound on number of pages sent to the LLM. Chosen so that prompt
-# stays well under Haiku's context while covering enough of the site to
-# form a reasonable picture. Pages are ranked by word_count desc.
-MAX_PAGES = 20
+# Upper bound on number of pages sent to the LLM. Value is trimmed to
+# keep Sonnet runs under the Vercel-proxy timeout (~60s): on grandtour-
+# scale sites Sonnet takes ~4–5s per page, so 10 pages lands inside the
+# window with headroom.
+MAX_PAGES = 10
 
 # How much text per page to include in the prompt. We keep the first
 # `PAGE_TEXT_SNIPPET_CHARS` chars of content_text + full title + full h1.
-PAGE_TEXT_SNIPPET_CHARS = 800
+PAGE_TEXT_SNIPPET_CHARS = 600
 
 # Cost cap: if we ever build a site so large that the prompt balloons,
 # we bail out early rather than surprise-bill. Value in USD.

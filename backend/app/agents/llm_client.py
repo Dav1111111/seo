@@ -88,13 +88,14 @@ def call_with_tool(
     Call Claude with a single tool and force it to use that tool.
     Returns (tool_input_dict, usage_stats).
 
-    Uses prompt caching on the system prompt automatically.
-    Structured output via tool_use is more reliable than JSON parsing.
+    Uses streaming so long Sonnet generations don't trip the Vercel
+    proxy's single-request timeout (~78s) — the proxy sees bytes flowing
+    and keeps the connection alive end-to-end. Prompt caching on the
+    system prompt is preserved. Output is still structured via tool_use.
     """
     client = get_client()
     model = MODEL_MAP.get(model_tier, MODEL_MAP["cheap"])
 
-    # Cache system prompt (saves ~90% on repeated calls with same system)
     system_blocks = [
         {
             "type": "text",
@@ -102,17 +103,17 @@ def call_with_tool(
             "cache_control": {"type": "ephemeral"},
         }
     ]
-
     messages = [{"role": "user", "content": user_message}]
 
-    response = client.messages.create(
+    with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
         system=system_blocks,
         tools=[tool],
         tool_choice={"type": "tool", "name": tool["name"]},
         messages=messages,
-    )
+    ) as stream:
+        response = stream.get_final_message()
 
     usage = response.usage
     cost = _compute_cost(model, usage)
@@ -136,7 +137,6 @@ def call_with_tool(
         usage_stats["cache_read_tokens"],
     )
 
-    # Extract tool use result
     tool_input = {}
     for block in response.content:
         if block.type == "tool_use" and block.name == tool["name"]:
@@ -155,9 +155,9 @@ def call_plain(
 ) -> tuple[str, dict[str, Any]]:
     """Free-form chat call — returns the concatenated text content and usage.
 
-    Used for chat messages where a tool schema would be overkill (plain
-    Russian prose to the owner). Prompt caching is still applied to the
-    system block.
+    Uses streaming like `call_with_tool` so long Sonnet generations
+    survive the Vercel proxy's single-request timeout. Prompt caching is
+    still applied to the system block.
     """
     client = get_client()
     model = MODEL_MAP.get(model_tier, MODEL_MAP["cheap"])
@@ -171,12 +171,13 @@ def call_plain(
     ]
     messages = [{"role": "user", "content": user_message}]
 
-    response = client.messages.create(
+    with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
         system=system_blocks,
         messages=messages,
-    )
+    ) as stream:
+        response = stream.get_final_message()
 
     usage = response.usage
     cost = _compute_cost(model, usage)
