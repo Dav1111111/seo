@@ -196,7 +196,7 @@ export const api = {
     );
   },
 
-  // Этап 1 — Conversational Onboarding
+  // Conversational Onboarding (single chat screen)
   onboardingState: (siteId: string) =>
     apiFetch<any>(`/sites/${siteId}/onboarding`, { base: "admin" }),
   triggerUnderstandingAnalyze: (siteId: string) =>
@@ -204,55 +204,64 @@ export const api = {
       `/sites/${siteId}/onboarding/understanding/analyze`,
       { method: "POST", base: "admin" },
     ),
-  patchOnboardingStep: (siteId: string, onboarding_step: string) =>
-    apiFetch<any>(`/sites/${siteId}/onboarding/step`, {
-      method: "PATCH",
-      base: "admin",
-      body: JSON.stringify({ onboarding_step }),
-    }),
   patchUnderstanding: (siteId: string, body: Record<string, any>) =>
     apiFetch<any>(`/sites/${siteId}/onboarding/understanding`, {
       method: "PATCH",
       base: "admin",
       body: JSON.stringify(body),
     }),
-  patchOnboardingProducts: (siteId: string, body: {
-    primary_product?: string | null;
-    service_weights?: Record<string, number>;
-    secondary_products?: string[];
-  }) =>
-    apiFetch<any>(`/sites/${siteId}/onboarding/products`, {
-      method: "PATCH",
-      base: "admin",
-      body: JSON.stringify(body),
-    }),
-  patchOnboardingCompetitors: (siteId: string, body: {
-    competitor_domains?: string[];
-    competitor_brands?: string[];
-  }) =>
-    apiFetch<any>(`/sites/${siteId}/onboarding/competitors`, {
-      method: "PATCH",
-      base: "admin",
-      body: JSON.stringify(body),
-    }),
-  patchClusterReview: (siteId: string, clusterId: string, body: {
-    user_confirmed?: boolean | null;
-    growth_intent?: string | null;
-  }) =>
-    apiFetch<any>(`/sites/${siteId}/onboarding/clusters/${clusterId}`, {
-      method: "PATCH",
-      base: "admin",
-      body: JSON.stringify(body),
-    }),
-  patchOnboardingKpi: (siteId: string, body: Record<string, any>) =>
-    apiFetch<any>(`/sites/${siteId}/onboarding/kpi`, {
-      method: "PATCH",
-      base: "admin",
-      body: JSON.stringify(body),
-    }),
-  completeOnboarding: (siteId: string) =>
-    apiFetch<any>(`/sites/${siteId}/onboarding/complete`, {
+  onboardingChatStart: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      messages: { role: "assistant" | "user"; content: string }[];
+      current: {
+        services: string[];
+        geo_primary: string[];
+        geo_secondary: string[];
+        narrative_ru: string;
+      };
+      round: number;
+      status: "active" | "confirmed" | "capped" | "pending";
+    }>(`/sites/${siteId}/onboarding/chat/start`, {
       method: "POST", base: "admin",
+    }),
+  onboardingChatMessage: (siteId: string, message: string) =>
+    apiFetch<{
+      site_id: string;
+      messages: { role: "assistant" | "user"; content: string }[];
+      current: {
+        services: string[];
+        geo_primary: string[];
+        geo_secondary: string[];
+        narrative_ru: string;
+      };
+      round: number;
+      status: "active" | "confirmed" | "capped" | "pending";
+      needs_more_info: boolean;
+    }>(`/sites/${siteId}/onboarding/chat/message`, {
+      method: "POST",
+      base: "admin",
+      body: JSON.stringify({ message }),
+    }),
+  onboardingChatFinalize: (siteId: string, overrides?: {
+    services?: string[];
+    geo_primary?: string[];
+    geo_secondary?: string[];
+    narrative_ru?: string;
+  }) =>
+    apiFetch<{
+      site_id: string;
+      onboarding_step: string;
+      target_config: {
+        services: string[];
+        geo_primary: string[];
+        geo_secondary: string[];
+        narrative_ru: string;
+      };
+    }>(`/sites/${siteId}/onboarding/chat/finalize`, {
+      method: "POST",
+      base: "admin",
+      body: JSON.stringify(overrides || {}),
     }),
 
   // Competitor discovery (SERP-based)

@@ -144,3 +144,63 @@ def call_with_tool(
             break
 
     return tool_input, usage_stats
+
+
+def call_plain(
+    *,
+    model_tier: str = "cheap",
+    system: str,
+    user_message: str,
+    max_tokens: int = 1500,
+) -> tuple[str, dict[str, Any]]:
+    """Free-form chat call — returns the concatenated text content and usage.
+
+    Used for chat messages where a tool schema would be overkill (plain
+    Russian prose to the owner). Prompt caching is still applied to the
+    system block.
+    """
+    client = get_client()
+    model = MODEL_MAP.get(model_tier, MODEL_MAP["cheap"])
+
+    system_blocks = [
+        {
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    messages = [{"role": "user", "content": user_message}]
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system_blocks,
+        messages=messages,
+    )
+
+    usage = response.usage
+    cost = _compute_cost(model, usage)
+    usage_stats = {
+        "model": model,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_creation_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+        "cost_usd": cost,
+        "prompt_hash": _prompt_hash(system, messages),
+    }
+
+    logger.info(
+        "LLM call (plain): model=%s tokens=%d+%d cost=$%.5f cache_read=%d",
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        cost,
+        usage_stats["cache_read_tokens"],
+    )
+
+    text_parts: list[str] = []
+    for block in response.content:
+        if block.type == "text":
+            text_parts.append(block.text)
+    return "".join(text_parts), usage_stats

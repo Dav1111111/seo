@@ -331,12 +331,6 @@ async def commit_draft_to_target_config(
 # ---------- Этап 1 — Onboarding wizard endpoints --------------------------
 
 
-class OnboardingStepBody(BaseModel):
-    """Body for PATCH /onboarding/step — advance or rewind wizard state."""
-
-    onboarding_step: str
-
-
 class UnderstandingPatchBody(BaseModel):
     """Body for PATCH /understanding — owner-edited version of the agent output."""
 
@@ -346,56 +340,7 @@ class UnderstandingPatchBody(BaseModel):
     detected_usp: str | None = None
 
 
-class ProductsPatchBody(BaseModel):
-    """Body for PATCH /onboarding/products — step 2 output.
-
-    `primary_product` is a human-readable marker of what the business
-    considers its main offering (e.g. "багги-экспедиции"). The effective
-    scoring happens via `service_weights` — a dict where the primary gets
-    weight 1.0 and secondaries something in [0.2, 0.6]. Zeros effectively
-    drop the service from the demand map.
-    """
-
-    primary_product: str | None = None
-    service_weights: dict[str, float] = Field(default_factory=dict)
-    secondary_products: list[str] = Field(default_factory=list)
-
-
-class CompetitorsPatchBody(BaseModel):
-    """Body for PATCH /onboarding/competitors — step 3 output."""
-
-    competitor_domains: list[str] = Field(default_factory=list)
-    competitor_brands: list[str] = Field(default_factory=list)
-
-
-class ClusterReviewBody(BaseModel):
-    """Body for PATCH /onboarding/clusters/{id} — step 4 output.
-
-    Sent once per cluster when the owner reviews the demand map. `growth_intent`
-    (grow/ignore/not_mine) drives which clusters feed the scorer hot path.
-    """
-
-    user_confirmed: bool | None = None
-    growth_intent: str | None = None   # grow | ignore | not_mine
-
-
-class KPIPatchBody(BaseModel):
-    """Body for PATCH /onboarding/kpi — step 7 output."""
-
-    baseline: dict[str, Any] = Field(default_factory=dict)
-    target_3m: dict[str, Any] = Field(default_factory=dict)
-    target_6m: dict[str, Any] = Field(default_factory=dict)
-    target_12m: dict[str, Any] = Field(default_factory=dict)
-
-
 VALID_GROWTH_INTENTS = {"grow", "ignore", "not_mine"}
-
-
-VALID_ONBOARDING_STEPS = {
-    "pending_analyze", "confirm_business", "confirm_products",
-    "confirm_competitors", "confirm_queries", "confirm_positions",
-    "confirm_plan", "confirm_kpi", "active",
-}
 
 
 @router.post(
@@ -436,68 +381,6 @@ async def get_onboarding_state(
 
 
 @router.patch(
-    "/sites/{site_id}/onboarding/step",
-    dependencies=[Depends(_require_admin)],
-)
-async def patch_onboarding_step(
-    site_id: uuid.UUID,
-    body: OnboardingStepBody,
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, Any]:
-    """Advance or rewind the wizard state. Validates against allowed values."""
-    if body.onboarding_step not in VALID_ONBOARDING_STEPS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"onboarding_step must be one of {sorted(VALID_ONBOARDING_STEPS)}",
-        )
-    site = await db.get(Site, site_id)
-    if site is None:
-        raise HTTPException(status_code=404, detail="site not found")
-    site.onboarding_step = body.onboarding_step
-    await db.flush()
-    return {"site_id": str(site_id), "onboarding_step": site.onboarding_step}
-
-
-@router.patch(
-    "/sites/{site_id}/onboarding/products",
-    dependencies=[Depends(_require_admin)],
-)
-async def patch_onboarding_products(
-    site_id: uuid.UUID,
-    body: ProductsPatchBody,
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, Any]:
-    """Step 2 — primary product + service weights.
-
-    Merges into sites.target_config (existing services, geo fields stay
-    intact). The demand-map builder's compute_relevance() already reads
-    service_weights, so this drives priority scoring directly.
-    """
-    site = await db.get(Site, site_id)
-    if site is None:
-        raise HTTPException(status_code=404, detail="site not found")
-
-    cfg = dict(site.target_config or {})
-    if body.primary_product is not None:
-        cfg["primary_product"] = body.primary_product
-    if body.secondary_products:
-        cfg["secondary_products"] = list(body.secondary_products)
-    if body.service_weights:
-        # Clip each weight into [0, 1] defensively — compute_relevance
-        # multiplies these into r_service, so out-of-range values would
-        # warp scoring silently.
-        cleaned = {
-            str(k): max(0.0, min(1.0, float(v)))
-            for k, v in body.service_weights.items()
-        }
-        cfg["service_weights"] = cleaned
-
-    site.target_config = cfg
-    await db.flush()
-    return {"site_id": str(site_id), "target_config": cfg}
-
-
-@router.patch(
     "/sites/{site_id}/onboarding/understanding",
     dependencies=[Depends(_require_admin)],
 )
@@ -506,7 +389,11 @@ async def patch_understanding(
     body: UnderstandingPatchBody,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Owner-edited override on top of the agent output (step 1)."""
+    """Owner-edited override on top of the agent output.
+
+    Kept as an escape hatch for owners who want to manually tweak the
+    auto-generated narrative without going through the chat flow.
+    """
     site = await db.get(Site, site_id)
     if site is None:
         raise HTTPException(status_code=404, detail="site not found")
@@ -522,90 +409,6 @@ async def patch_understanding(
     site.understanding = current
     await db.flush()
     return {"site_id": str(site_id), "understanding": current}
-
-
-@router.patch(
-    "/sites/{site_id}/onboarding/competitors",
-    dependencies=[Depends(_require_admin)],
-)
-async def patch_onboarding_competitors(
-    site_id: uuid.UUID,
-    body: CompetitorsPatchBody,
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, Any]:
-    """Step 3 — competitor domains + brands."""
-    site = await db.get(Site, site_id)
-    if site is None:
-        raise HTTPException(status_code=404, detail="site not found")
-    site.competitor_domains = list(body.competitor_domains)
-    cfg = dict(site.target_config or {})
-    cfg["competitor_brands"] = list(body.competitor_brands)
-    site.target_config = cfg
-    await db.flush()
-    return {
-        "site_id": str(site_id),
-        "competitor_domains": site.competitor_domains,
-        "competitor_brands": cfg["competitor_brands"],
-    }
-
-
-@router.patch(
-    "/sites/{site_id}/onboarding/clusters/{cluster_id}",
-    dependencies=[Depends(_require_admin)],
-)
-async def patch_cluster_review(
-    site_id: uuid.UUID,
-    cluster_id: uuid.UUID,
-    body: ClusterReviewBody,
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, Any]:
-    """Step 4 — owner confirms/rejects a cluster and sets its growth intent."""
-    if body.growth_intent is not None and body.growth_intent not in VALID_GROWTH_INTENTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"growth_intent must be one of {sorted(VALID_GROWTH_INTENTS)}",
-        )
-    cluster = (await db.execute(
-        select(TargetCluster).where(
-            TargetCluster.id == cluster_id,
-            TargetCluster.site_id == site_id,
-        )
-    )).scalar_one_or_none()
-    if cluster is None:
-        raise HTTPException(status_code=404, detail="cluster not found")
-    if body.user_confirmed is not None:
-        cluster.user_confirmed = body.user_confirmed
-    if body.growth_intent is not None:
-        cluster.growth_intent = body.growth_intent
-    await db.flush()
-    return {
-        "id": str(cluster.id),
-        "user_confirmed": cluster.user_confirmed,
-        "growth_intent": cluster.growth_intent,
-    }
-
-
-@router.patch(
-    "/sites/{site_id}/onboarding/kpi",
-    dependencies=[Depends(_require_admin)],
-)
-async def patch_onboarding_kpi(
-    site_id: uuid.UUID,
-    body: KPIPatchBody,
-    db: AsyncSession = Depends(get_db),
-) -> dict[str, Any]:
-    """Step 7 — persist KPI baseline + 3/6/12 month targets."""
-    site = await db.get(Site, site_id)
-    if site is None:
-        raise HTTPException(status_code=404, detail="site not found")
-    site.kpi_targets = {
-        "baseline": body.baseline,
-        "target_3m": body.target_3m,
-        "target_6m": body.target_6m,
-        "target_12m": body.target_12m,
-    }
-    await db.flush()
-    return {"site_id": str(site_id), "kpi_targets": site.kpi_targets}
 
 
 @router.post(
@@ -796,6 +599,260 @@ def _cluster_dto(r: TargetCluster, queries_count: int) -> dict[str, Any]:
         "seasonality_peak_months": list(r.seasonality_peak_months or []),
         "page_intent_fit": r.page_intent_fit,
         "page_intent_fit_reason_ru": r.page_intent_fit_reason_ru,
+    }
+
+
+# ── Onboarding chat (new conversational flow) ────────────────────────────
+
+class OnboardingChatMessageBody(BaseModel):
+    """Body for POST /onboarding/chat/message."""
+
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class OnboardingChatFinalizeBody(BaseModel):
+    """Body for POST /onboarding/chat/finalize — owner confirms the draft."""
+
+    # Optional override — if omitted, we take the draft from target_config_draft.
+    services: list[str] | None = None
+    geo_primary: list[str] | None = None
+    geo_secondary: list[str] | None = None
+    narrative_ru: str | None = None
+
+
+def _chat_state(site: Site) -> dict[str, Any]:
+    """Extract onboarding_chat state from target_config_draft."""
+    draft = dict(site.target_config_draft or {})
+    chat = dict(draft.get("onboarding_chat") or {})
+    return {
+        "messages": list(chat.get("messages") or []),
+        "current": dict(chat.get("current") or {}),
+        "round": int(chat.get("round") or 0),
+        "status": str(chat.get("status") or "pending"),
+    }
+
+
+def _save_chat_state(site: Site, chat: dict[str, Any]) -> None:
+    """Merge chat state back into target_config_draft.onboarding_chat."""
+    draft = dict(site.target_config_draft or {})
+    draft["onboarding_chat"] = chat
+    site.target_config_draft = draft
+
+
+def _seed_initial_state_from_understanding(understanding: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort first-draft pull from the one-shot understanding blob.
+
+    The LLM's initial chat message is the authoritative proposal, but we
+    also seed the structured draft so the owner's very first "всё ок"
+    has something real to persist.
+    """
+    # Empty by default — the owner's confirmation via chat will populate
+    # via the refinement tool. The very first round always triggers an
+    # LLM call (no short-circuit), which fills services/geo_*.
+    return {
+        "services": [],
+        "geo_primary": [],
+        "geo_secondary": [],
+        "narrative_ru": (understanding.get("narrative_ru") or "").strip()[:1200],
+    }
+
+
+@router.post(
+    "/sites/{site_id}/onboarding/chat/start",
+    dependencies=[Depends(_require_admin)],
+)
+async def onboarding_chat_start(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Generate the first assistant message from the stored understanding.
+
+    Idempotent: if a chat is already seeded, returns the existing state.
+    Safe to call on every page load.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    understanding = dict(site.understanding or {})
+    if not understanding.get("narrative_ru"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "understanding not ready — run "
+                "POST /onboarding/understanding/analyze first"
+            ),
+        )
+
+    chat = _chat_state(site)
+    if chat["messages"]:
+        return {
+            "site_id": str(site_id),
+            "messages": chat["messages"],
+            "current": chat["current"],
+            "round": chat["round"],
+            "status": chat["status"],
+        }
+
+    # First call — generate initial message.
+    from app.core_audit.onboarding.chat_agent import build_initial_message
+
+    result = build_initial_message(
+        site.domain, site.display_name, understanding,
+    )
+    if result.status != "ok":
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM init failed: {result.error or result.status}",
+        )
+
+    chat = {
+        "messages": [
+            {"role": "assistant", "content": result.message_ru},
+        ],
+        "current": _seed_initial_state_from_understanding(understanding),
+        "round": 0,
+        "status": "active",
+        "cost_usd": result.cost_usd,
+    }
+    _save_chat_state(site, chat)
+    await db.commit()
+    return {
+        "site_id": str(site_id),
+        "messages": chat["messages"],
+        "current": chat["current"],
+        "round": chat["round"],
+        "status": chat["status"],
+    }
+
+
+@router.post(
+    "/sites/{site_id}/onboarding/chat/message",
+    dependencies=[Depends(_require_admin)],
+)
+async def onboarding_chat_message(
+    site_id: uuid.UUID,
+    body: OnboardingChatMessageBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Owner sends a message — LLM refines draft, returns updated state."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    chat = _chat_state(site)
+    if chat["status"] == "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail="onboarding already confirmed — call /restart to redo",
+        )
+
+    history = list(chat["messages"])
+    user_msg = {"role": "user", "content": body.message.strip()}
+    next_round = chat["round"] + 1
+
+    from app.core_audit.onboarding.chat_agent import refine_draft
+
+    result = refine_draft(
+        current=chat["current"],
+        history=history,
+        latest_user_message=user_msg["content"],
+        round_number=next_round,
+    )
+    if result.status in ("llm_failed", "malformed"):
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM refine failed: {result.error or result.status}",
+        )
+
+    # Persist user turn + assistant reply + updated draft.
+    history.append(user_msg)
+    history.append({"role": "assistant", "content": result.reply_ru})
+
+    confirmed = not result.needs_more_info
+    chat_new = {
+        "messages": history,
+        "current": result.draft,
+        "round": next_round,
+        "status": "confirmed" if confirmed else (
+            "capped" if result.status == "capped" else "active"
+        ),
+        "cost_usd": float(chat.get("cost_usd", 0.0)) + result.cost_usd,
+    }
+    _save_chat_state(site, chat_new)
+    await db.commit()
+
+    return {
+        "site_id": str(site_id),
+        "messages": chat_new["messages"],
+        "current": chat_new["current"],
+        "round": chat_new["round"],
+        "status": chat_new["status"],
+        "needs_more_info": result.needs_more_info,
+    }
+
+
+@router.post(
+    "/sites/{site_id}/onboarding/chat/finalize",
+    dependencies=[Depends(_require_admin)],
+)
+async def onboarding_chat_finalize(
+    site_id: uuid.UUID,
+    body: OnboardingChatFinalizeBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Owner pressed 'Использовать это понимание' — commit draft to target_config.
+
+    Body may override the draft (owner's final edits in UI); otherwise
+    take the last draft from chat state.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    chat = _chat_state(site)
+    current = chat["current"]
+
+    # Owner-supplied overrides beat the LLM's last draft.
+    from app.core_audit.onboarding.chat_agent import validate_draft
+
+    merged = validate_draft({
+        "services": body.services if body.services is not None else current.get("services"),
+        "geo_primary": (
+            body.geo_primary if body.geo_primary is not None else current.get("geo_primary")
+        ),
+        "geo_secondary": (
+            body.geo_secondary if body.geo_secondary is not None else current.get("geo_secondary")
+        ),
+        "narrative_ru": (
+            body.narrative_ru if body.narrative_ru is not None else current.get("narrative_ru")
+        ),
+    })
+
+    cfg = dict(site.target_config or {})
+    cfg["services"] = merged["services"]
+    cfg["geo_primary"] = merged["geo_primary"]
+    cfg["geo_secondary"] = merged["geo_secondary"]
+    cfg["narrative_ru"] = merged["narrative_ru"]
+    site.target_config = cfg
+
+    site.onboarding_step = "active"
+
+    # Freeze chat state so /start is idempotent and doesn't re-init.
+    chat["status"] = "confirmed"
+    _save_chat_state(site, chat)
+
+    await db.commit()
+
+    # Queue a fresh BusinessTruth rebuild so the dashboard reflects the
+    # confirmed target_config immediately — not on the next nightly run.
+    from app.core_audit.business_truth.tasks import business_truth_rebuild_site_task
+    business_truth_rebuild_site_task.delay(str(site_id))
+
+    return {
+        "site_id": str(site_id),
+        "onboarding_step": site.onboarding_step,
+        "target_config": merged,
     }
 
 
