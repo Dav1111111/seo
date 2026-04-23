@@ -192,7 +192,12 @@ def _compute_shadow_picks(
         ))
     truth = BusinessTruth(directions=directions)
 
-    result = pick_queries_from_truth(truth, budget=budget)
+    # Synthesize fallback templates ({service} {geo} [...]) so low-
+    # traffic sites — where observed evidence might only cover 2-3
+    # slots — still get a meaningful comparison against legacy.
+    result = pick_queries_from_truth(
+        truth, budget=budget, synthesize_fallback=True,
+    )
     new_queries = [p.query for p in result.queries]
 
     old_set = set(old_queries)

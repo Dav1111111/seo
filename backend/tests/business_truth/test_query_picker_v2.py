@@ -133,3 +133,43 @@ def test_contract_total_queries_never_exceeds_budget():
     ])
     out = pick_queries_from_truth(truth, budget=5)
     assert len(out.queries) == 5
+
+
+# ── Synthesized fallback ───────────────────────────────────────────
+
+def test_synthesize_fallback_fills_deficit():
+    """Direction gets 5 slots but evidence has 2 queries →
+    with synthesize=True, 3 slots are filled with '{service} {geo}',
+    '{service} {geo} цена', '{service} {geo} отзывы' style queries."""
+    from app.core_audit.business_truth.query_picker_v2 import (
+        pick_queries_from_truth,
+    )
+    truth = BusinessTruth(directions=[
+        _dir("багги", "керчь", u=1.0, t=1.0,
+             queries=("real q1", "real q2")),
+    ])
+    out = pick_queries_from_truth(truth, budget=5, synthesize_fallback=True)
+    assert len(out.queries) == 5
+    # First 2 from evidence, 3 synthesized
+    real_picks = [p for p in out.queries if p.source == "business_truth"]
+    synth_picks = [p for p in out.queries if p.source == "synthesized"]
+    assert len(real_picks) == 2
+    assert len(synth_picks) == 3
+    # Synthesized queries reference the direction's service+geo
+    for p in synth_picks:
+        assert "багги" in p.query.lower()
+        assert "керчь" in p.query.lower()
+    # Deficit cleared
+    assert DirectionKey.of("багги", "керчь") not in out.deficit
+
+
+def test_synthesize_off_by_default_preserves_old_behaviour():
+    from app.core_audit.business_truth.query_picker_v2 import (
+        pick_queries_from_truth,
+    )
+    truth = BusinessTruth(directions=[
+        _dir("s", "a", u=1.0, queries=("q1",)),
+    ])
+    out = pick_queries_from_truth(truth, budget=5)
+    assert len(out.queries) == 1
+    assert out.deficit[DirectionKey.of("s", "a")] == 4

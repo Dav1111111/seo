@@ -49,6 +49,35 @@ class PickResult:
     deficit: dict[DirectionKey, int]
 
 
+_FALLBACK_PATTERNS: tuple[str, ...] = (
+    "{service} {geo}",
+    "{service} {geo} цена",
+    "{service} {geo} отзывы",
+    "{service} туры {geo}",
+    "{service} {geo} недорого",
+    "{service} {geo} 2026",
+    "{service} {geo} забронировать",
+    "{service} в {geo}",
+    "{service} аренда {geo}",
+    "{service} {geo} на день",
+)
+
+
+def _synthesize_for_direction(key, want: int) -> list[str]:
+    """Generate N queries for (service, geo) from templates.
+
+    Covers typical commercial-intent Russian query shapes so SERP
+    probes reach direction-relevant competitors even when our own
+    site has no observed queries for that direction yet.
+    """
+    out: list[str] = []
+    for tmpl in _FALLBACK_PATTERNS:
+        if len(out) >= want:
+            break
+        out.append(tmpl.format(service=key.service, geo=key.geo))
+    return out
+
+
 def pick_queries_from_truth(
     truth: BusinessTruth,
     *,
@@ -56,16 +85,20 @@ def pick_queries_from_truth(
     aspiration_penalty: float | None = 0.1,
     min_slot: int = 1,
     cap_single_direction: float | None = None,
+    synthesize_fallback: bool = False,
 ) -> PickResult:
     """Allocate budget across directions in truth, pick queries per slot.
 
     Defaults:
       aspiration_penalty=0.1 — owner-only "dream" directions compete at
       10% weight so real (evidenced) directions dominate.
+      synthesize_fallback=False — when True, slots not fillable from
+      truth.queries are supplemented by "{service} {geo} ..." templates.
+      Useful for low-traffic sites where observed evidence is thin.
 
     Deficit tracking: if a direction got N slots but only M queries in
-    evidence, (N - M) counted as deficit. Caller can use this to
-    decide whether to supplement with cluster-based fallback.
+    evidence, (N - M) counted as deficit (unless synthesize_fallback
+    filled the gap).
     """
     directions = list(truth.directions or [])
     if not directions or budget <= 0:
@@ -95,8 +128,28 @@ def pick_queries_from_truth(
                 direction=d.key,
                 source="business_truth",
             ))
-        if len(available) < want:
-            deficit[d.key] = want - len(available)
+        missing = want - len(available)
+        if missing > 0:
+            if synthesize_fallback:
+                # Don't double-count queries we already have
+                existing_lower = {q.lower() for q in available}
+                synth = [
+                    q for q in _synthesize_for_direction(d.key, missing * 2)
+                    if q.lower() not in existing_lower
+                ][:missing]
+                for q in synth:
+                    out.append(QueryPick(
+                        query=q,
+                        direction=d.key,
+                        source="synthesized",
+                    ))
+                # If synth couldn't cover fully (rare — >10 slots per dir
+                # exhausts templates), record remaining as deficit.
+                still_missing = missing - len(synth)
+                if still_missing > 0:
+                    deficit[d.key] = still_missing
+            else:
+                deficit[d.key] = missing
 
     return PickResult(
         queries=out,
