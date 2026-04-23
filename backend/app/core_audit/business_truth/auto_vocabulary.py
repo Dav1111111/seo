@@ -157,16 +157,43 @@ def _geo_stems() -> frozenset[str]:
 _GEO_STEMS: frozenset[str] = _geo_stems()
 
 
+def _decode_idna(domain: str) -> str:
+    """Decode punycode labels (xn--...) to their Unicode form.
+
+    'xn----jtbbjdhsdbbg3ce9iub.xn--p1ai' → 'южный-континент.рф'.
+    Per-label decode so mixed labels (one Cyrillic, one Latin) still
+    work. Falls back to the original string on any decode failure.
+    """
+    if not domain or "xn--" not in domain:
+        return domain
+    try:
+        parts = domain.split(".")
+        decoded = []
+        for p in parts:
+            if p.startswith("xn--"):
+                try:
+                    decoded.append(p.encode("ascii").decode("idna"))
+                except Exception:  # noqa: BLE001
+                    decoded.append(p)
+            else:
+                decoded.append(p)
+        return ".".join(decoded)
+    except Exception:  # noqa: BLE001
+        return domain
+
+
 def _brand_tokens_for_domain(domain: str | None) -> frozenset[str]:
     """Tokens derived from the site's own domain — never services.
 
     grandtourspirit.ru → {grand, tour, spirit, grandtour, tourspirit,
-    grandtourspirit, gts}. Protects against domain-echo words
-    appearing in page titles/headers.
+    grandtourspirit, gts}. Punycode domains are decoded first:
+    'xn----jtbbjdhsdbbg3ce9iub.xn--p1ai' → 'южный-континент.рф' →
+    adds {южный, континент, южный-континент} to the block list.
     """
     if not domain:
         return frozenset()
-    d = domain.lower()
+    # Decode punycode → Unicode so Cyrillic brand parts get captured.
+    d = _decode_idna(domain).lower()
     # Strip TLD
     for tld in (".ru", ".com", ".рф", ".net", ".org", ".io"):
         if d.endswith(tld):
@@ -174,6 +201,8 @@ def _brand_tokens_for_domain(domain: str | None) -> frozenset[str]:
             break
     # Drop www prefix
     d = d.removeprefix("www.")
+    # Treat hyphens as label separators: "южный-континент" → two tokens.
+    d = d.replace("-", ".")
     parts = [p for p in d.split(".") if p]
     out: set[str] = set()
     for part in parts:
@@ -316,14 +345,32 @@ def derive_vocabulary_from_data(
                 weight = 0.5
             service_counts[tok] = service_counts.get(tok, 0.0) + weight
 
+    # ── Collapse morphological variants.
+    # "экскурсия", "экскурсии", "экскурсиях" should be ONE service,
+    # not three. Group tokens by a 4-char prefix (Russian word stems
+    # for ≥4-char tokens tend to share the first 4 letters). For each
+    # group, sum counts and pick the most frequent member as the
+    # canonical representative. Groups with <4-char tokens stay alone.
+    _prefix_groups: dict[str, list[str]] = {}
+    for tok in service_counts:
+        key = tok[:4] if len(tok) >= 4 else tok
+        _prefix_groups.setdefault(key, []).append(tok)
+
+    collapsed_counts: dict[str, float] = {}
+    for key, toks in _prefix_groups.items():
+        if len(toks) == 1:
+            collapsed_counts[toks[0]] = service_counts[toks[0]]
+            continue
+        # Pick canonical: token with highest frequency; on tie, shortest
+        canonical = max(
+            toks, key=lambda t: (service_counts[t], -len(t)),
+        )
+        collapsed_counts[canonical] = sum(service_counts[t] for t in toks)
+    service_counts = collapsed_counts
+
     services: set[str] = {
         tok for tok, n in service_counts.items() if n >= min_frequency
     }
-
-    # Drop services that are NOT paired with any geo anywhere. Truly
-    # isolated tokens probably aren't the core service.
-    # (Skip this filter for tests simplicity when only 1 page — let
-    # future iterations refine.)
 
     evidence = {
         "pages_scanned": len(pages),

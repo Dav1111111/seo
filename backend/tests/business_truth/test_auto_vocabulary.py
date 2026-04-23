@@ -246,6 +246,48 @@ def test_cross_validation_does_not_help_site_absent_tokens():
     assert "случайное" not in vocab["services"]  # queries-only at 0.5 = 1.5, below
 
 
+def test_punycode_domain_brand_decoded_and_filtered():
+    """Site with punycode domain (xn--...) → brand tokens still filtered
+    via IDNA decode. Real case: ЮК domain xn----jtbbjdhsdbbg3ce9iub.xn--p1ai
+    decodes to 'южный-континент.рф', so 'южный' and 'континент' block."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Южный Континент — экскурсии в Абхазию",
+         "h1": "Южный Континент", "url": "https://x/"},
+        {"title": "Южный Континент 2025 маршруты Абхазия",
+         "h1": "Экскурсии Абхазия", "url": "https://x/a"},
+    ]
+    queries = [("экскурсии абхазия", 500)]
+    vocab = derive_vocabulary_from_data(
+        pages, queries,
+        site_domain="xn----jtbbjdhsdbbg3ce9iub.xn--p1ai",
+    )
+    assert "южный" not in vocab["services"]
+    assert "континент" not in vocab["services"]
+    # Real service still passes
+    assert "экскурсии" in vocab["services"]
+
+
+def test_morphological_service_variants_collapsed():
+    """'экскурсия', 'экскурсии', 'экскурсиях' share 4-char prefix
+    'экск' and collapse into a single canonical token."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Экскурсия в Абхазию",  "h1": "Экскурсия",  "url": "https://x/a"},
+        {"title": "Экскурсии Абхазия",    "h1": "Экскурсии",  "url": "https://x/b"},
+        {"title": "Про экскурсиях в АБХ", "h1": "Экскурсиях", "url": "https://x/c"},
+    ]
+    queries = [("экскурсии абхазия", 500)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    # Exactly ONE 'экскурс...' service, not three
+    variants = {s for s in vocab["services"] if s.startswith("экск")}
+    assert len(variants) == 1, f"Expected 1 canonical, got {variants}"
+
+
 def test_question_words_not_services():
     """'как', 'что', 'какая' etc. blocked."""
     from app.core_audit.business_truth.auto_vocabulary import (
