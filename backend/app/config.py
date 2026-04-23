@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     # Anthropic
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = ""  # Cloudflare Worker proxy URL (e.g. https://anthropic-proxy.xxx.workers.dev)
-    AI_DAILY_MODEL: str = "claude-haiku-4-5-20251001"
+    # Flipped daily to Sonnet 4.6 — latest, stronger Russian + reasoning.
+    # Monthly spend jumps ~5-6× (Haiku $0.35 → Sonnet ~$2 at current
+    # volume). Safely inside AI_MONTHLY_BUDGET_USD ceiling.
+    AI_DAILY_MODEL: str = "claude-sonnet-4-6"
     AI_COMPLEX_MODEL: str = "claude-sonnet-4-6"
     AI_MONTHLY_BUDGET_USD: float = 10.0
 
