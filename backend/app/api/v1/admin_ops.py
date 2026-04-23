@@ -60,12 +60,18 @@ async def trigger_full_pipeline(
     # this so two back-to-back clicks don't merge into one mess.
     run_id = str(uuid.uuid4())
 
-    # All 4 stages fire simultaneously — worker concurrency queues what
+    # All 3 stages fire simultaneously — worker concurrency queues what
     # it can't run in parallel. None of them read same-run output of
     # another, so no ordering needed.
+    #
+    # competitors_discover_site is intentionally NOT in the auto-chain —
+    # SERP probing without enough money-queries pulls generic aggregators
+    # (sputnik8, tripster), and the owner ends up staring at domains they
+    # don't recognize. Owner triggers it manually from /competitors when
+    # they want to.
     queued: list[str] = []
     for task_name in ("crawl_site", "collect_site_webmaster",
-                      "demand_map_build_site", "competitors_discover_site"):
+                      "demand_map_build_site"):
         celery_app.send_task(
             task_name, args=[str(site_id)], kwargs={"run_id": run_id},
         )
@@ -74,7 +80,7 @@ async def trigger_full_pipeline(
     await log_event(
         db, site_id, "pipeline", "started",
         "Запустил полный анализ: краулю сайт, тяну Вебмастер, строю карту "
-        "спроса, ищу конкурентов. Обычно готово за 30–60 секунд.",
+        "спроса. Обычно готово за 30–60 секунд.",
         extra={"queued": queued, "run_id": run_id},
         run_id=run_id,
     )
