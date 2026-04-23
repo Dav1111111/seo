@@ -226,9 +226,11 @@ def test_cross_validation_boost_rescues_thin_signals():
     assert "багги" in vocab["services"]
 
 
-def test_cross_validation_does_not_help_site_absent_tokens():
-    """Token in queries only, never on site → stays at 0.5 weight
-    and gets filtered. Noise protection preserved."""
+def test_pages_only_service_blocked_without_query_trace():
+    """Stricter rule (live bug fix): a word that appears on pages but
+    NEVER in queries is page-chrome, not a service. Real services always
+    have at least one query mention. Catches adjectives/verbs that leak
+    in from marketing titles ('премиальный', 'посмотреть', 'партнёрам')."""
     from app.core_audit.business_truth.auto_vocabulary import (
         derive_vocabulary_from_data,
     )
@@ -242,8 +244,25 @@ def test_cross_validation_does_not_help_site_absent_tokens():
         ("случайное слово абхазия 3", 1),
     ]
     vocab = derive_vocabulary_from_data(pages, queries, min_frequency=2)
-    assert "багги" in vocab["services"]  # page-anchored, passes
-    assert "случайное" not in vocab["services"]  # queries-only at 0.5 = 1.5, below
+    # Both rejected: багги because no query mentions it, "случайное"
+    # because page-absent + low-impression queries weight 0.5 × 3 = 1.5 below threshold.
+    assert "багги" not in vocab["services"]
+    assert "случайное" not in vocab["services"]
+
+
+def test_query_trace_requirement_allows_inflected_forms():
+    """Query trace check uses stem matching so 'багги' in pages
+    matches query 'багг и в крыму' (typo) or 'багги абхазия'."""
+    from app.core_audit.business_truth.auto_vocabulary import (
+        derive_vocabulary_from_data,
+    )
+    pages = [
+        {"title": "Багги Абхазия", "h1": "Багги туры", "url": "https://x/a"},
+        {"title": "Багги в Абхазии", "h1": "Багги", "url": "https://x/b"},
+    ]
+    queries = [("багги абхазия цена", 1)]
+    vocab = derive_vocabulary_from_data(pages, queries)
+    assert "багги" in vocab["services"]
 
 
 def test_pure_numeric_tokens_not_services():

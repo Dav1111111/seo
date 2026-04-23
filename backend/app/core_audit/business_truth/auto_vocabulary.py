@@ -319,7 +319,8 @@ def derive_vocabulary_from_data(
         geos |= _find_geos_in_text(_normalize(q))
 
     # ── 2. Services: frequent content tokens that are NOT geos.
-    service_counts: dict[str, int] = {}
+    service_counts: dict[str, float] = {}
+    query_tokens_all: set[str] = set()
 
     for p in pages:
         # Each page contributes each token at most once (so a title
@@ -328,12 +329,13 @@ def derive_vocabulary_from_data(
         for field in ("title", "h1"):
             tokens.update(_tokenize_content(p.get(field) or "", brand_tokens))
         for tok in tokens:
-            service_counts[tok] = service_counts.get(tok, 0) + 1
+            service_counts[tok] = service_counts.get(tok, 0.0) + 1.0
 
     for q, imp in queries:
         if not q or imp is None or imp <= 0:
             continue
         tokens = set(_tokenize_content(q, brand_tokens))
+        query_tokens_all.update(tokens)
         for tok in tokens:
             # Three-tier weight:
             #   1.5 — cross-validated (token on site AND in query) —
@@ -373,14 +375,31 @@ def derive_vocabulary_from_data(
         collapsed_counts[canonical] = sum(service_counts[t] for t in toks)
     service_counts = collapsed_counts
 
+    # Final gate: a service must appear in at least one query.
+    # This kills page-chrome nouns like "премиальный", "посмотреть",
+    # "партнёрам", "специальное" — words that live only in page titles
+    # but nobody searches. Real services always have SOME query trace.
+    # For each candidate, check if its stems hit any query token's
+    # stems (same morphology rules as matcher) to catch inflections.
+    def _has_query_trace(tok: str) -> bool:
+        from app.core_audit.business_truth.matcher import _token_stems
+        tok_stems = _token_stems(tok) | {tok}
+        for q_tok in query_tokens_all:
+            q_stems = _token_stems(q_tok) | {q_tok}
+            if tok_stems & q_stems:
+                return True
+        return False
+
     services: set[str] = {
-        tok for tok, n in service_counts.items() if n >= min_frequency
+        tok for tok, n in service_counts.items()
+        if n >= min_frequency and _has_query_trace(tok)
     }
 
     evidence = {
         "pages_scanned": len(pages),
         "queries_scanned": len(queries),
         "service_candidates": service_counts,
+        "query_tokens": sorted(query_tokens_all),
         "gazetteer_size": len(_GAZETTEER_SET),
     }
     return {
