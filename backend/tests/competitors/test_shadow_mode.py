@@ -55,8 +55,10 @@ def test_compute_shadow_empty_blob_returns_empty_picks():
     assert picks == []
 
 
-def test_compute_shadow_tracks_deficit_when_evidence_thin():
-    """Direction gets 5 slots but only has 1 query in evidence."""
+def test_compute_shadow_fills_deficit_via_synthesis():
+    """Direction wants 5 slots, only 1 observed query in evidence.
+    Shadow-mode enables synthesize_fallback so the 4 missing slots
+    get template-generated '{service} {geo} цена' etc. — no deficit."""
     from app.core_audit.competitors.tasks import _compute_shadow_picks
 
     bt_blob = {
@@ -73,6 +75,11 @@ def test_compute_shadow_tracks_deficit_when_evidence_thin():
         ],
     }
     diff, picks = _compute_shadow_picks(bt_blob, budget=5, old_queries=[])
-    assert diff["deficit"] is not None
-    # All 5 slots wanted but only 1 delivered → deficit 4
-    assert diff["deficit"]["s·a"] == 4
+    # With synthesis enabled, all 5 slots filled → no deficit.
+    assert diff["deficit"] is None or "s·a" not in (diff["deficit"] or {})
+    assert diff["new_count"] == 5
+    # 1 observed + 4 synthesized
+    observed = [p for p in picks if p.source == "business_truth"]
+    synthesized = [p for p in picks if p.source == "synthesized"]
+    assert len(observed) == 1
+    assert len(synthesized) == 4
