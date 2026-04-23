@@ -60,14 +60,25 @@ export function ActivityFeed({ siteId }: { siteId: string }) {
   // A single stale "progress" row left in the feed shouldn't keep the
   // whole dashboard in a spinning state forever.
   const TERMINAL = new Set(["done", "failed", "skipped"]);
-  const latestPerStage = new Map<string, string>();
+  const latestPerStage = new Map<string, { id: number; status: string }>();
   // Walk newest → oldest; first hit per stage wins.
   for (const e of events) {
-    if (!latestPerStage.has(e.stage)) latestPerStage.set(e.stage, e.status);
+    if (!latestPerStage.has(e.stage)) {
+      latestPerStage.set(e.stage, { id: e.id, status: e.status });
+    }
   }
   const hasRunning = [...latestPerStage.values()].some(
-    (s) => !TERMINAL.has(s),
+    (entry) => !TERMINAL.has(entry.status),
   );
+  const visibleEvents = events.filter((e) => {
+    const latest = latestPerStage.get(e.stage);
+    if (!latest) return true;
+    const supersededTransient =
+      latest.id !== e.id &&
+      (e.status === "started" || e.status === "progress") &&
+      TERMINAL.has(latest.status);
+    return !supersededTransient;
+  });
 
   return (
     <Card>
@@ -92,14 +103,14 @@ export function ActivityFeed({ siteId }: { siteId: string }) {
           <div className="space-y-2">
             {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-10" />)}
           </div>
-        ) : events.length === 0 ? (
+        ) : visibleEvents.length === 0 ? (
           <p className="text-sm text-muted-foreground italic py-4 text-center">
             Событий пока нет. Нажми «Запустить полный анализ» — появятся строки о том,
             что платформа делает прямо сейчас.
           </p>
         ) : (
           <ul className="space-y-2">
-            {events.map((e) => (
+            {visibleEvents.map((e) => (
               <li
                 key={e.id}
                 className="flex items-start gap-3 text-sm py-1.5 border-b last:border-0"
