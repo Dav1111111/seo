@@ -135,8 +135,9 @@ async def test_rebuild_with_empty_config_returns_empty_truth(db, test_site: Site
 
 async def test_rebuild_persists_to_target_config_jsonb(db, test_site: Site):
     """Verify that after rebuild the site's target_config contains the
-    serialized business_truth blob. Needs ≥2 pages — auto-vocab requires
-    min_frequency=2 to not treat one-off mentions as services."""
+    serialized business_truth blob. Needs ≥2 pages AND ≥1 matching
+    query — auto-vocab now requires query trace to avoid page-chrome
+    tokens becoming fake services."""
     from app.core_audit.business_truth.rebuild import rebuild_business_truth
 
     test_site.target_config = {
@@ -147,6 +148,8 @@ async def test_rebuild_persists_to_target_config_jsonb(db, test_site: Site):
         ("https://example.com/a/", "Багги Абхазия"),
         ("https://example.com/b/", "Багги туры Абхазия"),
     ])
+    # Query trace required by new auto-vocab rule
+    await _seed_queries(db, test_site, [("багги абхазия", 100)])
 
     await rebuild_business_truth(db, test_site.id, persist=True)
     await db.refresh(test_site)
