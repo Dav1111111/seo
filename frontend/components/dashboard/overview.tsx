@@ -140,9 +140,9 @@ export function OverviewPage() {
       setBanner({
         kind: "ok",
         msg:
-          "Быстрый анализ запущен — 4 задачи одновременно. Обычно готово за 15–30 секунд. " +
-          "Карта спроса и часть метрик используют вчерашние данные, " +
-          "они обновляются автоматически ночью.",
+          "Анализ запущен. Сначала обновим страницы, Вебмастер и карту спроса, " +
+          "потом проверим понимание бизнеса, конкурентов и точки роста. " +
+          "Если данных из Яндекса мало, конкурентный блок будет честно пропущен.",
       });
     } catch (error: unknown) {
       setBanner({ kind: "err", msg: getErrorMessage(error) });
@@ -226,8 +226,8 @@ export function OverviewPage() {
               {runningFull ? "Запускаю…" : "Быстрый анализ"}
             </Button>
             <p className="text-[11px] text-muted-foreground max-w-[240px] text-right leading-tight">
-              Свежие конкуренты + точки роста за ~20 сек.
-              Полное обновление карты спроса и Вебмастера — ночью автоматически.
+              Обновит данные сайта, затем соберёт конкурентов и точки роста,
+              если хватает запросов из Яндекса.
             </p>
           </div>
         </div>
@@ -373,6 +373,8 @@ function StageTimestamps({
     { key: "demand_map",           label: "Карта спроса" },
     { key: "competitor_discovery", label: "Конкуренты" },
     { key: "opportunities",        label: "Точки роста" },
+    { key: "review",               label: "Проверка страниц" },
+    { key: "priorities",           label: "Приоритеты" },
     { key: "report",               label: "Отчёт" },
   ];
 

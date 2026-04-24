@@ -19,9 +19,24 @@ type Event = {
   status: string;
   message: string;
   ts: string;
-  extra: Record<string, any>;
+  extra: Record<string, unknown>;
   run_id: string | null;
 };
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
 
 function timeAgo(iso: string | undefined | null): string {
   if (!iso) return "ни разу";
@@ -37,6 +52,7 @@ function timeAgo(iso: string | undefined | null): string {
 const TERMINAL = new Set(["done", "failed", "skipped"]);
 const WORK_STAGES = [
   "crawl", "webmaster", "demand_map",
+  "business_truth",
   "competitor_discovery", "competitor_deep_dive", "opportunities",
 ];
 
@@ -77,12 +93,12 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
       });
 
   // Pull useful numbers from extras (from this run's events only)
-  const oppsCount = opps?.extra?.opportunities ?? null;
-  const ownPages = opps?.extra?.own_pages ?? null;
-  const crawled = opps?.extra?.competitors_crawled ?? null;
-  const compFound = discovery?.extra?.competitors_found ?? null;
-  const top3: string[] = discovery?.extra?.top3 ?? [];
-  const cost = discovery?.extra?.cost_usd ?? null;
+  const oppsCount = asNumber(opps?.extra?.opportunities);
+  const ownPages = asNumber(opps?.extra?.own_pages);
+  const crawled = asNumber(opps?.extra?.competitors_crawled);
+  const compFound = asNumber(discovery?.extra?.competitors_found);
+  const top3 = asStringArray(discovery?.extra?.top3);
+  const cost = asNumber(discovery?.extra?.cost_usd);
 
   const lastTs = pipelineEvt?.ts ?? opps?.ts ?? discovery?.ts;
 
@@ -171,6 +187,7 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
           <StageChip stage={byStage.get("crawl")}                label="краулинг" />
           <StageChip stage={byStage.get("webmaster")}            label="вебмастер" />
           <StageChip stage={byStage.get("demand_map")}           label="карта спроса" />
+          <StageChip stage={byStage.get("business_truth")}       label="понимание бизнеса" />
           <StageChip stage={discovery}                           label="разведка" />
           <StageChip stage={dive}                                label="глубокий анализ" />
           <StageChip stage={opps}                                label="точки роста" />
