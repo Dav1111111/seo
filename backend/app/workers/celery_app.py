@@ -32,6 +32,16 @@ celery_app.conf.update(
     # deep-dive) and don't benefit from an abort.
     worker_cancel_long_running_tasks_on_connection_loss=False,
 
+    # Global time limits — defence against a runaway task holding a
+    # worker slot forever. Soft (8 min) raises SoftTimeLimitExceeded
+    # inside the task so it can clean up and emit `failed` terminal.
+    # Hard (10 min) kills the worker process — only triggers if the
+    # task is wedged in C code or genuinely infinite-looping.
+    # Individual long-running tasks (crawl, deep-dive) can override
+    # with @task(soft_time_limit=..., time_limit=...) where needed.
+    task_soft_time_limit=480,   # 8 minutes
+    task_time_limit=600,        # 10 minutes
+
     # Redis-specific transport hygiene.
     broker_transport_options={
         # ACKs aren't delivered for up to an hour after a restart
@@ -134,6 +144,15 @@ celery_app.conf.beat_schedule = {
     "queue-health-2min": {
         "task": "queue_health_check",
         "schedule": 120.0,  # seconds — plain float = every N sec
+    },
+    # Pipeline reconcile sweep — backstop for the activity reconciler.
+    # Activity-read path already closes stale pipelines when someone
+    # opens the dashboard; this sweep covers sites nobody's looking at,
+    # so failed-mid-run pipelines don't linger as "started" forever.
+    # Every 3 minutes is cheap (2 primary sites, short SQL).
+    "pipeline-reconcile-3min": {
+        "task": "pipeline_reconcile_sweep",
+        "schedule": 180.0,
     },
 }
 

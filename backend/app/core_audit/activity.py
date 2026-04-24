@@ -382,9 +382,46 @@ async def reconcile_open_pipelines(
     return repaired
 
 
+async def reconcile_open_pipelines_all_sites(
+    db: AsyncSession,
+    per_site_limit: int = 20,
+) -> dict[str, int]:
+    """Run reconcile_open_pipelines for every site that has open pipelines.
+
+    Used by the beat-scheduled watchdog. Returns {site_id_str: repaired}.
+    """
+    from sqlalchemy import distinct
+
+    site_rows = (await db.execute(
+        select(distinct(AnalysisEvent.site_id))
+        .where(
+            AnalysisEvent.stage == "pipeline",
+            AnalysisEvent.status == "started",
+        )
+    )).all()
+    results: dict[str, int] = {}
+    for (site_id,) in site_rows:
+        if site_id is None:
+            continue
+        try:
+            repaired = await reconcile_open_pipelines(
+                db, site_id, limit=per_site_limit,
+            )
+            if repaired:
+                results[str(site_id)] = repaired
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "activity.reconcile_all_site_failed site=%s err=%s",
+                site_id, exc,
+            )
+    return results
+
+
+
 __all__ = [
     "log_event",
     "emit_terminal",
     "reconcile_open_pipelines",
+    "reconcile_open_pipelines_all_sites",
     "TERMINAL_STATUSES",
 ]

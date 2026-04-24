@@ -7,10 +7,9 @@ import logging
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.workers.celery_app import celery_app
-from app.database import async_session
+from app.workers.db_session import task_session
 from app.models.site import Site
 from app.collectors.webmaster import WebmasterCollector
 from app.collectors.metrica import MetricaCollector
@@ -26,14 +25,6 @@ def _run_async(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
-
-
-def _make_session():
-    """Create an isolated async session for Celery tasks (avoids shared engine conflicts)."""
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-    from app.config import settings
-    eng = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=0)
-    return async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
 
 
 def _format_webmaster_result(out: dict) -> tuple[str, dict, str]:
@@ -91,9 +82,8 @@ async def _collect_webmaster_for_site(site: dict) -> dict:
         user_id=site["webmaster_user_id"],
         host_id=site["yandex_webmaster_host_id"],
     )
-    session_factory = _make_session()
     try:
-        async with session_factory() as db:
+        async with task_session() as db:
             result = await collector.collect_and_store(db, site["id"], days_back=7)
         return result
     finally:
@@ -109,9 +99,8 @@ async def _collect_metrica_for_site(site: dict) -> dict:
         oauth_token=site["yandex_oauth_token"],
         counter_id=site["yandex_metrica_counter_id"],
     )
-    session_factory = _make_session()
     try:
-        async with session_factory() as db:
+        async with task_session() as db:
             result = await collector.collect_and_store(db, site["id"], days_back=7)
         return result
     finally:
@@ -122,8 +111,7 @@ async def _get_active_sites() -> list[dict]:
     """Get all active sites with their credentials."""
     from app.config import settings
 
-    session_factory = _make_session()
-    async with session_factory() as db:
+    async with task_session() as db:
         result = await db.execute(
             select(Site).where(Site.is_active == True)  # noqa: E712
         )
@@ -190,8 +178,7 @@ def collect_site_webmaster(site_id: str, run_id: str | None = None):
     from app.core_audit.activity import emit_terminal, log_event
 
     async def _run():
-        session_factory = _make_session()
-        async with session_factory() as db:
+        async with task_session() as db:
             result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
             site = result.scalar_one_or_none()
             if not site:
@@ -246,8 +233,7 @@ def crawl_site(site_id: str, run_id: str | None = None):
     from app.fingerprint.tasks import fingerprint_site
 
     async def _run():
-        session_factory = _make_session()
-        async with session_factory() as db:
+        async with task_session() as db:
             result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
             site = result.scalar_one_or_none()
             if not site:
@@ -326,8 +312,7 @@ def collect_site_metrica(site_id: str):
     from app.config import settings
 
     async def _run():
-        session_factory = _make_session()
-        async with session_factory() as db:
+        async with task_session() as db:
             result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
             site = result.scalar_one_or_none()
             if not site:

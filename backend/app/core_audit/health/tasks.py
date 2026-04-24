@@ -73,4 +73,38 @@ def queue_health_check_task(self) -> dict:
         loop.close()
 
 
-__all__ = ["queue_health_check_task"]
+@celery_app.task(
+    name="pipeline_reconcile_sweep", bind=True, max_retries=0,
+    soft_time_limit=120, time_limit=180,
+)
+def pipeline_reconcile_sweep_task(self) -> dict:
+    """Close pipeline:started rows whose queued stages have all reached
+    terminal state but the wrapper was never closed.
+
+    Backstop against edge cases where emit_terminal couldn't close the
+    pipeline (worker died between a stage's terminal and the wrapper
+    write, deploy during a run, etc.). Reads run on every activity
+    request already — this beat sweep is for sites nobody happens to
+    be looking at.
+    """
+    async def _inner() -> dict:
+        from app.core_audit.activity import reconcile_open_pipelines_all_sites
+        async with task_session() as db:
+            repaired = await reconcile_open_pipelines_all_sites(db)
+            await db.commit()
+            return {
+                "status": "ok",
+                "sites_repaired": len(repaired),
+                "total_terminal_rows_added": sum(repaired.values()),
+                "by_site": repaired,
+            }
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_inner())
+    finally:
+        loop.close()
+
+
+__all__ = ["queue_health_check_task", "pipeline_reconcile_sweep_task"]
