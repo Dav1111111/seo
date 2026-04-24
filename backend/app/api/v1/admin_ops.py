@@ -317,6 +317,38 @@ async def update_competitors_list(
     return {"status": "ok", "competitor_domains": cleaned}
 
 
+# ── Indexation check (Yandex Search API) ─────────────────────────────────
+
+@router.post(
+    "/sites/{site_id}/indexation/check",
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_indexation_check(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Probe Yandex for `site:domain` — honest "are we in the index" answer.
+
+    Independent of Webmaster. Useful when Webmaster reports
+    HOST_NOT_LOADED: this endpoint asks the public search directly,
+    so the owner sees whether Yandex genuinely has zero pages or
+    whether there's just a Webmaster-side glitch.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    from app.collectors.tasks import check_site_indexation
+    run_id = str(uuid.uuid4())
+    task = check_site_indexation.delay(str(site_id), run_id=run_id)
+    return {
+        "status": "queued",
+        "task_id": task.id,
+        "run_id": run_id,
+        "domain": site.domain,
+    }
+
+
 # ── Onboarding restart ───────────────────────────────────────────────────
 
 @router.post(

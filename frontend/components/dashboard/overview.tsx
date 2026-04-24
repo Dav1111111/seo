@@ -14,6 +14,7 @@ import { TrafficChart } from "@/components/dashboard/traffic-chart";
 import { ActivityFeed } from "@/components/dashboard/activity-feed";
 import { LastRunSummary } from "@/components/dashboard/last-run-summary";
 import { BusinessTruthCard } from "@/components/dashboard/business-truth-card";
+import { IndexationCard } from "@/components/dashboard/indexation-card";
 import {
   TrendingUp, TrendingDown, Eye, MousePointer,
   MapPin, FileSearch, ArrowRight, Flame, Play,
@@ -296,6 +297,9 @@ export function OverviewPage() {
           </CardContent>
         </Card>
       ) : null}
+
+      {/* Honest indexation status — works even when Webmaster is silent */}
+      <IndexationCard siteId={siteId} />
 
       {/* KPIs */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

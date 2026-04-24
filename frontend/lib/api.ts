@@ -397,6 +397,19 @@ export const api = {
       { method: "POST", base: "admin" },
     ),
 
+  // Indexation probe — asks Yandex Search API `site:domain`. Fallback
+  // to Webmaster: works even when the host is stuck at HOST_NOT_LOADED.
+  triggerIndexationCheck: (siteId: string) =>
+    apiFetch<{
+      status: string;
+      task_id: string;
+      run_id: string;
+      domain: string;
+    }>(
+      `/sites/${siteId}/indexation/check`,
+      { method: "POST", base: "admin" },
+    ),
+
   // BusinessTruth — 3-picture reconciliation of the site as a business.
   getBusinessTruth: (siteId: string) =>
     apiFetch<{

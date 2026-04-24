@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 const STAGE_LABEL: Record<string, string> = {
   crawl: "краулинг сайта",
   webmaster: "Вебмастер",
+  indexation: "индексация в Яндексе",
   demand_map: "карта спроса",
   competitor_discovery: "разведка конкурентов",
   competitor_deep_dive: "глубокий анализ",

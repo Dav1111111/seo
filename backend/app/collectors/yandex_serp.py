@@ -246,4 +246,73 @@ def fetch_serp(
     return docs, None
 
 
-__all__ = ["SerpDoc", "fetch_serp"]
+@dataclasses.dataclass(frozen=True)
+class IndexationResult:
+    """Outcome of a `site:domain` query against Yandex.
+
+    `pages_found` is the count returned in the current SERP page (≤
+    `groups` requested). Yandex does not expose an exact total for
+    `site:` queries — this is a *sample* that proves the site is
+    indexed and gives the owner visible URLs, not a full inventory.
+
+    `pages` holds up to `groups` unique URLs from the owned domain —
+    everything else (ads, SERP features) is filtered out.
+    """
+
+    domain: str
+    pages_found: int
+    pages: list[SerpDoc]
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "domain": self.domain,
+            "pages_found": self.pages_found,
+            "pages": [p.to_dict() for p in self.pages],
+            "error": self.error,
+        }
+
+
+def check_indexation(
+    domain: str,
+    *,
+    groups: int = 20,
+    region: str = DEFAULT_REGION,
+    api_key: str | None = None,
+) -> IndexationResult:
+    """Probe Yandex for `site:domain` — honest answer to "are we indexed?".
+
+    Used as the fallback to Webmaster: when the Webmaster API returns
+    HOST_NOT_LOADED (host registered but not yet in the search index),
+    this direct SERP probe tells the owner what Yandex actually shows
+    when someone types `site:your-domain.ru` — which is what matters
+    for real visibility.
+
+    Empty result (`pages_found == 0` with no error) is a legit finding,
+    not a failure: it means the domain is genuinely absent from the
+    index. Callers distinguish that from `error != None` (network/
+    quota/misconfig) by checking `error`.
+    """
+    clean_domain = domain.strip().lower().removeprefix("www.").rstrip("/")
+    if not clean_domain:
+        return IndexationResult(domain=domain, pages_found=0, pages=[], error="empty_domain")
+
+    docs, err = fetch_serp(
+        f"site:{clean_domain}",
+        region=region,
+        groups=groups,
+        api_key=api_key,
+    )
+    if err:
+        return IndexationResult(domain=clean_domain, pages_found=0, pages=[], error=err)
+
+    own = [d for d in docs if d.domain == clean_domain or d.domain.endswith("." + clean_domain)]
+    return IndexationResult(
+        domain=clean_domain,
+        pages_found=len(own),
+        pages=own,
+        error=None,
+    )
+
+
+__all__ = ["SerpDoc", "fetch_serp", "IndexationResult", "check_indexation"]

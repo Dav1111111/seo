@@ -332,3 +332,83 @@ def collect_site_metrica(site_id: str):
                 await collector.close()
 
     return _run_async(_run())
+
+
+@celery_app.task(name="check_site_indexation", bind=True, max_retries=1)
+def check_site_indexation(self, site_id: str, run_id: str | None = None):
+    """Probe Yandex `site:domain` to answer "is this site in the index?".
+
+    Runs independently of Webmaster — uses Yandex Cloud Search API
+    directly, so it answers the question even when the Webmaster host
+    is stuck at HOST_NOT_LOADED. Result goes into activity feed as
+    an `indexation` stage event so the UI can surface the honest
+    status instead of showing a blank Webmaster card.
+    """
+    from app.collectors.yandex_serp import check_indexation
+    from app.core_audit.activity import emit_terminal, log_event
+
+    async def _run():
+        async with task_session() as db:
+            result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
+            site = result.scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "indexation", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {"error": "Site not found"}
+
+            domain = site.domain
+            await log_event(
+                db, site_id, "indexation", "started",
+                f"Проверяю индексацию в Яндексе по запросу site:{domain}…",
+                run_id=run_id,
+            )
+
+            # Sync call — Celery task, no event loop juggling needed.
+            # The SERP client itself blocks on urllib inside this thread;
+            # wrap in a thread executor to avoid holding the asyncio loop.
+            import anyio
+            out = await anyio.to_thread.run_sync(check_indexation, domain)
+
+            pages = [
+                {"url": p.url, "title": p.title, "position": p.position}
+                for p in out.pages[:20]
+            ]
+            extra = {
+                "pages_found": out.pages_found,
+                "pages": pages,
+                "query": f"site:{out.domain}",
+            }
+
+            if out.error:
+                await emit_terminal(
+                    db, site_id, "indexation", "failed",
+                    f"Search API вернул ошибку: {out.error}",
+                    extra={**extra, "error": out.error},
+                    run_id=run_id,
+                )
+                return out.to_dict()
+
+            if out.pages_found == 0:
+                message = (
+                    f"Сайт {domain} не найден в индексе Яндекса. "
+                    "Это не наша ошибка — Яндекс пока не добавил его в поиск. "
+                    "Проверь в Вебмастере: загружен ли хост и нет ли запретов в robots.txt."
+                )
+                status = "skipped"
+            else:
+                message = (
+                    f"В индексе Яндекса: {out.pages_found} страниц "
+                    f"(показываю первые {min(len(pages), 20)})."
+                )
+                status = "done"
+
+            await emit_terminal(
+                db, site_id, "indexation", status, message,
+                extra=extra, run_id=run_id,
+            )
+            return out.to_dict()
+
+    return _run_async(_run())
