@@ -16,8 +16,8 @@ class Page(Base, TimestampMixin):
     path: Mapped[str] = mapped_column(String(2048))
     title: Mapped[str | None] = mapped_column(String(500))
     page_type: Mapped[str | None] = mapped_column(String(50))
-    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     in_index: Mapped[bool] = mapped_column(Boolean, default=False)
     in_sitemap: Mapped[bool] = mapped_column(Boolean, default=False)
     http_status: Mapped[int | None] = mapped_column(Integer)
@@ -31,4 +31,4 @@ class Page(Base, TimestampMixin):
     internal_links: Mapped[list | None] = mapped_column(JSONB)  # list of URLs this page links to
     images_count: Mapped[int | None] = mapped_column(Integer)
     has_schema: Mapped[bool] = mapped_column(Boolean, default=False)
-    last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

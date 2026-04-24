@@ -5,7 +5,7 @@ actually working instead of a silent dashboard.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, ForeignKey, String, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -33,7 +33,11 @@ class AnalysisEvent(Base):
     status: Mapped[str] = mapped_column(String(20))
     # One-line human sentence in Russian: "Собираю SERP для 12 запросов…"
     message: Mapped[str] = mapped_column(String(500))
-    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
     # Optional extras (cost, counts, URLs)
     extra: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
     # Groups events from a single pipeline run so the UI can show just

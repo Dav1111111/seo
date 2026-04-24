@@ -22,5 +22,5 @@ class Issue(Base, TimestampMixin):
     evidence: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
     recommendation: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default="open", index=True)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolution_note: Mapped[str | None] = mapped_column(Text)

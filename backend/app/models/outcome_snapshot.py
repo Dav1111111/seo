@@ -7,7 +7,7 @@ actual impact instead of guessing.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import String, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -30,12 +30,16 @@ class OutcomeSnapshot(Base):
     source: Mapped[str] = mapped_column(String(32))  # 'priority' | 'opportunity'
     page_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
-    applied_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    applied_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+    )
     baseline_metrics: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
 
-    followup_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    followup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     followup_metrics: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
     delta: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
 
     note_ru: Mapped[str | None] = mapped_column(String(1000), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+    )

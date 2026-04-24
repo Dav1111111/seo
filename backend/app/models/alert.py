@@ -15,5 +15,5 @@ class Alert(Base, TimestampMixin):
     channel: Mapped[str] = mapped_column(String(20))   # telegram, email, dashboard
     alert_type: Mapped[str] = mapped_column(String(50)) # anomaly, daily_summary, weekly_report
     payload: Mapped[dict] = mapped_column(JSONB, default=lambda: {})
-    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
