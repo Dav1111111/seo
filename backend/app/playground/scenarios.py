@@ -21,7 +21,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Callable
 
-from app.collectors.yandex_serp import check_indexation, fetch_serp
+from app.collectors.yandex_serp import check_indexation, fetch_serp, _normalise_host
 from app.core_audit.competitors.discovery import EXCLUDED_DOMAIN_SUFFIXES
 
 
@@ -129,6 +129,9 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
             next_hint_ru=None,
         )
 
+    # check_indexation normalises internally and exposes the clean host
+    # via result.domain — use that for the preview we show the owner so
+    # they see exactly what hits Yandex, not what they pasted.
     result = check_indexation(domain, groups=50)
     pages_list = [
         {"position": p.position, "url": p.url, "title": p.title}
@@ -186,11 +189,10 @@ COMPETITORS_BY_QUERY_META = ScenarioMeta(
 
 
 def _normalise_domain(value: str) -> str:
-    v = (value or "").strip().lower()
-    for prefix in ("https://", "http://", "www."):
-        if v.startswith(prefix):
-            v = v[len(prefix):]
-    return v.rstrip("/")
+    """Thin wrapper so scenario code stays self-documenting; delegates
+    to the canonical `_normalise_host` helper so every entrypoint
+    treats owner input identically."""
+    return _normalise_host(value)
 
 
 def run_competitors_by_query(

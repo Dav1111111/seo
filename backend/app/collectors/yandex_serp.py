@@ -104,6 +104,30 @@ def _extract_domain(url: str) -> str:
     return host.lower().removeprefix("www.")
 
 
+def _normalise_host(raw: str) -> str:
+    """Turn whatever the user typed into a bare hostname.
+
+    Handles all the ways an owner can paste their own URL:
+      "grandtourspirit.ru"          -> "grandtourspirit.ru"
+      "www.grandtourspirit.ru"      -> "grandtourspirit.ru"
+      "https://www.grandtourspirit.ru/"       -> "grandtourspirit.ru"
+      "https://grandtourspirit.ru/abkhazia"   -> "grandtourspirit.ru"
+      "HTTPS://GRANDTOURSPIRIT.RU"  -> "grandtourspirit.ru"
+
+    Without this, a user pasting the full URL makes us send Yandex
+    `site:https://...` which returns zero hits every time — silent
+    bug that looked like "the site is not indexed".
+    """
+    s = (raw or "").strip().lower()
+    if not s:
+        return ""
+    # urlparse needs a scheme to populate `hostname` — fake one if missing
+    if not s.startswith(("http://", "https://")):
+        s = "https://" + s
+    host = urllib.parse.urlparse(s).hostname or ""
+    return host.removeprefix("www.").rstrip(".")
+
+
 def _build_async_request_body(query: str, region: str, groups: int) -> dict:
     return {
         "query": {
@@ -293,7 +317,7 @@ def check_indexation(
     index. Callers distinguish that from `error != None` (network/
     quota/misconfig) by checking `error`.
     """
-    clean_domain = domain.strip().lower().removeprefix("www.").rstrip("/")
+    clean_domain = _normalise_host(domain)
     if not clean_domain:
         return IndexationResult(domain=domain, pages_found=0, pages=[], error="empty_domain")
 
@@ -315,4 +339,10 @@ def check_indexation(
     )
 
 
-__all__ = ["SerpDoc", "fetch_serp", "IndexationResult", "check_indexation"]
+__all__ = [
+    "SerpDoc",
+    "fetch_serp",
+    "IndexationResult",
+    "check_indexation",
+    "_normalise_host",
+]

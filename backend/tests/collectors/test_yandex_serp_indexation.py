@@ -82,6 +82,32 @@ def test_normalises_domain_with_www_and_trailing_slash() -> None:
     assert query_arg == "site:example.ru"
 
 
+def test_strips_scheme_and_path_from_user_pasted_url() -> None:
+    """Owner pastes full URL from browser bar — we must still send
+    Yandex `site:bare-host`, not `site:https://...`.
+
+    The silent failure this test pins down: the old code stripped only
+    `www.` and trailing slash, so `https://www.x.ru/page` became
+    `https://www.x.ru/page` (www prefix doesn't match, starts with
+    https://). We sent `site:https://...` → Yandex returned 0 hits
+    every time → looked like "site not indexed". This regression must
+    not come back.
+    """
+    cases = {
+        "https://www.grandtourspirit.ru/": "site:grandtourspirit.ru",
+        "https://grandtourspirit.ru/abkhazia": "site:grandtourspirit.ru",
+        "http://example.ru": "site:example.ru",
+        "HTTPS://WWW.EXAMPLE.RU/Path?q=1": "site:example.ru",
+        "  grandtourspirit.ru  ": "site:grandtourspirit.ru",
+    }
+    for raw, expected in cases.items():
+        with patch("app.collectors.yandex_serp.fetch_serp", return_value=([], None)) as mock:
+            check_indexation(raw)
+        assert mock.call_args.args[0] == expected, (
+            f"input {raw!r} -> sent {mock.call_args.args[0]!r}, expected {expected!r}"
+        )
+
+
 def test_to_dict_is_json_serialisable() -> None:
     import json
 
