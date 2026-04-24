@@ -19,10 +19,29 @@ pause / re-run / jump at will without our backend caring.
 from __future__ import annotations
 
 import dataclasses
+import re
+import urllib.error
+import urllib.request
 from typing import Any, Callable
+from xml.etree import ElementTree as ET
 
 from app.collectors.yandex_serp import check_indexation, fetch_serp, _normalise_host
 from app.core_audit.competitors.discovery import EXCLUDED_DOMAIN_SUFFIXES
+
+
+# Threshold for "suspiciously low indexation" — below this we launch
+# diagnostic steps instead of calling the scenario done. A brand-new
+# site can genuinely have 1-2 pages and that's fine; but the owner
+# still benefits from the diagnostic being offered, so we treat <3
+# as the cut-off. Tune if we start seeing false positives.
+LOW_INDEX_THRESHOLD = 3
+
+# User-Agent Yandex actually sends. Using it on fetches reveals what
+# the bot sees — e.g. a React SPA that serves empty `<div id="root">`
+# to bots but full content to real browsers.
+YANDEX_BOT_UA = "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)"
+
+HTTP_TIMEOUT_SEC = 10.0
 
 
 # ── Protocol ──────────────────────────────────────────────────────────
@@ -86,8 +105,9 @@ INDEXATION_META = ScenarioMeta(
     title_ru="Проверить индексацию сайта",
     description_ru=(
         "Дёргаем Yandex Search API с запросом site:домен. "
-        "Видим, сколько страниц сайта реально в индексе Яндекса прямо сейчас — "
-        "независимо от Вебмастера."
+        "Если страниц в индексе подозрительно мало, можно продолжить — "
+        "сценарий сам найдёт причину: sitemap, robots.txt, рендеринг под "
+        "YandexBot, и даст конкретное действие."
     ),
     inputs=[
         ScenarioInput(
@@ -96,12 +116,363 @@ INDEXATION_META = ScenarioMeta(
             placeholder_ru="grandtourspirit.ru",
         ),
     ],
-    step_count=1,
+    step_count=4,   # up to 4 if diagnostic continues; 1 if not
 )
 
 
+# ── Diagnostic fetchers ───────────────────────────────────────────────
+# Small stdlib-only helpers so each step remains easy to read and debug.
+# Every failure mode returns a dataclass-ish dict the step function
+# renders — no exceptions bubble to the API layer.
+
+def _http_get(url: str, *, user_agent: str | None = None) -> dict:
+    """Generic GET that never raises.
+
+    Returns {status, body, content_type, error}. `body` capped at
+    200 KB so a surprise large page doesn't blow out memory.
+    """
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"User-Agent": user_agent or YANDEX_BOT_UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
+            raw = resp.read(200_000).decode("utf-8", errors="replace")
+            return {
+                "status": resp.getcode(),
+                "body": raw,
+                "content_type": resp.headers.get("Content-Type", ""),
+                "error": None,
+            }
+    except urllib.error.HTTPError as exc:
+        return {
+            "status": exc.code,
+            "body": "",
+            "content_type": "",
+            "error": f"http_{exc.code}",
+        }
+    except urllib.error.URLError as exc:
+        return {
+            "status": 0,
+            "body": "",
+            "content_type": "",
+            "error": f"network: {exc.reason}",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": 0,
+            "body": "",
+            "content_type": "",
+            "error": f"exception: {type(exc).__name__}",
+        }
+
+
+def _inspect_sitemap(domain: str) -> dict:
+    """Pull /sitemap.xml, count <loc> entries, sample the first few.
+
+    The sitemap being HTML (i.e. `<!DOCTYPE html>...`) is a classic
+    SPA symptom where the client-side router swallows static routes —
+    we flag this explicitly because it's the single most fixable
+    cause of "Yandex only sees my homepage".
+    """
+    url = f"https://{domain}/sitemap.xml"
+    res = _http_get(url)
+    if res["error"]:
+        return {"url": url, "status": res["status"], "error": res["error"]}
+
+    body = res["body"].strip()
+    content_type = res["content_type"].lower()
+    looks_html = body[:200].lower().lstrip().startswith(("<!doctype html", "<html"))
+
+    if looks_html or "text/html" in content_type:
+        return {
+            "url": url,
+            "status": res["status"],
+            "valid_xml": False,
+            "problem": "sitemap_returns_html",
+            "hint_ru": (
+                "Вместо XML сайт отдал HTML — скорее всего SPA-роутер "
+                "перехватывает путь. Яндекс не видит список страниц."
+            ),
+        }
+
+    urls_in_sitemap: list[str] = []
+    try:
+        root = ET.fromstring(body)
+        # Strip the XML namespace to make find() simpler
+        for loc in root.iter():
+            if loc.tag.endswith("}loc") or loc.tag == "loc":
+                if loc.text:
+                    urls_in_sitemap.append(loc.text.strip())
+    except ET.ParseError as exc:
+        return {
+            "url": url,
+            "status": res["status"],
+            "valid_xml": False,
+            "problem": "sitemap_xml_parse_error",
+            "parse_error": str(exc)[:120],
+        }
+
+    return {
+        "url": url,
+        "status": res["status"],
+        "valid_xml": True,
+        "urls_declared": len(urls_in_sitemap),
+        "sample": urls_in_sitemap[:10],
+    }
+
+
+def _inspect_robots(domain: str) -> dict:
+    """Fetch /robots.txt and call out bad patterns.
+
+    Worst case: a SPA returns the root HTML here too, which Yandex
+    interprets as "no rules" and may also treat as "weirdly misbehaving
+    server". We also flag any blanket Disallow on / since that would
+    block Yandex outright.
+    """
+    url = f"https://{domain}/robots.txt"
+    res = _http_get(url)
+    if res["error"]:
+        return {"url": url, "status": res["status"], "error": res["error"]}
+
+    body = res["body"]
+    content_type = res["content_type"].lower()
+
+    is_html = body[:200].lower().lstrip().startswith(("<!doctype html", "<html"))
+    if is_html or "text/html" in content_type:
+        return {
+            "url": url,
+            "status": res["status"],
+            "problem": "robots_returns_html",
+            "hint_ru": "SPA отдаёт HTML вместо robots.txt — Яндекс не знает правил обхода.",
+        }
+
+    # Find Yandex-relevant directives
+    blocks_all = False
+    sitemap_line = None
+    disallow_lines: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        lower = line.lower()
+        if lower.startswith("disallow:"):
+            path = line.split(":", 1)[1].strip()
+            disallow_lines.append(path)
+            if path == "/":
+                blocks_all = True
+        elif lower.startswith("sitemap:"):
+            sitemap_line = line.split(":", 1)[1].strip()
+
+    return {
+        "url": url,
+        "status": res["status"],
+        "problem": "blocks_all_root_path" if blocks_all else None,
+        "disallow_count": len(disallow_lines),
+        "disallow_sample": disallow_lines[:5],
+        "sitemap_referenced": bool(sitemap_line),
+        "sitemap_url": sitemap_line,
+    }
+
+
+def _inspect_homepage_rendering(domain: str) -> dict:
+    """Fetch the homepage as YandexBot and see if real content is there.
+
+    A React SPA without SSR serves `<div id="root"></div>` and all text
+    gets injected by JavaScript. Yandex's crawler runs JS but not
+    reliably — if the pre-JS body is empty, indexation suffers. We
+    check: <title> present, some visible text after stripping tags,
+    and the presence of a lone react root div.
+    """
+    url = f"https://{domain}/"
+    res = _http_get(url)
+    if res["error"]:
+        return {"url": url, "status": res["status"], "error": res["error"]}
+
+    html = res["body"]
+    # Crude but sufficient for diagnostic: title + body text length
+    title_match = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
+    title = title_match.group(1).strip() if title_match else ""
+
+    # Text visible to the bot = html minus all tags & scripts/styles
+    stripped = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+    stripped = re.sub(r"<[^>]+>", " ", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    text_len = len(stripped)
+
+    # SPA shell detection
+    spa_root_alone = bool(
+        re.search(
+            r'<body[^>]*>\s*<div id="root"[^>]*>\s*</div>\s*</body>',
+            html,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+    # Classify
+    if res["status"] != 200:
+        problem = f"http_{res['status']}"
+    elif spa_root_alone:
+        problem = "empty_spa_shell"
+    elif text_len < 200:
+        problem = "almost_no_text_in_html"
+    elif not title:
+        problem = "missing_title"
+    else:
+        problem = None
+
+    return {
+        "url": url,
+        "status": res["status"],
+        "title": title[:120],
+        "text_length": text_len,
+        "spa_root_only": spa_root_alone,
+        "problem": problem,
+    }
+
+
+def _synthesise_diagnosis(
+    pages_found: int,
+    sitemap_info: dict,
+    robots_info: dict,
+    homepage_info: dict,
+) -> dict:
+    """Rule-based classifier — picks ONE primary cause + next action.
+
+    Order of checks matters: we report the most likely single fix first
+    so the owner has a clear path. If everything downstream is fine and
+    only the count is low, we attribute to "Yandex slow to crawl, use
+    IndexNow" — our built-in solution.
+    """
+    # 1. Catastrophic technical problems come first
+    if homepage_info.get("status") and homepage_info["status"] >= 400:
+        return {
+            "verdict": "главная страница не отвечает",
+            "cause_ru": (
+                f"Главная возвращает HTTP {homepage_info['status']}. "
+                "Яндекс не может её проиндексировать, а без главной "
+                "не индексируются и остальные страницы."
+            ),
+            "action_ru": "Проверь сервер / деплой / nginx — сайт должен отвечать 200 на /.",
+            "severity": "critical",
+        }
+
+    if robots_info.get("problem") == "blocks_all_root_path":
+        return {
+            "verdict": "robots.txt блокирует весь сайт",
+            "cause_ru": "В robots.txt стоит `Disallow: /` — Яндексу запрещён обход всего сайта.",
+            "action_ru": "Убери `Disallow: /` из robots.txt (оставь запрет только на /admin, /login и т.п.).",
+            "severity": "critical",
+        }
+
+    if robots_info.get("problem") == "robots_returns_html":
+        return {
+            "verdict": "SPA перехватывает robots.txt",
+            "cause_ru": (
+                "Вместо robots.txt сайт отдаёт HTML-страницу — это симптом "
+                "SPA, которое заворачивает все пути на React-роутер. Яндекс "
+                "не может прочитать правила обхода."
+            ),
+            "action_ru": (
+                "Добавь в nginx правило location ~* \\.txt$ или "
+                "location = /robots.txt — чтобы отдавать файл как статику "
+                "до того как роутер его перехватит."
+            ),
+            "severity": "high",
+        }
+
+    if sitemap_info.get("problem") == "sitemap_returns_html":
+        return {
+            "verdict": "SPA перехватывает sitemap.xml",
+            "cause_ru": (
+                "Сайт отдаёт HTML вместо XML по /sitemap.xml. Яндекс не "
+                "видит список страниц сайта, поэтому не знает что индексировать."
+            ),
+            "action_ru": (
+                "В nginx добавь location = /sitemap.xml отдачу статического файла "
+                "до SPA-роутера."
+            ),
+            "severity": "high",
+        }
+
+    if homepage_info.get("problem") == "empty_spa_shell":
+        return {
+            "verdict": "пустой React-каркас для бота",
+            "cause_ru": (
+                "Главная отдаёт Яндекс-боту только <div id=\"root\"></div> — "
+                "контент появляется через JavaScript. Яндекс рендерит JS "
+                "нестабильно, поэтому индексирует плохо."
+            ),
+            "action_ru": (
+                "Нужен SSR (Next.js / Nuxt / Remix) ЛИБО nginx sub_filter на "
+                "ключевые мета-теги + видимый текст для каждой страницы. "
+                "Это большая работа — если не готов, хотя бы засунь title, "
+                "description, h1 и первый абзац в HTML до JS."
+            ),
+            "severity": "critical",
+        }
+
+    if homepage_info.get("problem") == "almost_no_text_in_html":
+        return {
+            "verdict": "в HTML почти нет текста",
+            "cause_ru": (
+                f"На главной всего {homepage_info.get('text_length', 0)} символов "
+                "текста в HTML. Яндексу нечего индексировать."
+            ),
+            "action_ru": "Напиши минимум пару абзацев реального текста на главной.",
+            "severity": "high",
+        }
+
+    # 2. No obvious technical problem — sitemap gap + slow crawl
+    declared = sitemap_info.get("urls_declared", 0)
+    if declared >= 5 and pages_found < declared // 2:
+        gap = declared - pages_found
+        return {
+            "verdict": f"Яндекс ещё не обошёл {gap} из {declared} страниц",
+            "cause_ru": (
+                f"Sitemap объявляет {declared} URL, а в индексе — {pages_found}. "
+                "Технических проблем не вижу: sitemap валидный, robots.txt в порядке, "
+                "HTML содержит реальный текст. Причина скорее всего в том, что "
+                "Яндекс медленно доходит до молодых сайтов без внешних ссылок."
+            ),
+            "action_ru": (
+                "Два способа ускорить: (1) открой webmaster.yandex.ru → «Переобход "
+                "страниц» → вставь URL из sitemap. (2) Подключи IndexNow на вкладке "
+                "«Индексация в Яндексе» на Обзоре — будет автоматически пинговать "
+                "Яндекс после каждого краулинга."
+            ),
+            "severity": "medium",
+        }
+
+    if declared == 0 and not sitemap_info.get("valid_xml"):
+        return {
+            "verdict": "нет валидного sitemap",
+            "cause_ru": "Sitemap не найден или невалидный — Яндекс не знает какие страницы обходить.",
+            "action_ru": "Сгенерируй sitemap.xml с полным списком страниц и положи в корень.",
+            "severity": "high",
+        }
+
+    # 3. All green — just a young site
+    return {
+        "verdict": "возможно нормальный старт",
+        "cause_ru": (
+            f"Технических проблем не нашёл: главная отдаёт текст, sitemap "
+            f"({declared} URL) валиден, robots.txt в порядке. "
+            f"В индексе {pages_found} — это может быть просто молодой сайт, "
+            "до которого Яндекс ещё не дошёл."
+        ),
+        "action_ru": (
+            "Подожди 2-4 недели и проверь снова. Ускорить можно через IndexNow "
+            "(кнопка на Обзоре) или ручной «Переобход» в Вебмастере."
+        ),
+        "severity": "low",
+    }
+
+
 def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResult:
-    domain = (inputs.get("domain") or "").strip()
+    raw = (inputs.get("domain") or "").strip()
+    domain = _normalise_host(raw)
     if not domain:
         return StepResult(
             step_index=0,
@@ -115,48 +486,180 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
             next_hint_ru=None,
         )
 
-    # Only one step in this scenario
-    if step_index != 0:
+    # ── Step 0 · site:domain in Yandex ───────────────────────────
+    if step_index == 0:
+        result = check_indexation(raw, groups=50)
+        pages_list = [
+            {"position": p.position, "url": p.url, "title": p.title}
+            for p in result.pages[:30]
+        ]
+        low = result.pages_found < LOW_INDEX_THRESHOLD and result.error is None
         return StepResult(
-            step_index=step_index,
-            step_title_ru="Всё",
-            step_description_ru="У этого сценария один шаг.",
+            step_index=0,
+            step_title_ru="Шаг 1 · Запрос site:домен в Яндекс",
+            step_description_ru=(
+                f"Спрашиваем Яндекс: покажи всё, что знаешь про {result.domain}. "
+                "Ответ — реальное состояние индекса на этот момент."
+            ),
+            request_shown={
+                "endpoint": "POST /v2/web/searchAsync (searchapi.api.cloud.yandex.net)",
+                "body_preview": {
+                    "query": {"queryText": f"site:{result.domain}"},
+                    "groupsOnPage": 50,
+                },
+            },
+            response_summary={
+                "pages_found": result.pages_found,
+                "pages": pages_list,
+            },
+            ok=result.error is None,
+            error=result.error,
+            next_available=low,
+            next_hint_ru=(
+                f"Всего {result.pages_found} в индексе — это подозрительно мало. "
+                "Запустим диагностику — проверим sitemap, robots.txt и рендеринг."
+            ) if low else None,
+        )
+
+    # ── Step 1 · sitemap.xml ─────────────────────────────────────
+    if step_index == 1:
+        info = _inspect_sitemap(domain)
+        ok = info.get("error") is None and info.get("problem") is None and info.get("valid_xml")
+        hint: str | None
+        if ok:
+            hint = (
+                f"Sitemap валидный, объявлено {info.get('urls_declared', 0)} URL. "
+                "Идём дальше — проверим robots.txt."
+            )
+        else:
+            hint = "Нашли проблему с sitemap. Всё равно продолжим — посмотрим robots.txt."
+        return StepResult(
+            step_index=1,
+            step_title_ru="Шаг 2 · Проверка sitemap.xml",
+            step_description_ru=(
+                "Яндекс узнаёт список страниц сайта из sitemap. "
+                "Проверяем: отдаётся ли XML-файл и сколько в нём URL."
+            ),
+            request_shown={
+                "endpoint": f"GET https://{domain}/sitemap.xml",
+                "body_preview": {"user_agent": YANDEX_BOT_UA},
+            },
+            response_summary=info,
+            ok=True,      # HTTP-level OK; "problem" is structured data, not an error
+            error=None,
+            next_available=True,
+            next_hint_ru=hint,
+        )
+
+    # ── Step 2 · robots.txt ──────────────────────────────────────
+    if step_index == 2:
+        info = _inspect_robots(domain)
+        ok = info.get("error") is None and info.get("problem") is None
+        hint = (
+            "robots.txt в порядке. Дальше посмотрим, что видит YandexBot на главной."
+            if ok
+            else "Проблема с robots.txt. Всё равно покажем рендеринг — для полной картины."
+        )
+        return StepResult(
+            step_index=2,
+            step_title_ru="Шаг 3 · Проверка robots.txt",
+            step_description_ru=(
+                "robots.txt говорит Яндексу что можно обходить, а что нельзя. "
+                "Проверяем: отдаётся ли текст и нет ли случайных Disallow."
+            ),
+            request_shown={
+                "endpoint": f"GET https://{domain}/robots.txt",
+                "body_preview": {"user_agent": YANDEX_BOT_UA},
+            },
+            response_summary=info,
+            ok=True,
+            error=None,
+            next_available=True,
+            next_hint_ru=hint,
+        )
+
+    # ── Step 3 · homepage rendering under YandexBot ─────────────
+    if step_index == 3:
+        info = _inspect_homepage_rendering(domain)
+        problem = info.get("problem")
+        hint = (
+            "Нашли проблему в рендеринге. Идём к финальному диагнозу."
+            if problem
+            else "Главная выглядит нормально для бота. Финальный диагноз соберём на следующем шаге."
+        )
+        return StepResult(
+            step_index=3,
+            step_title_ru="Шаг 4 · Что видит YandexBot на главной",
+            step_description_ru=(
+                "Открываем главную с User-Agent YandexBot. Смотрим: есть ли "
+                "title, сколько реального текста в HTML, не пустой ли SPA-каркас."
+            ),
+            request_shown={
+                "endpoint": f"GET https://{domain}/",
+                "body_preview": {"user_agent": YANDEX_BOT_UA},
+            },
+            response_summary=info,
+            ok=True,
+            error=None,
+            next_available=True,
+            next_hint_ru=hint,
+        )
+
+    # ── Step 4 · synthesis ──────────────────────────────────────
+    if step_index == 4:
+        # Read every prior step's response_summary
+        def _prior(i: int) -> dict:
+            return prior[i].get("response_summary", {}) if i < len(prior) else {}
+
+        serp = _prior(0)
+        sitemap_info = _prior(1)
+        robots_info = _prior(2)
+        homepage_info = _prior(3)
+
+        pages_found = int(serp.get("pages_found", 0))
+        diagnosis = _synthesise_diagnosis(
+            pages_found=pages_found,
+            sitemap_info=sitemap_info,
+            robots_info=robots_info,
+            homepage_info=homepage_info,
+        )
+
+        return StepResult(
+            step_index=4,
+            step_title_ru=f"Диагноз · {diagnosis['verdict']}",
+            step_description_ru=(
+                "Свели результаты трёх проверок в один вердикт. "
+                "Называем одну главную причину и одно конкретное действие — "
+                "чтобы не растекаться, а решать."
+            ),
             request_shown=None,
-            response_summary={},
+            response_summary={
+                "verdict": diagnosis["verdict"],
+                "severity": diagnosis["severity"],
+                "cause_ru": diagnosis["cause_ru"],
+                "action_ru": diagnosis["action_ru"],
+                "based_on": {
+                    "pages_indexed": pages_found,
+                    "sitemap_urls": sitemap_info.get("urls_declared"),
+                    "homepage_problem": homepage_info.get("problem"),
+                    "robots_problem": robots_info.get("problem"),
+                },
+            },
             ok=True,
             error=None,
             next_available=False,
             next_hint_ru=None,
         )
 
-    # check_indexation normalises internally and exposes the clean host
-    # via result.domain — use that for the preview we show the owner so
-    # they see exactly what hits Yandex, not what they pasted.
-    result = check_indexation(domain, groups=50)
-    pages_list = [
-        {"position": p.position, "url": p.url, "title": p.title}
-        for p in result.pages[:30]
-    ]
+    # Fallback
     return StepResult(
-        step_index=0,
-        step_title_ru="Запрос site:домен в Яндекс",
-        step_description_ru=(
-            f"Спрашиваем Яндекс: покажи всё, что знаешь про {result.domain}. "
-            "Ответ — реальное состояние индекса на этот момент."
-        ),
-        request_shown={
-            "endpoint": "POST /v2/web/searchAsync (searchapi.api.cloud.yandex.net)",
-            "body_preview": {
-                "query": {"queryText": f"site:{result.domain}"},
-                "groupsOnPage": 50,
-            },
-        },
-        response_summary={
-            "pages_found": result.pages_found,
-            "pages": pages_list,
-        },
-        ok=result.error is None,
-        error=result.error,
+        step_index=step_index,
+        step_title_ru="Шаг за пределами сценария",
+        step_description_ru="Попробуй начать заново.",
+        request_shown=None,
+        response_summary={},
+        ok=False,
+        error="step_out_of_range",
         next_available=False,
         next_hint_ru=None,
     )
