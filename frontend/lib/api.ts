@@ -443,6 +443,50 @@ export const api = {
       { method: "POST", base: "admin" },
     ),
 
+  // Connector status board — one place to see every external integration
+  // and its real (not assumed) state. Live checks hit real endpoints.
+  listConnectors: () =>
+    apiFetch<{
+      connectors: Array<{
+        id: string;
+        category: string;
+        name: string;
+        description_ru: string;
+        configured: boolean;
+        missing_setting: string | null;
+      }>;
+      count: number;
+    }>(`/health/connectors`),
+
+  testConnector: (id: string) =>
+    apiFetch<{
+      id: string;
+      name: string;
+      category: string;
+      ok: boolean;
+      latency_ms: number;
+      sample_data: Record<string, unknown> | null;
+      error: string | null;
+      checked_at: string;
+    }>(`/health/connectors/${id}/test`, { method: "POST" }),
+
+  testAllConnectors: () =>
+    apiFetch<{
+      results: Array<{
+        id: string;
+        name: string;
+        category: string;
+        ok: boolean;
+        latency_ms: number;
+        sample_data: Record<string, unknown> | null;
+        error: string | null;
+        checked_at: string;
+      }>;
+      total: number;
+      ok_count: number;
+      failing: string[];
+    }>(`/health/connectors/test-all`, { method: "POST" }),
+
   // BusinessTruth — 3-picture reconciliation of the site as a business.
   getBusinessTruth: (siteId: string) =>
     apiFetch<{

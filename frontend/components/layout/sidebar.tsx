@@ -11,6 +11,7 @@ import {
   Settings,
   TrendingUp,
   Swords,
+  Activity,
 } from "lucide-react";
 
 const nav = [
@@ -18,6 +19,7 @@ const nav = [
   { href: "/priorities",  label: "Приоритеты",  icon: Flame },
   { href: "/competitors", label: "Конкуренты",  icon: Swords },
   { href: "/reports",     label: "Отчёты",      icon: FileText },
+  { href: "/connectors",  label: "Коннекторы",  icon: Activity },
   { href: "/settings",    label: "Настройки",   icon: Settings },
 ];
 
