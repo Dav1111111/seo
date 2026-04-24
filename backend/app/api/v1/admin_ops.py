@@ -95,12 +95,7 @@ async def trigger_full_pipeline(
         "collect_site_webmaster": "webmaster",
         "demand_map_build_site": "demand_map",
     }
-    queued: list[str] = []
-    for task_name in task_to_stage:
-        celery_app.send_task(
-            task_name, args=[str(site_id)], kwargs={"run_id": run_id},
-        )
-        queued.append(task_to_stage[task_name])
+    queued: list[str] = list(task_to_stage.values())
 
     await log_event(
         db, site_id, "pipeline", "started",
@@ -109,6 +104,11 @@ async def trigger_full_pipeline(
         extra={"queued": queued, "run_id": run_id},
         run_id=run_id,
     )
+
+    for task_name in task_to_stage:
+        celery_app.send_task(
+            task_name, args=[str(site_id)], kwargs={"run_id": run_id},
+        )
 
     return {"status": "queued", "queued": queued, "run_id": run_id}
 

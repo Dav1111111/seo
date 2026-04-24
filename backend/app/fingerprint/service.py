@@ -71,9 +71,15 @@ class FingerprintService:
         if main_normalized_len < THIN_CONTENT_CHARS:
             # Still record a skipped_thin row so we know we looked at it
             await touch_last_fingerprinted(
-                db, inp.page_id,
+                db,
+                page_id=inp.page_id,
+                site_id=inp.site_id,
+                normalized_url=normalized_url,
+                content_hash="0" * 64,
                 status=FingerprintStatus.skipped_thin.value,
                 skip_reason=SkipReason.thin_content.value,
+                source_crawl_at=inp.last_crawled_at,
+                extraction_status=extraction_status.value,
             )
             return self._skipped_result(
                 inp, normalized_url, now,
@@ -99,9 +105,15 @@ class FingerprintService:
         if not should_recompute:
             # No rebuild — just bump timestamps
             await touch_last_fingerprinted(
-                db, inp.page_id,
+                db,
+                page_id=inp.page_id,
+                site_id=inp.site_id,
+                normalized_url=normalized_url,
+                content_hash=content_hash,
                 status=FingerprintStatus.skipped_unchanged.value,
                 skip_reason=SkipReason.unchanged_hash.value,
+                source_crawl_at=inp.last_crawled_at,
+                extraction_status=extraction_status.value,
             )
             return self._unchanged_result(
                 inp, normalized_url, now, existing, content_hash,

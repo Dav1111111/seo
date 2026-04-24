@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import { api } from "@/lib/api";
 import { useCurrentSiteId } from "@/lib/site-context";
@@ -15,6 +15,26 @@ import { RefreshCw, ListChecks, Inbox } from "lucide-react";
 const CATEGORIES = ["title", "description", "h1", "content", "eeat", "commercial", "internal_links", "structured_data", "ux"];
 const PRIORITIES = ["critical", "high", "medium", "low"];
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function isRunningStatus(status: string | undefined): boolean {
+  return status === "started" || status === "progress";
+}
+
+function timeAgo(iso: string | undefined): string {
+  if (!iso) return "только что";
+  const utcIso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+  const then = new Date(utcIso).getTime();
+  const sec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (sec < 60) return "только что";
+  if (sec < 3600) return `${Math.floor(sec / 60)} мин назад`;
+  if (sec < 86_400) return `${Math.floor(sec / 3600)} ч назад`;
+  return `${Math.floor(sec / 86_400)} д назад`;
+}
+
 export default function PrioritiesPage() {
   const siteId = useCurrentSiteId();
   const [tab, setTab] = useState<"plan" | "backlog">("plan");
@@ -24,10 +44,18 @@ export default function PrioritiesPage() {
   const [rescoring, setRescoring] = useState(false);
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
+  const activity = useSWR(
+    siteId ? `priorities-activity-${siteId}` : null,
+    () => api.getActivityByStage(siteId),
+    { refreshInterval: 5_000 },
+  );
+  const priorityStage = activity.data?.by_stage?.priorities;
+  const prioritiesRunning = isRunningStatus(priorityStage?.status);
+
   const plan = useSWR(
     siteId ? `plan-${siteId}` : null,
     () => api.weeklyPlan(siteId, 10, 2),
-    { refreshInterval: 0 },
+    { refreshInterval: prioritiesRunning ? 5_000 : 0 },
   );
 
   const backlogKey = siteId
@@ -41,17 +69,28 @@ export default function PrioritiesPage() {
       ...(filterCategory ? { category: filterCategory } : {}),
       include_dismissed: includeDismissed,
     }),
-    { refreshInterval: 0 },
+    { refreshInterval: prioritiesRunning ? 5_000 : 0 },
   );
+
+  useEffect(() => {
+    if (priorityStage?.status === "done") {
+      plan.mutate();
+      backlog.mutate();
+    }
+  }, [priorityStage?.id, priorityStage?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function onRescore() {
     if (!siteId) return;
     setRescoring(true); setBanner(null);
     try {
       await api.triggerRescore(siteId);
-      setBanner({ kind: "ok", msg: "Пересчёт приоритетов поставлен в очередь. Обновите через ~30 сек." });
-    } catch (e: any) {
-      setBanner({ kind: "err", msg: e?.message ?? String(e) });
+      await activity.mutate();
+      setBanner({
+        kind: "ok",
+        msg: "Пересчёт приоритетов поставлен в очередь. Страница обновится сама, когда scoring закончится.",
+      });
+    } catch (error: unknown) {
+      setBanner({ kind: "err", msg: getErrorMessage(error) });
     } finally {
       setRescoring(false);
     }
@@ -63,7 +102,10 @@ export default function PrioritiesPage() {
   }
 
   const planItems: PriorityItem[] = plan.data?.items ?? [];
-  const backlogItems: PriorityItem[] = backlog.data?.items ?? [];
+  const backlogItems: PriorityItem[] = useMemo(
+    () => backlog.data?.items ?? [],
+    [backlog.data?.items],
+  );
 
   const backlogStats = useMemo(() => {
     const byPriority: Record<string, number> = {};
@@ -88,9 +130,9 @@ export default function PrioritiesPage() {
           <Button size="sm" variant="outline" onClick={refresh}>
             <RefreshCw className="mr-2 h-4 w-4" /> Обновить
           </Button>
-          <Button size="sm" onClick={onRescore} disabled={rescoring || !siteId}>
-            <RefreshCw className={`mr-2 h-4 w-4 ${rescoring ? "animate-spin" : ""}`} />
-            {rescoring ? "Ставим в очередь…" : "Пересчитать"}
+          <Button size="sm" onClick={onRescore} disabled={rescoring || prioritiesRunning || !siteId}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${(rescoring || prioritiesRunning) ? "animate-spin" : ""}`} />
+            {rescoring ? "Ставим в очередь…" : prioritiesRunning ? "Пересчитываем…" : "Пересчитать"}
           </Button>
         </div>
       </div>
@@ -103,7 +145,25 @@ export default function PrioritiesPage() {
         </div>
       )}
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as any)}>
+      {priorityStage && (
+        <div className={`rounded border px-3 py-2 text-sm ${
+          prioritiesRunning
+            ? "border-primary/30 bg-primary/5 text-foreground"
+            : priorityStage.status === "failed"
+            ? "border-red-300 bg-red-50 text-red-900"
+            : "border-slate-300 bg-slate-50 text-slate-900"
+        }`}>
+          <span className="font-medium">Последний пересчёт:</span>{" "}
+          {priorityStage.message}
+          <span className="text-muted-foreground"> · {timeAgo(priorityStage.ts)}</span>
+        </div>
+      )}
+
+      <Tabs value={tab} onValueChange={(v) => {
+        if (v === "plan" || v === "backlog") {
+          setTab(v);
+        }
+      }}>
         <TabsList>
           <TabsTrigger value="plan">
             <ListChecks className="h-4 w-4 mr-2" /> План на неделю
@@ -236,7 +296,7 @@ function EmptyState({ label }: { label: string }) {
 function ErrorBox({ err }: { err: unknown }) {
   return (
     <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">
-      {String((err as any)?.message || err)}
+      {getErrorMessage(err)}
     </div>
   );
 }

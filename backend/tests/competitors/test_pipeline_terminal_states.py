@@ -14,7 +14,7 @@ import uuid
 
 from sqlalchemy import select
 
-from app.core_audit.activity import emit_terminal, log_event
+from app.core_audit.activity import emit_terminal, log_event, reconcile_open_pipelines
 from app.models.analysis_event import AnalysisEvent
 from app.models.site import Site
 
@@ -211,3 +211,74 @@ async def test_queued_pipeline_collapses_failure_status(db, test_site: Site):
     )
     pipe_end = await _events(db, test_site.id, stage="pipeline")
     assert [e.status for e in pipe_end] == ["started", "failed"]
+
+
+async def test_reconcile_open_pipelines_backfills_missing_terminal(db, test_site: Site):
+    """Historical race: queued stages finished before pipeline:started was
+    persisted, so no terminal got written. Reconcile should backfill it."""
+    run = uuid.uuid4()
+
+    await log_event(db, test_site.id, "crawl", "done", "15 pages", run_id=run)
+    await log_event(db, test_site.id, "webmaster", "done", "42 q", run_id=run)
+    await log_event(db, test_site.id, "demand_map", "done", "280 clusters", run_id=run)
+    await log_event(
+        db,
+        test_site.id,
+        "pipeline",
+        "started",
+        "trigger",
+        extra={"queued": ["crawl", "webmaster", "demand_map"]},
+        run_id=run,
+    )
+
+    repaired = await reconcile_open_pipelines(db, test_site.id)
+    assert repaired == 1
+
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started", "done"]
+    assert pipe[-1].ts >= pipe[0].ts
+
+
+async def test_reconcile_open_pipelines_skips_incomplete_run(db, test_site: Site):
+    run = uuid.uuid4()
+    await log_event(
+        db,
+        test_site.id,
+        "pipeline",
+        "started",
+        "trigger",
+        extra={"queued": ["crawl", "webmaster", "demand_map"]},
+        run_id=run,
+    )
+    await log_event(db, test_site.id, "crawl", "done", "15 pages", run_id=run)
+    await log_event(db, test_site.id, "webmaster", "done", "42 q", run_id=run)
+
+    repaired = await reconcile_open_pipelines(db, test_site.id)
+    assert repaired == 0
+
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started"]
+
+
+async def test_reconcile_open_pipelines_understands_legacy_stage_aliases(
+    db, test_site: Site,
+):
+    run = uuid.uuid4()
+    await log_event(db, test_site.id, "crawl", "done", "15 pages", run_id=run)
+    await log_event(db, test_site.id, "webmaster", "done", "42 q", run_id=run)
+    await log_event(db, test_site.id, "demand_map", "done", "280 clusters", run_id=run)
+    await log_event(
+        db,
+        test_site.id,
+        "pipeline",
+        "started",
+        "trigger",
+        extra={"queued": ["crawl", "webmaster", "demand_map_build"]},
+        run_id=run,
+    )
+
+    repaired = await reconcile_open_pipelines(db, test_site.id)
+    assert repaired == 1
+
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started", "done"]

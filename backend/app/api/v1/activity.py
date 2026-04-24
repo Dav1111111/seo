@@ -19,6 +19,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.core_audit.activity import reconcile_open_pipelines
 from app.models.analysis_event import AnalysisEvent
 
 router = APIRouter()
@@ -49,6 +50,7 @@ async def get_activity_feed(
     Owners open the dashboard and see "платформа собрала SERP… нашла 7
     конкурентов… готово, 15 точек роста" — proof the system is alive.
     """
+    await reconcile_open_pipelines(db, site_id)
     stmt = (
         select(AnalysisEvent)
         .where(AnalysisEvent.site_id == site_id)
@@ -66,6 +68,7 @@ async def get_last_per_stage(
 ) -> dict[str, Any]:
     """Return the most recent event per stage — drives "last updated X ago"
     badges on dashboard/competitors/reports pages."""
+    await reconcile_open_pipelines(db, site_id)
     # Fetch more than needed and dedupe per-stage in Python (avoids a
     # PG-specific DISTINCT ON when the set is small).
     stmt = (
@@ -98,6 +101,7 @@ async def get_current_run(
         from the last 5 minutes (standalone button click).
       - Empty feed → {"events": [], "run_id": None}.
     """
+    await reconcile_open_pipelines(db, site_id)
     newest = (await db.execute(
         select(AnalysisEvent)
         .where(AnalysisEvent.site_id == site_id)

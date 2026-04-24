@@ -45,20 +45,48 @@ async def upsert_fingerprint(db: AsyncSession, values: dict[str, Any]) -> None:
 
 
 async def touch_last_fingerprinted(
-    db: AsyncSession, page_id: UUID, status: str, skip_reason: str | None
+    db: AsyncSession,
+    *,
+    page_id: UUID,
+    site_id: UUID,
+    normalized_url: str,
+    content_hash: str,
+    status: str,
+    skip_reason: str | None,
+    source_crawl_at: datetime | None = None,
+    extraction_status: str = "ok",
+    content_language: str = "ru",
 ) -> None:
-    """When nothing changed, just bump timestamps + status."""
+    """When nothing changed, bump timestamps + status without violating
+    NOT NULL constraints on fresh INSERT paths.
+
+    PostgreSQL validates NOT NULL columns before ON CONFLICT kicks in, so
+    even a "touch" upsert must carry the required row shape.
+    """
     now = datetime.now(timezone.utc)
     stmt = pg_insert(PageFingerprint).values(
         page_id=page_id,
+        site_id=site_id,
+        normalized_url=normalized_url,
+        content_hash=content_hash,
+        extraction_status=extraction_status,
+        content_language=content_language,
+        source_crawl_at=source_crawl_at,
         last_fingerprinted_at=now,
         last_status_at=now,
+        created_at=now,
         updated_at=now,
         status=status,
         skip_reason=skip_reason,
     ).on_conflict_do_update(
         index_elements=["page_id"],
         set_={
+            "site_id": site_id,
+            "normalized_url": normalized_url,
+            "content_hash": content_hash,
+            "extraction_status": extraction_status,
+            "content_language": content_language,
+            "source_crawl_at": source_crawl_at,
             "last_fingerprinted_at": now,
             "last_status_at": now,
             "updated_at": now,

@@ -138,7 +138,13 @@ class WebmasterCollector(BaseCollector):
         end_date = today - timedelta(days=5)
         start_date = end_date - timedelta(days=max(days_back, 30) - 1)
 
-        stats = {"queries": 0, "metrics": 0, "indexing": 0}
+        stats = {
+            "queries": 0,
+            "metrics": 0,
+            "indexing": 0,
+            "window_start": start_date.isoformat(),
+            "window_end": end_date.isoformat(),
+        }
 
         # 1. Popular queries
         logger.info("Fetching popular queries %s → %s", start_date, end_date)
@@ -150,7 +156,11 @@ class WebmasterCollector(BaseCollector):
                 "Open Webmaster UI and load this host first.",
                 self.host_id,
             )
-            return {"status": "host_not_loaded", "host_id": self.host_id}
+            return {
+                "status": "host_not_loaded",
+                "host_id": self.host_id,
+                **stats,
+            }
         stats["queries"] = len(queries)
 
         for q in queries:

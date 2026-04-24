@@ -36,6 +36,54 @@ def _make_session():
     return async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
 
 
+def _format_webmaster_result(out: dict) -> tuple[str, dict, str]:
+    """Turn collector stats into a human-readable activity row.
+
+    Returns `(message, extra, terminal_status)`.
+    """
+    queries = int(out.get("queries", 0) or 0)
+    metrics = int(out.get("metrics", 0) or 0)
+    indexing = int(out.get("indexing", 0) or 0)
+    window_start = out.get("window_start")
+    window_end = out.get("window_end")
+    extra = {
+        "queries": queries,
+        "metrics": metrics,
+        "indexing": indexing,
+        "window_start": window_start,
+        "window_end": window_end,
+    }
+
+    if out.get("status") == "host_not_loaded":
+        return (
+            "Вебмастер: хост ещё не загружен в интерфейсе Яндекса. "
+            "Открой Webmaster UI и загрузите хост вручную.",
+            {**extra, "host_id": out.get("host_id")},
+            "skipped",
+        )
+
+    if queries == 0 and metrics == 0 and indexing == 0:
+        window = (
+            f"{window_start} → {window_end}"
+            if window_start and window_end
+            else "текущее окно сбора"
+        )
+        return (
+            f"Вебмастер: Яндекс не вернул новых данных за окно {window}.",
+            {**extra, "empty_window": True},
+            "done",
+        )
+
+    return (
+        (
+            f"Вебмастер: {queries} запросов, "
+            f"{metrics} замеров, {indexing} индекс-событий."
+        ),
+        extra,
+        "done",
+    )
+
+
 async def _collect_webmaster_for_site(site: dict) -> dict:
     """Collect Webmaster data for a single site."""
     collector = WebmasterCollector(
@@ -176,18 +224,10 @@ def collect_site_webmaster(site_id: str, run_id: str | None = None):
             finally:
                 await collector.close()
 
+            message, extra, terminal_status = _format_webmaster_result(out)
             await emit_terminal(
-                db, site_id, "webmaster", "done",
-                (
-                    f"Вебмастер: +{out.get('queries', 0)} запросов, "
-                    f"{out.get('metrics', 0)} замеров, "
-                    f"{out.get('indexing', 0)} индекс-событий."
-                ),
-                extra={
-                    "queries": out.get("queries", 0),
-                    "metrics": out.get("metrics", 0),
-                    "indexing": out.get("indexing", 0),
-                },
+                db, site_id, "webmaster", terminal_status, message,
+                extra=extra,
                 run_id=run_id,
             )
             return out
