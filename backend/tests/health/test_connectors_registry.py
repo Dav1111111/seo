@@ -135,12 +135,12 @@ def test_checkresult_serialises_to_json() -> None:
     assert "T" in round_tripped["checked_at"]
 
 
-def test_wordstat_endpoints_all_have_folder_id_dependency() -> None:
+def test_wordstat_endpoints_all_require_search_api_key() -> None:
     """Wordstat API refuses requests without folderId — ensure every
-    Wordstat check declares Search API key requirement (which implies
-    the folder too). Catches a future regression where someone adds a
-    new wordstat endpoint but forgets `requires`."""
+    Wordstat check declares the Cloud Search API key requirement.
+    Catches a future regression where someone adds a new wordstat
+    endpoint but forgets `requires`."""
     wordstat = [c for c in CONNECTORS if c.id.startswith("yandex_cloud.wordstat.")]
-    assert len(wordstat) >= 3, "expected ≥3 wordstat endpoints in registry"
+    assert wordstat, "expected at least one wordstat endpoint in registry"
     for c in wordstat:
         assert "YANDEX_SEARCH_API_KEY" in c.requires

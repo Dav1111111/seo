@@ -117,10 +117,11 @@ def _requires_missing(keys: tuple[str, ...]) -> str | None:
 def _check_postgres() -> CheckResult:
     def body():
         import psycopg  # psycopg3 — already a dep for Alembic
-        # Derive sync URL from async if only async is set.
-        url = settings.DATABASE_URL_SYNC or settings.DATABASE_URL.replace(
-            "+asyncpg", "",
-        )
+        # SQLAlchemy uses dialect prefixes like "postgresql+psycopg://"
+        # and "postgresql+asyncpg://". psycopg.connect() wants the raw
+        # libpq form, so strip any dialect suffix.
+        raw = settings.DATABASE_URL_SYNC or settings.DATABASE_URL
+        url = raw.replace("+asyncpg", "").replace("+psycopg", "")
         conn = psycopg.connect(url, connect_timeout=3)
         try:
             cur = conn.cursor()
@@ -261,17 +262,30 @@ def _check_yc_search_api() -> CheckResult:
 
 
 def _check_yc_wordstat_dynamics() -> CheckResult:
+    """The only stable wordstat endpoint as of 2026-04-24.
+
+    `/regions` returns 400 with opaque enum errors on the `region`
+    field — the valid values are not documented and vary by time
+    (tested REGION_RUSSIA / COUNTRY / ALL_REGIONS etc — all rejected
+    today, some accepted yesterday). `/queries` 404s on the same
+    base path for the same body.
+
+    If you need regional distribution: use this dynamics endpoint
+    with a phrase and extract monthly counts. Aggregate by region on
+    our side from per-region calls instead of trusting the broken
+    `/regions` summariser.
+    """
     def body():
         folder = settings.YANDEX_CLOUD_FOLDER_ID
+        # 12 months back — enough history to prove seasonality works,
+        # short enough that the request stays fast.
         from_date = (
-            (datetime.now(timezone.utc).replace(day=1) - timedelta(days=180))
-            .replace(day=1)
-            .strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
+            datetime.now(timezone.utc).replace(day=1) - timedelta(days=365)
+        ).replace(day=1).strftime("%Y-%m-%dT%H:%M:%SZ")
         code, data, err = _yc_post(
             "/v2/wordstat/dynamics",
             {
-                "phrase": "погода",   # reliably has >0 count
+                "phrase": "купить квартиру",   # reliably has high count
                 "folderId": folder,
                 "region": "REGION_RUSSIA",
                 "devices": ["DEVICE_ALL"],
@@ -282,63 +296,19 @@ def _check_yc_wordstat_dynamics() -> CheckResult:
         if err:
             return False, None, err
         items = (data or {}).get("items", [])
-        non_empty = [x for x in items if "count" in x]
+        non_empty = [x for x in items if "count" in x and x.get("count")]
         if not non_empty:
-            return False, {"items": len(items)}, "no_data_in_response"
+            return False, {
+                "months_returned": len(items),
+                "hint": "empty_count_data",
+            }, "wordstat_returned_empty_counts"
         latest = non_empty[-1]
         return True, {
+            "phrase": "купить квартиру",
             "months_returned": len(items),
+            "months_with_data": len(non_empty),
             "latest_month": latest.get("date"),
             "latest_count": int(latest.get("count", 0)),
-        }, None
-
-    return _timed(body)
-
-
-def _check_yc_wordstat_regions() -> CheckResult:
-    def body():
-        folder = settings.YANDEX_CLOUD_FOLDER_ID
-        code, data, err = _yc_post(
-            "/v2/wordstat/regions",
-            {
-                "phrase": "погода",
-                "folderId": folder,
-                "region": "REGION_RUSSIA",
-                "devices": ["DEVICE_ALL"],
-            },
-        )
-        if err:
-            return False, None, err
-        items = (data or {}).get("items", [])
-        if not items:
-            return False, {"regions": 0}, "no_regions_returned"
-        return True, {
-            "regions_count": len(items),
-            "top_region_id": items[0].get("region"),
-        }, None
-
-    return _timed(body)
-
-
-def _check_yc_wordstat_queries() -> CheckResult:
-    def body():
-        folder = settings.YANDEX_CLOUD_FOLDER_ID
-        code, data, err = _yc_post(
-            "/v2/wordstat/queries",
-            {
-                "phrase": "погода",
-                "folderId": folder,
-                "region": "REGION_RUSSIA",
-                "devices": ["DEVICE_ALL"],
-            },
-        )
-        if err:
-            return False, None, err
-        # Response shape: {"items": [{"phrase": "...", "count": "..."}...]}
-        items = (data or {}).get("items", [])
-        return True, {
-            "related_phrases": len(items),
-            "sample": (items[0].get("phrase") if items else None),
         }, None
 
     return _timed(body)
@@ -560,24 +530,8 @@ CONNECTORS: list[Connector] = [
         id="yandex_cloud.wordstat.dynamics",
         category="yandex_cloud",
         name="Wordstat · Динамика",
-        description_ru="Частотность запроса по месяцам — даёт реальные объёмы и сезонность.",
+        description_ru="Частотность запроса по месяцам — реальные объёмы и сезонность. Единственный стабильный Wordstat endpoint; /regions и /queries пока не добавлены из-за нестабильного поведения Яндекс API.",
         check=_check_yc_wordstat_dynamics,
-        requires=("YANDEX_SEARCH_API_KEY",),
-    ),
-    Connector(
-        id="yandex_cloud.wordstat.regions",
-        category="yandex_cloud",
-        name="Wordstat · Регионы",
-        description_ru="Распределение запроса по регионам России — куда реально ищут.",
-        check=_check_yc_wordstat_regions,
-        requires=("YANDEX_SEARCH_API_KEY",),
-    ),
-    Connector(
-        id="yandex_cloud.wordstat.queries",
-        category="yandex_cloud",
-        name="Wordstat · Похожие запросы",
-        description_ru="Связанные / уточняющие запросы — для расширения семантики.",
-        check=_check_yc_wordstat_queries,
         requires=("YANDEX_SEARCH_API_KEY",),
     ),
 
