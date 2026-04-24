@@ -12,6 +12,7 @@ import {
   TrendingUp,
   Swords,
   Activity,
+  FlaskConical,
 } from "lucide-react";
 
 const nav = [
@@ -20,6 +21,7 @@ const nav = [
   { href: "/competitors", label: "Конкуренты",  icon: Swords },
   { href: "/reports",     label: "Отчёты",      icon: FileText },
   { href: "/connectors",  label: "Коннекторы",  icon: Activity },
+  { href: "/playground",  label: "Playground",  icon: FlaskConical },
   { href: "/settings",    label: "Настройки",   icon: Settings },
 ];
 

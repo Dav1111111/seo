@@ -470,6 +470,50 @@ export const api = {
       checked_at: string;
     }>(`/health/connectors/${id}/test`, { method: "POST" }),
 
+  // Playground — step-by-step scenarios. Each step returns a preview
+  // of the real request sent to the external API + a summary of the
+  // response, so the owner sees exactly what's happening rather than
+  // reading pipeline logs.
+  listPlaygroundScenarios: () =>
+    apiFetch<{
+      scenarios: Array<{
+        id: string;
+        title_ru: string;
+        description_ru: string;
+        inputs: Array<{
+          key: string;
+          label_ru: string;
+          placeholder_ru: string;
+          required: boolean;
+        }>;
+        step_count: number;
+      }>;
+    }>(`/playground/scenarios`),
+
+  runPlaygroundStep: (body: {
+    scenario_id: string;
+    step_index: number;
+    inputs: Record<string, string>;
+    prior: Array<Record<string, unknown>>;
+  }) =>
+    apiFetch<{
+      step_index: number;
+      step_title_ru: string;
+      step_description_ru: string;
+      request_shown: {
+        endpoint?: string;
+        body_preview?: Record<string, unknown>;
+      } | null;
+      response_summary: Record<string, unknown>;
+      ok: boolean;
+      error: string | null;
+      next_available: boolean;
+      next_hint_ru: string | null;
+    }>(`/playground/run`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   testAllConnectors: () =>
     apiFetch<{
       results: Array<{
