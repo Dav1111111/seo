@@ -53,7 +53,22 @@ type StepResult = {
   error: string | null;
   next_available: boolean;
   next_hint_ru: string | null;
+  human_summary_ru: string | null;
+  human_summary_level: string;
 };
+
+function humanSummaryClasses(level: string): string {
+  switch (level) {
+    case "good":
+      return "border-emerald-300 bg-emerald-50 text-emerald-900";
+    case "warning":
+      return "border-amber-300 bg-amber-50 text-amber-900";
+    case "bad":
+      return "border-red-300 bg-red-50 text-red-900";
+    default:
+      return "border-primary/40 bg-primary/5 text-foreground";
+  }
+}
 
 function JsonBlock({ value }: { value: unknown }) {
   let text: string;
@@ -286,6 +301,20 @@ export default function PlaygroundPage() {
             {step.error && (
               <div className="rounded border border-red-300 bg-red-50 text-red-900 px-3 py-2 text-xs">
                 {step.error}
+              </div>
+            )}
+
+            {step.human_summary_ru && (
+              <div
+                className={cn(
+                  "rounded border-l-4 px-4 py-3 text-sm whitespace-pre-line",
+                  humanSummaryClasses(step.human_summary_level),
+                )}
+              >
+                <div className="text-[11px] uppercase tracking-wide opacity-70 mb-1">
+                  Что это значит
+                </div>
+                {step.human_summary_ru}
               </div>
             )}
 

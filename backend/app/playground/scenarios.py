@@ -83,6 +83,12 @@ class StepResult:
     owner can see the exact query we send — not a paraphrase. Similarly
     `response_summary` is the DATA they care about, trimmed so the UI
     doesn't crash on a 50 KB JSON.
+
+    `human_summary_ru` is the plain-Russian interpretation of the data
+    — what it means, is it good or bad, why it matters. Rendered
+    prominently in the UI *above* the raw JSON so the owner doesn't
+    have to read field names to understand the result. Optional —
+    simple steps that just show data may leave it None.
     """
     step_index: int
     step_title_ru: str
@@ -93,6 +99,11 @@ class StepResult:
     error: str | None
     next_available: bool
     next_hint_ru: str | None
+    human_summary_ru: str | None = None
+    # Marks the severity of human_summary_ru so the UI can colour
+    # the callout: "info" | "good" | "warning" | "bad". Green for
+    # "это в порядке", amber for soft issues, red for blockers.
+    human_summary_level: str = "info"
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -332,6 +343,155 @@ def _inspect_homepage_rendering(domain: str) -> dict:
     }
 
 
+def _explain_serp(domain: str, pages_found: int, error: str | None) -> tuple[str, str]:
+    """Human explanation of step 1 — what the site: query told us."""
+    if error:
+        return (
+            f"Search API вернул ошибку: {error}. Не получилось спросить Яндекс.",
+            "bad",
+        )
+    if pages_found == 0:
+        return (
+            f"По запросу site:{domain} Яндекс не нашёл ни одной страницы. "
+            "Сайт фактически невидим в поиске — владелец сейчас не получает "
+            "органический трафик из Яндекса вообще.",
+            "bad",
+        )
+    if pages_found < LOW_INDEX_THRESHOLD:
+        return (
+            f"В индексе всего {pages_found} страниц. У живого сайта обычно "
+            "хотя бы 5-10 — это мало. Ниже пошагово разберёмся почему.",
+            "warning",
+        )
+    return (
+        f"В индексе {pages_found} страниц. Для обычного сайта это нормальный "
+        "уровень — Яндекс видит ресурс и показывает его в поиске.",
+        "good",
+    )
+
+
+def _explain_sitemap(info: dict) -> tuple[str, str]:
+    if info.get("error"):
+        return (
+            f"Не удалось получить sitemap: {info['error']}. Значит либо файла "
+            "нет по стандартному пути, либо сервер не отвечает. Яндекс тоже не "
+            "может его забрать — это почти всегда проблема для индексации.",
+            "bad",
+        )
+    if info.get("problem") == "sitemap_returns_html":
+        return (
+            "Вместо XML по пути /sitemap.xml сайт отдаёт HTML-страницу. Это "
+            "значит, что SPA-роутер (React / Vue / и т.п.) перехватывает этот "
+            "путь и возвращает главную вместо настоящего файла. Яндекс не может "
+            "прочитать список страниц — и поэтому не знает, что ещё индексировать.",
+            "bad",
+        )
+    if info.get("problem") == "sitemap_xml_parse_error":
+        return (
+            f"Sitemap отдаётся, но XML невалиден: {info.get('parse_error')}. "
+            "Яндекс отклоняет такие файлы — фактически сайт без sitemap.",
+            "bad",
+        )
+    declared = info.get("urls_declared", 0)
+    if declared == 0:
+        return (
+            "Sitemap валидный по формату, но в нём 0 URL. Пустой sitemap = его "
+            "нет с точки зрения Яндекса. Нужно заполнить его реальными URL сайта.",
+            "bad",
+        )
+    if declared < 5:
+        return (
+            f"Sitemap валидный, но в нём всего {declared} URL. Маловато — "
+            "если на сайте больше страниц, они просто не попадают в sitemap "
+            "и, как следствие, не приоритетны для обхода Яндексом.",
+            "warning",
+        )
+    return (
+        f"Sitemap валидный, заявлено {declared} URL. Яндекс видит список страниц "
+        "и знает, куда идти. Это правильно.",
+        "good",
+    )
+
+
+def _explain_robots(info: dict) -> tuple[str, str]:
+    if info.get("error"):
+        return (
+            f"Не удалось получить robots.txt: {info['error']}. Это не критично "
+            "(по умолчанию Яндекс индексирует всё), но странно для продакшена.",
+            "warning",
+        )
+    if info.get("problem") == "blocks_all_root_path":
+        return (
+            "В robots.txt стоит `Disallow: /` — это запрещает Яндексу обходить "
+            "ВЕСЬ сайт. Критическая ошибка: пока это правило действует, "
+            "никакой индексации не будет, сколько бы sitemap'ов ты ни пинговал.",
+            "bad",
+        )
+    if info.get("problem") == "robots_returns_html":
+        return (
+            "По пути /robots.txt сайт отдаёт HTML-страницу вместо текстового "
+            "файла. Тот же симптом SPA-роутера, что с sitemap: Яндекс получает "
+            "не правила обхода, а главную страницу. По факту сайт для Яндекса "
+            "без robots.txt — это не блокирует индексацию, но ломает ему картину.",
+            "warning",
+        )
+    disallow = info.get("disallow_count", 0)
+    sitemap_ref = info.get("sitemap_referenced", False)
+    parts = [f"robots.txt в порядке. Отключающих правил: {disallow}"]
+    if sitemap_ref:
+        parts.append("ссылка на sitemap указана — Яндекс найдёт карту быстрее")
+    else:
+        parts.append("ссылка на sitemap не указана (не критично, но хорошо бы добавить)")
+    return (". ".join(parts) + ".", "good" if sitemap_ref else "warning")
+
+
+def _explain_rendering(info: dict) -> tuple[str, str]:
+    if info.get("error"):
+        return (
+            f"Главная не отвечает: {info['error']}. Пока это не починится, "
+            "Яндекс не сможет её проиндексировать.",
+            "bad",
+        )
+    status = info.get("status", 0)
+    if status and status >= 400:
+        return (
+            f"Главная возвращает HTTP {status} вместо 200. Для Яндекса это "
+            "значит «страница битая» — индексации не будет, пока не починишь сервер.",
+            "bad",
+        )
+    problem = info.get("problem")
+    if problem == "empty_spa_shell":
+        return (
+            "YandexBot видит только пустой React-каркас: `<div id=\"root\"></div>` "
+            "и всё. Контент появляется после выполнения JavaScript, а Яндекс "
+            "рендерит JS очень нестабильно. Это классическая причина слабой "
+            "индексации SPA-сайтов — его нужно либо SSR'ить (Next.js), либо "
+            "прокидывать важные мета-теги и текст через nginx до JS.",
+            "bad",
+        )
+    if problem == "almost_no_text_in_html":
+        return (
+            f"На главной всего {info.get('text_length', 0)} символов видимого "
+            "текста в HTML (без тегов). Этого мало — Яндексу буквально нечего "
+            "индексировать. Либо контент рендерится JS, либо страница действительно "
+            "пустая.",
+            "bad",
+        )
+    if problem == "missing_title":
+        return (
+            "На главной нет тега <title>. Яндекс не знает, как назвать страницу "
+            "в выдаче — она может попасть в индекс, но будет выглядеть плохо.",
+            "warning",
+        )
+    title = info.get("title", "")
+    text_len = info.get("text_length", 0)
+    return (
+        f"YandexBot видит title «{title}» и {text_len} символов текста в HTML. "
+        "Всё в порядке — бот получает реальный контент, а не пустой каркас.",
+        "good",
+    )
+
+
 def _synthesise_diagnosis(
     pages_found: int,
     sitemap_info: dict,
@@ -494,6 +654,7 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
             for p in result.pages[:30]
         ]
         low = result.pages_found < LOW_INDEX_THRESHOLD and result.error is None
+        summary, level = _explain_serp(result.domain, result.pages_found, result.error)
         return StepResult(
             step_index=0,
             step_title_ru="Шаг 1 · Запрос site:домен в Яндекс",
@@ -519,20 +680,21 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
                 f"Всего {result.pages_found} в индексе — это подозрительно мало. "
                 "Запустим диагностику — проверим sitemap, robots.txt и рендеринг."
             ) if low else None,
+            human_summary_ru=summary,
+            human_summary_level=level,
         )
 
     # ── Step 1 · sitemap.xml ─────────────────────────────────────
     if step_index == 1:
         info = _inspect_sitemap(domain)
+        summary, level = _explain_sitemap(info)
         ok = info.get("error") is None and info.get("problem") is None and info.get("valid_xml")
-        hint: str | None
-        if ok:
-            hint = (
-                f"Sitemap валидный, объявлено {info.get('urls_declared', 0)} URL. "
-                "Идём дальше — проверим robots.txt."
-            )
-        else:
-            hint = "Нашли проблему с sitemap. Всё равно продолжим — посмотрим robots.txt."
+        hint = (
+            f"Sitemap валидный, объявлено {info.get('urls_declared', 0)} URL. "
+            "Идём дальше — проверим robots.txt."
+            if ok
+            else "Нашли проблему с sitemap. Всё равно продолжим — посмотрим robots.txt."
+        )
         return StepResult(
             step_index=1,
             step_title_ru="Шаг 2 · Проверка sitemap.xml",
@@ -545,15 +707,18 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
                 "body_preview": {"user_agent": YANDEX_BOT_UA},
             },
             response_summary=info,
-            ok=True,      # HTTP-level OK; "problem" is structured data, not an error
+            ok=True,
             error=None,
             next_available=True,
             next_hint_ru=hint,
+            human_summary_ru=summary,
+            human_summary_level=level,
         )
 
     # ── Step 2 · robots.txt ──────────────────────────────────────
     if step_index == 2:
         info = _inspect_robots(domain)
+        summary, level = _explain_robots(info)
         ok = info.get("error") is None and info.get("problem") is None
         hint = (
             "robots.txt в порядке. Дальше посмотрим, что видит YandexBot на главной."
@@ -576,11 +741,14 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
             error=None,
             next_available=True,
             next_hint_ru=hint,
+            human_summary_ru=summary,
+            human_summary_level=level,
         )
 
     # ── Step 3 · homepage rendering under YandexBot ─────────────
     if step_index == 3:
         info = _inspect_homepage_rendering(domain)
+        summary, level = _explain_rendering(info)
         problem = info.get("problem")
         hint = (
             "Нашли проблему в рендеринге. Идём к финальному диагнозу."
@@ -603,6 +771,8 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
             error=None,
             next_available=True,
             next_hint_ru=hint,
+            human_summary_ru=summary,
+            human_summary_level=level,
         )
 
     # ── Step 4 · synthesis ──────────────────────────────────────
@@ -623,6 +793,20 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
             robots_info=robots_info,
             homepage_info=homepage_info,
         )
+
+        # Glue it all into one continuous Russian narrative so the
+        # owner doesn't have to scroll through JSON — they read one
+        # paragraph and know what happened + what to do.
+        summary_text = (
+            f"ПРИЧИНА. {diagnosis['cause_ru']}\n\n"
+            f"ЧТО ДЕЛАТЬ. {diagnosis['action_ru']}"
+        )
+        severity_level = {
+            "critical": "bad",
+            "high": "bad",
+            "medium": "warning",
+            "low": "good",
+        }.get(diagnosis["severity"], "info")
 
         return StepResult(
             step_index=4,
@@ -649,6 +833,8 @@ def run_indexation(step_index: int, inputs: dict, prior: list[dict]) -> StepResu
             error=None,
             next_available=False,
             next_hint_ru=None,
+            human_summary_ru=summary_text,
+            human_summary_level=severity_level,
         )
 
     # Fallback
@@ -728,6 +914,22 @@ def run_competitors_by_query(
             }
             for d in docs
         ]
+        if err:
+            summary = f"Search API вернул ошибку: {err}. Не получилось спросить Яндекс."
+            level = "bad"
+        elif not raw:
+            summary = (
+                f"По запросу «{query}» Яндекс ничего не вернул. Либо запрос "
+                "слишком редкий, либо Search API в данный момент дал пустоту."
+            )
+            level = "warning"
+        else:
+            summary = (
+                f"Яндекс показал по запросу «{query}» топ-{len(raw)} результатов. "
+                "Это сырая выдача — там есть и твои конкуренты, и маркетплейсы, "
+                "и агрегаторы. На следующем шаге отделим первых от остальных."
+            )
+            level = "info"
         return StepResult(
             step_index=0,
             step_title_ru="Шаг 1/3 · Запрос в Яндекс Поиск",
@@ -753,6 +955,8 @@ def run_competitors_by_query(
             next_hint_ru="Дальше отфильтруем маркетплейсы и твой собственный домен."
             if err is None and raw
             else None,
+            human_summary_ru=summary,
+            human_summary_level=level,
         )
 
     # ── Step 1: filter blacklist + own domain ──────────────────────
@@ -777,6 +981,30 @@ def run_competitors_by_query(
                 dropped.append({**row, "reason": "маркетплейс / соцсеть / агрегатор"})
                 continue
             kept.append(row)
+        if kept and dropped:
+            fsummary = (
+                f"Из {len(kept) + len(dropped)} результатов оставили {len(kept)} "
+                f"реальных конкурентов, выкинули {len(dropped)} (маркетплейсы, "
+                "соцсети, твой собственный сайт). По-настоящему с тобой "
+                f"сражаются за этот запрос именно эти {len(kept)} сайтов."
+            )
+            flevel = "good"
+        elif kept:
+            fsummary = (
+                f"Все {len(kept)} результатов — реальные конкуренты. В выдаче "
+                "нет ни маркетплейсов, ни твоего сайта — значит фильтровать "
+                "нечего, но и в топе ты тоже не стоишь."
+            )
+            flevel = "info"
+        else:
+            fsummary = (
+                f"После фильтра не осталось ни одного конкурента — все {len(dropped)} "
+                "доменов из выдачи это маркетплейсы / соцсети / агрегаторы. "
+                "Значит по этому запросу реальные бизнесы типа твоего в топ-10 "
+                "не попадают — либо нужно брать другой запрос, либо реально "
+                "конкуренция идёт против площадок, а не живых сайтов."
+            )
+            flevel = "warning"
         return StepResult(
             step_index=1,
             step_title_ru="Шаг 2/3 · Фильтр — убираем мусор",
@@ -799,6 +1027,8 @@ def run_competitors_by_query(
             next_hint_ru=f"Осталось {len(kept)} реальных конкурентов. Покажем их с позициями."
             if kept
             else "Все результаты были мусором — это значит по этому запросу все конкуренты — маркетплейсы/агрегаторы. Попробуй другой запрос.",
+            human_summary_ru=fsummary,
+            human_summary_level=flevel,
         )
 
     # ── Step 2: final list with positions ──────────────────────────
@@ -806,6 +1036,21 @@ def run_competitors_by_query(
         kept = prior[1].get("response_summary", {}).get("kept", []) if len(prior) >= 2 else []
         # For single-query case, position IS the ranking. Just sort.
         sorted_rows = sorted(kept, key=lambda r: r.get("position", 99))
+        if sorted_rows:
+            top_domains = ", ".join(r.get("domain", "") for r in sorted_rows[:3])
+            fsummary = (
+                f"Твои реальные конкуренты по «{query}»: {top_domains}"
+                + (" и ещё " + str(len(sorted_rows) - 3) if len(sorted_rows) > 3 else "")
+                + ". Именно они показываются Яндексу по этому запросу — их страницы "
+                "стоит разобрать подробнее, чтобы понять, чем они цепляют выдачу."
+            )
+            flevel = "info"
+        else:
+            fsummary = (
+                "Финальный список пустой — после фильтра ничего не осталось. "
+                "См. комментарий к предыдущему шагу."
+            )
+            flevel = "warning"
         return StepResult(
             step_index=2,
             step_title_ru=f"Шаг 3/3 · Твои конкуренты по запросу «{query}»",
@@ -824,6 +1069,8 @@ def run_competitors_by_query(
             error=None,
             next_available=False,
             next_hint_ru="Сценарий закончен. Можешь попробовать другой запрос.",
+            human_summary_ru=fsummary,
+            human_summary_level=flevel,
         )
 
     # Fallback

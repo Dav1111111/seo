@@ -509,6 +509,8 @@ export const api = {
       error: string | null;
       next_available: boolean;
       next_hint_ru: string | null;
+      human_summary_ru: string | null;
+      human_summary_level: string;
     }>(`/playground/run`, {
       method: "POST",
       body: JSON.stringify(body),
