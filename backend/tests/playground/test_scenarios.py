@@ -66,6 +66,9 @@ def test_indexation_requires_domain() -> None:
 
 
 def test_indexation_returns_pages_on_success() -> None:
+    """Successful SERP call with 2 pages: both pages surface in the
+    response, and since 2 < LOW_INDEX_THRESHOLD the scenario offers
+    to continue with diagnostics — that's the intended path now."""
     with patch("app.playground.scenarios.check_indexation") as mock:
         from app.collectors.yandex_serp import IndexationResult
         mock.return_value = IndexationResult(
@@ -78,7 +81,8 @@ def test_indexation_returns_pages_on_success() -> None:
     assert r.ok is True
     assert r.response_summary["pages_found"] == 2
     assert len(r.response_summary["pages"]) == 2
-    assert r.next_available is False
+    # 2 pages is below LOW_INDEX_THRESHOLD (=3) so diagnostics are offered
+    assert r.next_available is True
 
 
 # ── Competitors-by-query scenario ─────────────────────────────────────
