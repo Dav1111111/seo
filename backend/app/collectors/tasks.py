@@ -285,6 +285,12 @@ def crawl_site(site_id: str, run_id: str | None = None):
     if isinstance(result, dict) and "error" not in result:
         fingerprint_site.apply_async(args=[site_id], countdown=10)
         result["fingerprint_queued"] = True
+        # IndexNow push runs regardless of verification state — the
+        # task itself decides to skip if the key isn't verified yet,
+        # emits a "skipped" event instead of crashing, so owner sees
+        # "not configured" in the activity feed without us gating here.
+        indexnow_ping_site.apply_async(args=[site_id], countdown=30)
+        result["indexnow_queued"] = True
 
     return result
 
@@ -330,6 +336,112 @@ def collect_site_metrica(site_id: str):
                 return await collector.collect_and_store(db, site.id, days_back=7)
             finally:
                 await collector.close()
+
+    return _run_async(_run())
+
+
+@celery_app.task(name="indexnow_ping_site", bind=True, max_retries=1)
+def indexnow_ping_site(self, site_id: str, run_id: str | None = None):
+    """Submit the site's known URLs to Yandex via IndexNow.
+
+    Pre-conditions checked inside:
+      - Site exists and has IndexNow key stored in target_config.
+      - Key file at `<host>/<key>.txt` is reachable and matches.
+
+    URL source: Page rows we've crawled, limited to pages that looked
+    alive during the last crawl (http_status 200). We prefer our own
+    crawl list over sitemap.xml because crawl results verify the URLs
+    actually render; sitemap.xml sometimes lists dead URLs.
+
+    Called explicitly from the admin endpoint and chained after every
+    successful crawl so fresh URLs hit Yandex within minutes of us
+    discovering them.
+    """
+    from app.collectors.indexnow import ping_urls, verify_key_file
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.models.page import Page
+
+    async def _run():
+        async with task_session() as db:
+            result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
+            site = result.scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "indexnow", "failed",
+                    "Сайт не найден.",
+                    run_id=run_id,
+                )
+                return {"error": "Site not found"}
+
+            cfg = site.target_config or {}
+            indexnow_cfg = cfg.get("indexnow") or {}
+            key = indexnow_cfg.get("key")
+            if not key or not indexnow_cfg.get("verified_at"):
+                await emit_terminal(
+                    db, site_id, "indexnow", "skipped",
+                    "IndexNow не настроен: сначала загрузи файл ключа на домен и подтверди.",
+                    extra={"reason": "not_verified"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "not_verified"}
+
+            pages_res = await db.execute(
+                select(Page.url)
+                .where(Page.site_id == site.id, Page.http_status == 200)
+                .order_by(Page.last_crawled_at.desc())
+            )
+            urls = [row[0] for row in pages_res.all() if row[0]]
+            if not urls:
+                await emit_terminal(
+                    db, site_id, "indexnow", "skipped",
+                    "Нет списка страниц — запусти краулинг сайта перед пингом.",
+                    extra={"reason": "no_pages"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "no_pages"}
+
+            await log_event(
+                db, site_id, "indexnow", "started",
+                f"Отправляю {len(urls)} URL в Яндекс через IndexNow…",
+                run_id=run_id,
+            )
+
+            import anyio
+            out = await anyio.to_thread.run_sync(ping_urls, site.domain, key, urls)
+
+            if out.accepted:
+                message = (
+                    f"Яндекс принял {out.url_count} URL. Краулинг обычно "
+                    "происходит в течение 24 часов — проверь индексацию завтра."
+                )
+                status = "done"
+            else:
+                message = (
+                    f"IndexNow отказал: {out.error or 'неизвестная ошибка'} "
+                    f"(HTTP {out.status_code}). Проверь файл ключа."
+                )
+                status = "failed"
+
+            await emit_terminal(
+                db, site_id, "indexnow", status, message,
+                extra=out.to_dict(),
+                run_id=run_id,
+            )
+
+            # Update last_pinged_at so UI can show "sent N minutes ago".
+            from app.core_audit.sites.locks import lock_site_target_config
+            from datetime import datetime, timezone
+            await lock_site_target_config(db, site_id)
+            await db.refresh(site)
+            cfg2 = dict(site.target_config or {})
+            idx = dict(cfg2.get("indexnow") or {})
+            idx["last_pinged_at"] = datetime.now(timezone.utc).isoformat()
+            idx["last_result"] = out.to_dict()
+            cfg2["indexnow"] = idx
+            site.target_config = cfg2
+            await db.commit()
+
+            return out.to_dict()
 
     return _run_async(_run())
 

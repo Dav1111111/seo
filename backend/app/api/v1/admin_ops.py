@@ -317,6 +317,151 @@ async def update_competitors_list(
     return {"status": "ok", "competitor_domains": cleaned}
 
 
+# ── IndexNow setup + ping ────────────────────────────────────────────────
+
+@router.get(
+    "/sites/{site_id}/indexnow/setup",
+    dependencies=[Depends(_require_admin)],
+)
+async def indexnow_get_setup(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the IndexNow key + instructions for the owner.
+
+    First call generates a fresh key and stores it in
+    `target_config['indexnow']['key']`. Subsequent calls return the
+    existing key. The owner is expected to host a plaintext file at
+    `https://<host>/<key>.txt` whose body is exactly the key, then
+    call `POST /indexnow/verify`.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    cfg = dict(site.target_config or {})
+    indexnow_cfg = dict(cfg.get("indexnow") or {})
+    key = indexnow_cfg.get("key")
+
+    if not key:
+        from app.collectors.indexnow import generate_key
+        from app.core_audit.sites.locks import lock_site_target_config
+        await lock_site_target_config(db, site_id)
+        await db.refresh(site)
+        cfg = dict(site.target_config or {})
+        indexnow_cfg = dict(cfg.get("indexnow") or {})
+        if not indexnow_cfg.get("key"):
+            key = generate_key()
+            indexnow_cfg["key"] = key
+            indexnow_cfg["created_at"] = datetime.now(timezone.utc).isoformat()
+            cfg["indexnow"] = indexnow_cfg
+            site.target_config = cfg
+            await db.commit()
+        else:
+            key = indexnow_cfg["key"]
+
+    host_clean = site.domain.lower().removeprefix("www.").rstrip("/")
+    file_url = f"https://{host_clean}/{key}.txt"
+    file_content = key
+
+    return {
+        "key": key,
+        "file_url": file_url,
+        "file_content": file_content,
+        "verified_at": indexnow_cfg.get("verified_at"),
+        "last_pinged_at": indexnow_cfg.get("last_pinged_at"),
+        "last_result": indexnow_cfg.get("last_result"),
+        "instructions_ru": (
+            f"1. Создай файл `{key}.txt` с одной строкой внутри: `{key}`. "
+            f"2. Загрузи его в корень сайта, чтобы он открывался по адресу {file_url}. "
+            "3. Нажми «Проверить установку» — мы убедимся, что файл доступен, "
+            "и после этого будем отправлять Яндексу свежие URL автоматически."
+        ),
+    }
+
+
+@router.post(
+    "/sites/{site_id}/indexnow/verify",
+    dependencies=[Depends(_require_admin)],
+)
+async def indexnow_verify(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Verify owner uploaded the key file correctly.
+
+    Flips `verified_at` in target_config only on success. Until then,
+    the scheduled `indexnow_ping_site` task refuses to submit URLs,
+    so we never lie to the owner about being set up.
+    """
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    cfg = dict(site.target_config or {})
+    indexnow_cfg = dict(cfg.get("indexnow") or {})
+    key = indexnow_cfg.get("key")
+    if not key:
+        raise HTTPException(
+            status_code=400, detail="indexnow key not set — call /indexnow/setup first",
+        )
+
+    from app.collectors.indexnow import verify_key_file
+
+    ok, reason = verify_key_file(site.domain, key)
+    if not ok:
+        return {
+            "verified": False,
+            "reason": reason,
+            "hint_ru": {
+                "http_404": "Файл не найден по ссылке. Проверь что он лежит в корне сайта.",
+                "key_mismatch": "Файл найден, но его содержимое не совпадает с ключом. Содержимое должно быть ровно строка-ключ, без кавычек и лишних пробелов.",
+                "url_error_timeout": "Сайт не отвечает. Попробуй ещё раз.",
+            }.get(reason, "Не удалось проверить файл. Попробуй ещё раз."),
+        }
+
+    from app.core_audit.sites.locks import lock_site_target_config
+    await lock_site_target_config(db, site_id)
+    await db.refresh(site)
+    cfg2 = dict(site.target_config or {})
+    idx2 = dict(cfg2.get("indexnow") or {})
+    idx2["verified_at"] = datetime.now(timezone.utc).isoformat()
+    cfg2["indexnow"] = idx2
+    site.target_config = cfg2
+    await db.commit()
+
+    await log_event(
+        db, site_id, "indexnow", "progress",
+        "Файл ключа IndexNow подтверждён. Теперь Яндекс будет получать "
+        "свежие URL после каждого краулинга.",
+        extra={"verified_at": idx2["verified_at"]},
+    )
+    return {"verified": True, "verified_at": idx2["verified_at"]}
+
+
+@router.post(
+    "/sites/{site_id}/indexnow/ping",
+    dependencies=[Depends(_require_admin)],
+)
+async def indexnow_trigger_ping(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Enqueue an IndexNow push for this site right now."""
+    site = await db.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="site not found")
+
+    from app.collectors.tasks import indexnow_ping_site
+    run_id = str(uuid.uuid4())
+    task = indexnow_ping_site.delay(str(site_id), run_id=run_id)
+    return {
+        "status": "queued",
+        "task_id": task.id,
+        "run_id": run_id,
+    }
+
+
 # ── Indexation check (Yandex Search API) ─────────────────────────────────
 
 @router.post(

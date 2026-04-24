@@ -410,6 +410,39 @@ export const api = {
       { method: "POST", base: "admin" },
     ),
 
+  // IndexNow — ask Yandex to re-crawl a list of URLs. Bypasses the
+  // Webmaster re-crawl button (which is locked while host stuck at
+  // HOST_NOT_LOADED). Three-step setup: get key → upload file → verify.
+  indexnowSetup: (siteId: string) =>
+    apiFetch<{
+      key: string;
+      file_url: string;
+      file_content: string;
+      verified_at: string | null;
+      last_pinged_at: string | null;
+      last_result: {
+        accepted: boolean;
+        status_code: number | null;
+        url_count: number;
+        error: string | null;
+      } | null;
+      instructions_ru: string;
+    }>(`/sites/${siteId}/indexnow/setup`, { base: "admin" }),
+
+  indexnowVerify: (siteId: string) =>
+    apiFetch<{
+      verified: boolean;
+      verified_at?: string;
+      reason?: string;
+      hint_ru?: string;
+    }>(`/sites/${siteId}/indexnow/verify`, { method: "POST", base: "admin" }),
+
+  indexnowPing: (siteId: string) =>
+    apiFetch<{ status: string; task_id: string; run_id: string }>(
+      `/sites/${siteId}/indexnow/ping`,
+      { method: "POST", base: "admin" },
+    ),
+
   // BusinessTruth — 3-picture reconciliation of the site as a business.
   getBusinessTruth: (siteId: string) =>
     apiFetch<{
