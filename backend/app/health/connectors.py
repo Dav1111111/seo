@@ -295,7 +295,9 @@ def _check_yc_wordstat_dynamics() -> CheckResult:
         )
         if err:
             return False, None, err
-        items = (data or {}).get("items", [])
+        # Yandex returns the monthly series under `results`, not `items`
+        # — verified empirically against the live endpoint on 2026-04-25.
+        items = (data or {}).get("results", []) or (data or {}).get("items", [])
         non_empty = [x for x in items if "count" in x and x.get("count")]
         if not non_empty:
             return False, {
