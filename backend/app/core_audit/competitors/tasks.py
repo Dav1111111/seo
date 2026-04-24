@@ -328,6 +328,13 @@ def competitors_discover_site_task(
 
                     # Persist: plain list of domains for the UI + full profile
                     # under target_config for drill-down.
+                    # Serialize concurrent writers on target_config + re-read
+                    # after acquiring the lock to avoid stomping siblings
+                    # (business_truth, growth_opportunities).
+                    from app.core_audit.sites.locks import lock_site_target_config
+                    await lock_site_target_config(db, site_id)
+                    await db.refresh(site)
+
                     site.competitor_domains = [c.domain for c in profile.competitors]
                     cfg = dict(site.target_config or {})
                     cfg["competitor_profile"] = profile.to_jsonb()
@@ -447,6 +454,13 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                         run_id=run_id,
                     )
                     return {"status": "skipped", "reason": "site_not_found"}
+
+                # Serialize target_config writers for the final persist
+                # a few hundred lines down. Lock acquired upfront so the
+                # read and write see a consistent snapshot.
+                from app.core_audit.sites.locks import lock_site_target_config
+                await lock_site_target_config(db, site_id)
+                await db.refresh(site)
 
                 cfg = dict(site.target_config or {})
                 profile = cfg.get("competitor_profile") or {}

@@ -81,34 +81,55 @@ async def trigger_full_pipeline(
     # this so two back-to-back clicks don't merge into one mess.
     run_id = str(uuid.uuid4())
 
-    # All 3 stages fire simultaneously — worker concurrency queues what
-    # it can't run in parallel. None of them read same-run output of
-    # another, so no ordering needed.
+    # Full pipeline as a chord:
+    #   group(crawl, webmaster, demand_map)  →  pipeline_after_primary
+    # The callback always rebuilds BusinessTruth, then gates competitor
+    # discovery on money-query count. Running the gate inside a Celery
+    # task (not here) keeps the API request fast — we only enqueue.
     #
-    # competitors_discover_site is intentionally NOT in the auto-chain —
-    # SERP probing without enough money-queries pulls generic aggregators
-    # (sputnik8, tripster), and the owner ends up staring at domains they
-    # don't recognize. Owner triggers it manually from /competitors when
-    # they want to.
-    task_to_stage = {
+    # `queued` lists every stage the pipeline wrap-up should wait on so
+    # activity.py's reconciler closes the wrapper only after everything
+    # reached a terminal status. Gated-skipped stages emit a "skipped"
+    # terminal from the callback — the reconciler counts it as done.
+    primary_tasks = {
         "crawl_site": "crawl",
         "collect_site_webmaster": "webmaster",
         "demand_map_build_site": "demand_map",
     }
-    queued: list[str] = list(task_to_stage.values())
+    queued: list[str] = [
+        *primary_tasks.values(),
+        "business_truth",
+        "competitor_discovery",
+        "competitor_deep_dive",
+    ]
 
     await log_event(
         db, site_id, "pipeline", "started",
-        "Запустил полный анализ: краулю сайт, тяну Вебмастер, строю карту "
-        "спроса. Обычно готово за 30–60 секунд.",
+        "Запустил полный анализ: страницы, Вебмастер, карта спроса, "
+        "понимание бизнеса и конкуренты. Обычно 1–2 минуты.",
         extra={"queued": queued, "run_id": run_id},
         run_id=run_id,
     )
 
-    for task_name in task_to_stage:
-        celery_app.send_task(
-            task_name, args=[str(site_id)], kwargs={"run_id": run_id},
+    from celery import chord, group
+    from celery.canvas import Signature
+
+    header = group([
+        Signature(
+            task_name,
+            args=[str(site_id)],
+            kwargs={"run_id": run_id},
+            app=celery_app,
         )
+        for task_name in primary_tasks
+    ])
+    callback = Signature(
+        "pipeline_after_primary",
+        args=[str(site_id)],  # chord supplies the results list as first arg
+        kwargs={"run_id": run_id},
+        app=celery_app,
+    )
+    chord(header)(callback)
 
     return {"status": "queued", "queued": queued, "run_id": run_id}
 
@@ -266,6 +287,10 @@ async def update_competitors_list(
     site = await db.get(Site, site_id)
     if site is None:
         raise HTTPException(status_code=404, detail="site not found")
+
+    from app.core_audit.sites.locks import lock_site_target_config
+    await lock_site_target_config(db, site_id)
+    await db.refresh(site)
 
     cleaned: list[str] = []
     seen: set[str] = set()

@@ -100,6 +100,14 @@ async def rebuild_business_truth(
     if site is None:
         raise ValueError(f"site {site_id} not found")
 
+    if persist:
+        # Serialize concurrent target_config writers on this site.
+        from app.core_audit.sites.locks import lock_site_target_config
+        await lock_site_target_config(db, site_id)
+        # Re-read after acquiring the lock — another writer may have
+        # committed a newer version of target_config while we waited.
+        await db.refresh(site)
+
     cfg = dict(site.target_config or {})
 
     # ── Auto-derive vocabulary from pages + queries, not from

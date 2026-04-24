@@ -102,6 +102,10 @@ async def set_target_config(
     if site is None:
         raise HTTPException(status_code=404, detail="site not found")
 
+    from app.core_audit.sites.locks import lock_site_target_config
+    await lock_site_target_config(db, site_id)
+    await db.refresh(site)
+
     # Pydantic v2: model_dump() converts to plain dict, preserving extras.
     payload = body.model_dump(exclude_none=False)
     site.target_config = payload
@@ -319,6 +323,10 @@ async def commit_draft_to_target_config(
             "preview": True,
             "target_config": merged,
         }
+
+    from app.core_audit.sites.locks import lock_site_target_config
+    await lock_site_target_config(db, site_id)
+    await db.refresh(site)
 
     site.target_config = merged
     await db.flush()
@@ -828,6 +836,12 @@ async def onboarding_chat_finalize(
             body.narrative_ru if body.narrative_ru is not None else current.get("narrative_ru")
         ),
     })
+
+    # Concurrent BusinessTruth/competitor writes must not stomp the
+    # services/geo lists the owner just confirmed.
+    from app.core_audit.sites.locks import lock_site_target_config
+    await lock_site_target_config(db, site_id)
+    await db.refresh(site)
 
     cfg = dict(site.target_config or {})
     cfg["services"] = merged["services"]
