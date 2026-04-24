@@ -14,7 +14,7 @@ Stores in Page model. Runs on demand or scheduled.
 import asyncio
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse, urljoin
 from uuid import UUID
 
@@ -220,8 +220,8 @@ class SiteCrawler:
                     images_count=result["images_count"],
                     has_schema=result["has_schema"],
                     http_status=result["http_status"],
-                    last_crawled_at=datetime.utcnow(),
-                    last_seen_at=datetime.utcnow(),
+                    last_crawled_at=datetime.now(timezone.utc),
+                    last_seen_at=datetime.now(timezone.utc),
                     in_sitemap=True,
                 ).on_conflict_do_update(
                     index_elements=["site_id", "url"],
@@ -235,8 +235,8 @@ class SiteCrawler:
                         "images_count": result["images_count"],
                         "has_schema": result["has_schema"],
                         "http_status": result["http_status"],
-                        "last_crawled_at": datetime.utcnow(),
-                        "last_seen_at": datetime.utcnow(),
+                        "last_crawled_at": datetime.now(timezone.utc),
+                        "last_seen_at": datetime.now(timezone.utc),
                     },
                 )
                 await db.execute(stmt)

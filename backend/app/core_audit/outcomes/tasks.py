@@ -12,7 +12,7 @@ the loop: owner sees "ты применил 18 дней назад, показы
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
 
@@ -42,8 +42,8 @@ def outcomes_followup_daily_task(self) -> dict:
     async def _inner() -> dict:
         processed = 0
         async with task_session() as db:
-            cutoff_min = datetime.utcnow() - timedelta(days=45)
-            cutoff_max = datetime.utcnow() - timedelta(days=14)
+            cutoff_min = datetime.now(timezone.utc) - timedelta(days=45)
+            cutoff_max = datetime.now(timezone.utc) - timedelta(days=14)
 
             rows = (await db.execute(
                 select(OutcomeSnapshot).where(
@@ -95,7 +95,7 @@ def outcomes_followup_daily_task(self) -> dict:
                 }
                 snap.followup_metrics = followup
                 snap.delta = delta
-                snap.followup_at = datetime.utcnow()
+                snap.followup_at = datetime.now(timezone.utc)
 
                 await log_event(
                     db, snap.site_id, "outcome", "done",

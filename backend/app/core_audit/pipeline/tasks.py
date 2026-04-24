@@ -8,14 +8,16 @@ The "Full analysis" button used to fire 3 parallel tasks and end there.
 BusinessTruth and competitors ran on separate cadences (manual or
 nightly), so an owner clicking the button saw yesterday's
 recommendations. This module wires the 3 primary tasks into a Celery
-chord whose callback extends the pipeline to BusinessTruth and (gated)
-competitor discovery.
+chord whose callback extends the pipeline to BusinessTruth and the
+gated competitor chain:
+competitor_discovery -> competitor_deep_dive -> opportunities.
 
 Gate: competitor discovery is EXPENSIVE (SERP API calls) and only
 worth running if we have enough real money-queries to drive it.
 `money_queries` = observed Webmaster queries that pass the business-
-token filter. Below MIN_MONEY_QUERIES we skip both competitor stages
-and emit skipped terminals so the pipeline wrap-up closes cleanly.
+token filter. Below MIN_MONEY_QUERIES we skip competitor stages and
+opportunities, then emit skipped terminals so the pipeline wrap-up
+closes cleanly.
 """
 
 from __future__ import annotations
@@ -106,8 +108,8 @@ async def _count_money_queries(db, site_id: UUID) -> int:
 async def _skip_competitor_stages(
     db, site_id: str, run_id: str | None, money_q: int,
 ) -> None:
-    """Emit skipped terminal events for both competitor stages so the
-    pipeline wrap-up closes properly."""
+    """Emit skipped terminal events for gated stages so the pipeline
+    wrap-up closes properly."""
     msg = (
         f"Конкуренты пропущены: у сайта {money_q} реальных money-запросов "
         f"в Вебмастере (нужно от {MIN_MONEY_QUERIES}). Разбор SERP без них "
@@ -124,6 +126,11 @@ async def _skip_competitor_stages(
     await emit_terminal(
         db, site_id, "competitor_deep_dive", "skipped",
         "Глубокий анализ пропущен — нет свежей разведки.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "opportunities", "skipped",
+        "Точки роста пропущены — нет свежей разведки конкурентов.",
         extra=extra, run_id=run_id,
     )
 

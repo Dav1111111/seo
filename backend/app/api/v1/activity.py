@@ -19,21 +19,20 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.core_audit.activity import reconcile_open_pipelines
 from app.models.analysis_event import AnalysisEvent
 
 router = APIRouter()
 
 
 def _serialize(ev: AnalysisEvent) -> dict[str, Any]:
-    # ts is stored naive UTC in Postgres (datetime.utcnow). Append "Z"
-    # so JS clients interpret it as UTC instead of local time.
+    # `ts` is timestamptz; .isoformat() emits "+00:00" which JS parses
+    # correctly as UTC.
     return {
         "id": ev.id,
         "stage": ev.stage,
         "status": ev.status,
         "message": ev.message,
-        "ts": (ev.ts.isoformat() + "Z") if ev.ts else None,
+        "ts": ev.ts.isoformat() if ev.ts else None,
         "extra": ev.extra or {},
         "run_id": str(ev.run_id) if ev.run_id else None,
     }
@@ -50,7 +49,6 @@ async def get_activity_feed(
     Owners open the dashboard and see "платформа собрала SERP… нашла 7
     конкурентов… готово, 15 точек роста" — proof the system is alive.
     """
-    await reconcile_open_pipelines(db, site_id)
     stmt = (
         select(AnalysisEvent)
         .where(AnalysisEvent.site_id == site_id)
@@ -68,7 +66,6 @@ async def get_last_per_stage(
 ) -> dict[str, Any]:
     """Return the most recent event per stage — drives "last updated X ago"
     badges on dashboard/competitors/reports pages."""
-    await reconcile_open_pipelines(db, site_id)
     # Fetch more than needed and dedupe per-stage in Python (avoids a
     # PG-specific DISTINCT ON when the set is small).
     stmt = (
@@ -101,7 +98,6 @@ async def get_current_run(
         from the last 5 minutes (standalone button click).
       - Empty feed → {"events": [], "run_id": None}.
     """
-    await reconcile_open_pipelines(db, site_id)
     newest = (await db.execute(
         select(AnalysisEvent)
         .where(AnalysisEvent.site_id == site_id)
@@ -120,8 +116,8 @@ async def get_current_run(
     if newest.run_id is not None:
         stmt = stmt.where(AnalysisEvent.run_id == newest.run_id)
     else:
-        from datetime import datetime, timedelta
-        cutoff = (newest.ts or datetime.utcnow()) - timedelta(minutes=5)
+        from datetime import datetime, timedelta, timezone
+        cutoff = (newest.ts or datetime.now(timezone.utc)) - timedelta(minutes=5)
         stmt = stmt.where(
             AnalysisEvent.run_id.is_(None),
             AnalysisEvent.ts >= cutoff,

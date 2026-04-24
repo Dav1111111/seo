@@ -42,7 +42,7 @@ def _format_priority_rescore_message(result: dict) -> tuple[str, dict]:
 
 
 @celery_app.task(name="priority_rescore_site", bind=True, max_retries=1)
-def priority_rescore_site(self, site_id: str):
+def priority_rescore_site(self, site_id: str, run_id: str | None = None):
     """Rescore all latest-review recommendations for a site."""
 
     async def _inner():
@@ -53,6 +53,7 @@ def priority_rescore_site(self, site_id: str):
                 "priorities",
                 "started",
                 "Пересчитываю приоритеты страниц и рекомендаций…",
+                run_id=run_id,
             )
             try:
                 result = await PriorityService().rescore_site(db, UUID(site_id))
@@ -63,6 +64,7 @@ def priority_rescore_site(self, site_id: str):
                     "priorities",
                     "failed",
                     f"Пересчёт приоритетов остановлен: {str(exc)[:200]}",
+                    run_id=run_id,
                 )
                 raise
 
@@ -74,6 +76,7 @@ def priority_rescore_site(self, site_id: str):
                 "done",
                 message,
                 extra=extra,
+                run_id=run_id,
             )
             return result
 

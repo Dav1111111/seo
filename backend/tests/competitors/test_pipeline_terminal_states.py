@@ -186,6 +186,44 @@ async def test_queued_pipeline_closes_only_after_last_stage(db, test_site: Site)
     assert [e.status for e in pipe_end] == ["started", "done"]
 
 
+async def test_full_pipeline_waits_for_opportunities_after_deep_dive(
+    db, test_site: Site,
+):
+    """Full-analysis contract: deep-dive is not the end; the run closes
+    only after opportunities reaches a terminal status for the same run_id."""
+    run = uuid.uuid4()
+    queued = [
+        "crawl",
+        "webmaster",
+        "demand_map",
+        "business_truth",
+        "competitor_discovery",
+        "competitor_deep_dive",
+        "opportunities",
+    ]
+    await log_event(
+        db,
+        test_site.id,
+        "pipeline",
+        "started",
+        "trigger",
+        extra={"queued": queued},
+        run_id=run,
+    )
+
+    for stage in queued[:-1]:
+        await emit_terminal(db, test_site.id, stage, "done", stage, run_id=run)
+
+    pipe_mid = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe_mid] == ["started"]
+
+    await emit_terminal(
+        db, test_site.id, "opportunities", "done", "15 opps", run_id=run,
+    )
+    pipe_end = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe_end] == ["started", "done"]
+
+
 async def test_queued_pipeline_collapses_failure_status(db, test_site: Site):
     """If any queued stage fails, pipeline closes failed once the last
     queued stage finishes."""

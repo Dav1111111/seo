@@ -9,6 +9,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from app.core_audit.activity import emit_terminal, log_event
 from app.core_audit.report.service import ReportService
 from app.models.site import Site
 from app.workers.celery_app import celery_app
@@ -27,12 +28,41 @@ def _run(coro):
 
 
 @celery_app.task(name="report_build_site", bind=True, max_retries=1)
-def report_build_site(self, site_id: str, week_end_iso: str | None = None):
+def report_build_site(
+    self,
+    site_id: str,
+    week_end_iso: str | None = None,
+    run_id: str | None = None,
+):
     async def _inner():
         async with task_session() as db:
+            await log_event(
+                db,
+                site_id,
+                "report",
+                "started",
+                "Собираю недельный отчёт и корневую проблему…",
+                run_id=run_id,
+            )
             end = dt_date.fromisoformat(week_end_iso) if week_end_iso else None
-            row = await ReportService().build_and_save(db, UUID(site_id), week_end=end)
-            return {
+            try:
+                row = await ReportService().build_and_save(
+                    db,
+                    UUID(site_id),
+                    week_end=end,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await emit_terminal(
+                    db,
+                    site_id,
+                    "report",
+                    "failed",
+                    f"Отчёт не собрался: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                raise
+
+            result = {
                 "report_id": str(row.id),
                 "site_id": str(row.site_id),
                 "week_end": row.week_end.isoformat(),
@@ -41,6 +71,16 @@ def report_build_site(self, site_id: str, week_end_iso: str | None = None):
                 "llm_cost_usd": float(row.llm_cost_usd or 0.0),
                 "generation_ms": row.generation_ms,
             }
+            await emit_terminal(
+                db,
+                site_id,
+                "report",
+                "done",
+                f"Отчёт готов: Health {row.health_score}.",
+                extra=result,
+                run_id=run_id,
+            )
+            return result
 
     return _run(_inner())
 

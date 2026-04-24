@@ -7,7 +7,7 @@ route drives one UX button in the frontend.
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -54,7 +54,7 @@ async def trigger_full_pipeline(
     if site is None:
         raise HTTPException(status_code=404, detail="site not found")
 
-    recent_cutoff = datetime.utcnow() - timedelta(minutes=2)
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
     latest_pipeline = (await db.execute(
         select(AnalysisEvent)
         .where(
@@ -76,9 +76,10 @@ async def trigger_full_pipeline(
 
     from app.workers.celery_app import celery_app
 
-    # One run_id ties together the 4 tasks + their downstream events
-    # (deep-dive, opportunities, pipeline terminal). UI groups events by
-    # this so two back-to-back clicks don't merge into one mess.
+    # One run_id ties together the primary tasks + their downstream
+    # events (BusinessTruth, competitors, opportunities, pipeline
+    # terminal). UI groups events by this so two back-to-back clicks
+    # don't merge into one mess.
     run_id = str(uuid.uuid4())
 
     # Full pipeline as a chord:
@@ -101,6 +102,7 @@ async def trigger_full_pipeline(
         "business_truth",
         "competitor_discovery",
         "competitor_deep_dive",
+        "opportunities",
     ]
 
     await log_event(
@@ -211,7 +213,7 @@ async def mark_applied(
         recommendation_id=body.recommendation_id,
         source=body.source,
         page_url=body.page_url,
-        applied_at=datetime.utcnow(),
+        applied_at=datetime.now(timezone.utc),
         baseline_metrics=baseline,
         note_ru=body.note_ru,
     )
@@ -303,7 +305,7 @@ async def update_competitors_list(
 
     site.competitor_domains = cleaned
     cfg = dict(site.target_config or {})
-    cfg["competitor_list_manually_edited_at"] = datetime.utcnow().isoformat()
+    cfg["competitor_list_manually_edited_at"] = datetime.now(timezone.utc).isoformat()
     site.target_config = cfg
     await db.commit()
 

@@ -13,6 +13,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from app.core_audit.activity import emit_terminal, log_event
 from app.core_audit.review.reviewer import DEFAULT_TOP_N, Reviewer
 from app.models.site import Site
 from app.workers.celery_app import celery_app
@@ -52,19 +53,67 @@ def review_page_task(self, page_id: str, decision_id: str | None = None):
 
 
 @celery_app.task(name="review_site_decisions", bind=True, max_retries=1)
-def review_site_decisions_task(self, site_id: str, top_n: int = DEFAULT_TOP_N):
+def review_site_decisions_task(
+    self,
+    site_id: str,
+    top_n: int = DEFAULT_TOP_N,
+    run_id: str | None = None,
+):
     """Review top-N strengthen decisions for a single site. Chains
     priority_rescore_site so fresh recs get scored immediately."""
 
     async def _inner():
         async with task_session() as db:
-            return await Reviewer().review_site(db, UUID(site_id), top_n=top_n)
+            await log_event(
+                db,
+                site_id,
+                "review",
+                "started",
+                f"Проверяю до {top_n} важных страниц и рекомендаций…",
+                run_id=run_id,
+            )
+            try:
+                result = await Reviewer().review_site(
+                    db,
+                    UUID(site_id),
+                    top_n=top_n,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await emit_terminal(
+                    db,
+                    site_id,
+                    "review",
+                    "failed",
+                    f"Проверка страниц остановлена: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                raise
+
+            await emit_terminal(
+                db,
+                site_id,
+                "review",
+                "done",
+                (
+                    f"Проверка страниц готова: {result.get('reviewed', 0)} "
+                    f"проверено, {result.get('skipped', 0)} пропущено."
+                ),
+                extra={
+                    "reviewed": result.get("reviewed", 0),
+                    "skipped": result.get("skipped", 0),
+                    "failed": result.get("failed", 0),
+                    "cost_total_usd": result.get("cost_total_usd", 0.0),
+                    "candidates": result.get("candidates", 0),
+                },
+                run_id=run_id,
+            )
+            return result
 
     result = _run(_inner())
     # Chain rescore so priorities are fresh right after the review batch.
     try:
         from app.core_audit.priority.tasks import priority_rescore_site
-        priority_rescore_site.delay(site_id)
+        priority_rescore_site.delay(site_id, run_id=run_id)
     except Exception as exc:
         logger.warning("rescore chain dispatch failed site=%s: %s", site_id, exc)
     return result

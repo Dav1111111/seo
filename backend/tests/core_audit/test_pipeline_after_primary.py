@@ -140,11 +140,11 @@ async def test_money_query_counter_ignores_old_impressions(
     assert got == 0
 
 
-async def test_skip_competitor_stages_emits_both_terminals(
+async def test_skip_competitor_stages_emits_all_gated_terminals(
     db, test_site: Site,
 ):
-    """Below-threshold case: both competitor stages get skipped events
-    so the pipeline reconciler can close the wrapper cleanly."""
+    """Below-threshold case: gated stages get skipped events so the
+    pipeline reconciler can close the wrapper cleanly."""
     run_id = uuid.uuid4()
     # Pre-open the pipeline wrapper to mimic an in-flight run.
     from app.core_audit.activity import log_event
@@ -155,6 +155,7 @@ async def test_skip_competitor_stages_emits_both_terminals(
             "crawl", "webmaster", "demand_map",
             "business_truth",
             "competitor_discovery", "competitor_deep_dive",
+            "opportunities",
         ]},
         run_id=run_id,
     )
@@ -168,7 +169,11 @@ async def test_skip_competitor_stages_emits_both_terminals(
         .where(
             AnalysisEvent.site_id == test_site.id,
             AnalysisEvent.stage.in_(
-                ["competitor_discovery", "competitor_deep_dive"],
+                [
+                    "competitor_discovery",
+                    "competitor_deep_dive",
+                    "opportunities",
+                ],
             ),
         )
         .order_by(AnalysisEvent.ts.asc())
@@ -176,6 +181,7 @@ async def test_skip_competitor_stages_emits_both_terminals(
     stages = [(e.stage, e.status) for e in rows]
     assert ("competitor_discovery", "skipped") in stages
     assert ("competitor_deep_dive", "skipped") in stages
+    assert ("opportunities", "skipped") in stages
 
 
 def test_min_money_queries_is_documented_constant():

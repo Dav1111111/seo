@@ -23,13 +23,15 @@ router = APIRouter()
 class QueuedResponse(BaseModel):
     task_id: str
     status: str
+    run_id: str | None = None
 
 
 @router.post("/priorities/sites/{site_id}/rescore", response_model=QueuedResponse)
 async def trigger_rescore(site_id: uuid.UUID):
     from app.core_audit.priority.tasks import priority_rescore_site
-    task = priority_rescore_site.delay(str(site_id))
-    return QueuedResponse(task_id=task.id, status="queued")
+    run_id = str(uuid.uuid4())
+    task = priority_rescore_site.delay(str(site_id), run_id=run_id)
+    return QueuedResponse(task_id=task.id, status="queued", run_id=run_id)
 
 
 @router.get("/priorities/sites/{site_id}")

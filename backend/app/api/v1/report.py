@@ -20,13 +20,15 @@ router = APIRouter()
 class QueuedResponse(BaseModel):
     task_id: str
     status: str
+    run_id: str | None = None
 
 
 @router.post("/reports/sites/{site_id}/run", response_model=QueuedResponse)
 async def trigger_report(site_id: uuid.UUID, week_end: str | None = None):
     from app.core_audit.report.tasks import report_build_site
-    task = report_build_site.delay(str(site_id), week_end)
-    return QueuedResponse(task_id=task.id, status="queued")
+    run_id = str(uuid.uuid4())
+    task = report_build_site.delay(str(site_id), week_end, run_id=run_id)
+    return QueuedResponse(task_id=task.id, status="queued", run_id=run_id)
 
 
 @router.get("/reports/sites/{site_id}/latest")

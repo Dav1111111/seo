@@ -56,8 +56,8 @@ def _normalize_stage_name(name: str) -> str:
 def _should_close_pipeline(stage: str, status: str) -> bool:
     """Decide whether `stage:status` should close the wrapping pipeline.
 
-    The pipeline is a batch of ~6 parallel tasks; first-to-finish must
-    not close it prematurely. Rules:
+    The pipeline mixes parallel primary collection with a later chain;
+    first-to-finish must not close it prematurely. Rules:
 
     - opportunities:done|failed|skipped is the canonical end (it's the
       last task in the discovery→dive→opportunities chain), so always

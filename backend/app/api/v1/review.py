@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -29,6 +29,7 @@ router = APIRouter()
 class QueuedResponse(BaseModel):
     task_id: str
     status: str
+    run_id: str | None = None
 
 
 class PatchRecommendationBody(BaseModel):
@@ -43,8 +44,9 @@ ALLOWED_USER_STATUSES = {"pending", "applied", "dismissed", "deferred"}
 async def trigger_site_review(site_id: uuid.UUID, top_n: int = 20):
     """Queue top-N strengthen decisions for review on a site."""
     from app.core_audit.review.tasks import review_site_decisions_task
-    task = review_site_decisions_task.delay(str(site_id), top_n)
-    return QueuedResponse(task_id=task.id, status="queued")
+    run_id = str(uuid.uuid4())
+    task = review_site_decisions_task.delay(str(site_id), top_n, run_id=run_id)
+    return QueuedResponse(task_id=task.id, status="queued", run_id=run_id)
 
 
 @router.post("/reviews/pages/{page_id}/run", response_model=QueuedResponse)
@@ -136,7 +138,7 @@ async def patch_recommendation(
         raise HTTPException(status_code=404, detail="recommendation not found")
 
     rec.user_status = body.user_status
-    rec.user_status_changed_at = datetime.utcnow()
+    rec.user_status_changed_at = datetime.now(timezone.utc)
     rec.user_status_changed_by = x_user_email or "anonymous"
     if body.note:
         impact = dict(rec.estimated_impact or {})
