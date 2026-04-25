@@ -53,71 +53,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // Agent runs
-  agentRuns: (siteId = SITE_ID, limit = 20) =>
-    apiFetch<any>(`/sites/${siteId}/agent-runs?limit=${limit}`),
-
   // Sites
   sites: () => apiFetch<any[]>("/sites"),
   updateSite: (siteId: string, body: Record<string, unknown>) =>
     apiFetch<any>(`/sites/${siteId}`, { method: "PATCH", body: JSON.stringify(body) }),
-
-  // Triggers
-  triggerPipeline: (siteId = SITE_ID) =>
-    apiFetch<any>(`/sites/${siteId}/pipeline`, { method: "POST" }),
-  triggerAgent: (siteId = SITE_ID, agent: string) =>
-    apiFetch<any>(`/sites/${siteId}/analyse/${agent}`, { method: "POST" }),
-  triggerCollect: (siteId = SITE_ID) =>
-    apiFetch<any>(`/sites/${siteId}/collect/webmaster`, { method: "POST" }),
-
-  // Queries
-  queries: (siteId = SITE_ID, params: Record<string, string | number> = {}) => {
-    const qs = new URLSearchParams(params as any).toString();
-    return apiFetch<any>(`/sites/${siteId}/queries${qs ? `?${qs}` : ""}`);
-  },
-  queryHistory: (siteId = SITE_ID, queryId: string, days = 30) =>
-    apiFetch<any>(`/sites/${siteId}/queries/${queryId}/history?days=${days}`),
-  queryClusters: (siteId = SITE_ID, days = 7) =>
-    apiFetch<any>(`/sites/${siteId}/queries/clusters?days=${days}`),
-  renameCluster: (siteId = SITE_ID, oldName: string, newName: string) =>
-    apiFetch<any>(`/sites/${siteId}/queries/clusters/${encodeURIComponent(oldName)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ new_name: newName }),
-    }),
-  triggerClustering: (siteId = SITE_ID) =>
-    apiFetch<any>(`/sites/${siteId}/cluster-queries`, { method: "POST" }),
-  triggerQueryRecommendations: (siteId = SITE_ID) =>
-    apiFetch<any>(`/sites/${siteId}/analyse/query-recommendations`, { method: "POST" }),
-
-  // SEO Tasks
-  tasks: (siteId = SITE_ID, params: Record<string, string | number> = {}) => {
-    const qs = new URLSearchParams(params as any).toString();
-    return apiFetch<any>(`/sites/${siteId}/tasks${qs ? `?${qs}` : ""}`);
-  },
-  getTask: (siteId = SITE_ID, taskId: string) =>
-    apiFetch<any>(`/sites/${siteId}/tasks/${taskId}`),
-  updateTask: (siteId = SITE_ID, taskId: string, body: Record<string, unknown>) =>
-    apiFetch<any>(`/sites/${siteId}/tasks/${taskId}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-  deleteTask: (siteId = SITE_ID, taskId: string) =>
-    apiFetch<any>(`/sites/${siteId}/tasks/${taskId}`, { method: "DELETE" }),
-  triggerGenerateTasks: (siteId = SITE_ID) =>
-    apiFetch<any>(`/sites/${siteId}/generate-tasks`, { method: "POST" }),
-  triggerCrawl: (siteId = SITE_ID) =>
-    apiFetch<any>(`/sites/${siteId}/crawl`, { method: "POST" }),
-  pages: (siteId = SITE_ID) =>
-    apiFetch<any>(`/sites/${siteId}/pages`),
-  agentStatus: (siteId = SITE_ID) =>
-    apiFetch<any>(`/sites/${siteId}/agent-status`),
-
-  // Chat
-  chat: (siteId = SITE_ID, message: string, history: any[] = [], issueId?: string) =>
-    apiFetch<{ reply: string; cost_usd: number }>(`/sites/${siteId}/chat`, {
-      method: "POST",
-      body: JSON.stringify({ message, history, issue_id: issueId }),
-    }),
 
   // Reviews (Module 3)
   reviewsList: (siteId: string, params: Record<string, string | number> = {}) => {

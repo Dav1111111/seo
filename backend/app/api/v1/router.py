@@ -17,11 +17,6 @@ from app.api.v1.playground import router as playground_router
 # Core product loop — public product endpoints:
 #   collectors → dashboard → intent → review → priority → report
 # plus sites (profile management) and admin_demand_map (onboarding wizard).
-#
-# Removed:
-#   - chat, queries, tasks, agent_status, fingerprint
-# Their Python modules remain for now but are not mounted; they will be
-# physically deleted once no code path references them.
 
 v1_router = APIRouter()
 v1_router.include_router(health_router, tags=["health"])
