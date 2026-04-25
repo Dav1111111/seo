@@ -1,15 +1,15 @@
 """Studio API surface — module-scoped, isolated from old `/sites/{id}/...` routes.
 
-All endpoints are namespaced under `/studio/...` so they never collide
-with legacy routes per CONCEPT.md §2.6, and so frontend SWR keys (also
-prefixed `studio:`, see `frontend/lib/studio-keys.ts`) can't share
-cache state across the old/new boundary.
+Mounted under `/api/v1/admin/studio/...` because the frontend goes through
+the Next.js admin-proxy (`/admin-proxy/<path>` → `/api/v1/admin/<path>`),
+which holds the admin key in server env. The `/studio/` segment keeps
+us namespaced away from legacy admin routes per CONCEPT.md §2.6.
 
 Modules served from this router (one section per Studio module):
 
-  /studio/sites/{site_id}/queries              — PR-S2 (this PR)
-  /studio/sites/{site_id}/queries/discover     — PR-S2 (this PR)
-  /studio/sites/{site_id}/queries/wordstat-refresh — PR-S2 (this PR)
+  /admin/studio/sites/{site_id}/queries              — PR-S2 (this PR)
+  /admin/studio/sites/{site_id}/queries/discover     — PR-S2 (this PR)
+  /admin/studio/sites/{site_id}/queries/wordstat-refresh — PR-S2 (this PR)
   ... future PRs add: /indexation, /pages, /competitors, /analytics,
       /ads, /outcomes — each in its own section below.
 
@@ -36,7 +36,7 @@ from app.models.search_query import SearchQuery
 from app.models.site import Site
 
 
-router = APIRouter(prefix="/studio")
+router = APIRouter(prefix="/admin/studio")
 
 
 # ── Auth ──────────────────────────────────────────────────────────────
