@@ -693,21 +693,26 @@ WORDSTAT_DISCOVER_TOP_N_PER_SEED = 30
 @celery_app.task(name="wordstat_discover_site", bind=True, max_retries=1)
 def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
     """Discover new search phrases people enter around the site's
-    services + regions, using Wordstat `/topRequests`.
+    actual product, using Wordstat `/topRequests`.
 
-    For each `service × geo_primary` pair from `target_config` we ask
-    Wordstat «what else are people searching with this phrase» and
-    upsert the results into `search_queries` with `wordstat_volume`
-    pre-populated (so the user sees them immediately on /studio/queries
-    without having to click «Обновить объёмы Wordstat» afterwards).
+    Anchored discovery — each seed always contains `target_config.primary_product`
+    so we never expand on off-topic words that may have leaked into
+    `services` (e.g. site's profile listed "прокат" alongside "багги":
+    without an anchor we'd pull tons of unrelated rental phrases).
 
-    Per CONCEPT.md §5: writes only to `search_queries` and only the
-    fields directly supported by the discovery payload (query_text,
-    wordstat_volume, wordstat_updated_at). Trend remains NULL — that's
-    a separate /dynamics call which the existing refresh task handles.
+    Seed strategy
+    -------------
+    1. Always: `<primary_product> <geo>` for each geo_primary.
+       That's the high-signal layer.
+    2. If `secondary_products` is non-empty: also
+       `<secondary> <primary_product> <geo>` to capture co-occurrence
+       phrases like "маршруты багги сочи".
+    3. Fallback for legacy profiles WITHOUT primary_product: use
+       `services × geo` — old behaviour, kept for backwards compat.
 
-    Idempotent on (site_id, query_text) via the table's unique
-    constraint — re-running just refreshes volumes.
+    Idempotent on (site_id, query_text) via the table's unique constraint.
+    Per CONCEPT.md §5: only writes wordstat_volume + updated_at, never
+    overwrites cluster, is_branded, last_seen_at on existing rows.
     """
     import time
     import anyio
@@ -731,36 +736,81 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 return {"status": "failed", "error": "Site not found"}
 
             cfg = site.target_config or {}
-            services = [s.strip() for s in (cfg.get("services") or []) if s and s.strip()]
-            geos = [g.strip() for g in (cfg.get("geo_primary") or []) if g and g.strip()]
+            primary = (cfg.get("primary_product") or "").strip()
+            secondaries = [
+                s.strip() for s in (cfg.get("secondary_products") or [])
+                if s and s.strip() and s.strip() != primary
+            ]
+            services = [
+                s.strip() for s in (cfg.get("services") or [])
+                if s and s.strip()
+            ]
+            geos = [
+                g.strip() for g in (cfg.get("geo_primary") or [])
+                if g and g.strip()
+            ]
 
-            if not services or not geos:
+            if not geos:
                 await emit_terminal(
                     db, site_id, "wordstat_discover", "skipped",
-                    "В профиле сайта нет services или geo_primary — "
-                    "сначала заполни их в настройках.",
-                    extra={"reason": "no_seeds"},
+                    "В профиле сайта нет geo_primary — "
+                    "сначала заполни регионы в настройках.",
+                    extra={"reason": "no_geos"},
                     run_id=run_id,
                 )
-                return {"status": "skipped", "reason": "no_seeds"}
+                return {"status": "skipped", "reason": "no_geos"}
+
+            if not primary and not services:
+                await emit_terminal(
+                    db, site_id, "wordstat_discover", "skipped",
+                    "В профиле сайта нет ни primary_product, ни services — "
+                    "сначала заполни услуги в настройках.",
+                    extra={"reason": "no_anchor"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "no_anchor"}
 
             seeds: list[str] = []
-            for svc in services:
+            anchor_mode: str
+            if primary:
+                anchor_mode = "primary_anchored"
+                # Layer 1: primary × geo
                 for geo in geos:
                     if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
                         break
-                    seeds.append(f"{svc} {geo}")
-                if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
-                    break
+                    seeds.append(f"{primary} {geo}")
+                # Layer 2: secondary + primary × geo
+                for sec in secondaries:
+                    for geo in geos:
+                        if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
+                            break
+                        seeds.append(f"{sec} {primary} {geo}")
+                    if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
+                        break
+            else:
+                anchor_mode = "services_legacy"
+                for svc in services:
+                    for geo in geos:
+                        if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
+                            break
+                        seeds.append(f"{svc} {geo}")
+                    if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
+                        break
 
+            anchor_descr = (
+                f"привязка к «{primary}»" if primary
+                else f"услуги без привязки ({len(services)} шт.)"
+            )
             await log_event(
                 db, site_id, "wordstat_discover", "started",
                 f"Ищу новые запросы через Wordstat: {len(seeds)} "
-                f"seed-фраз ({len(services)} услуг × {len(geos)} регионов), "
+                f"seed-фраз ({anchor_descr}, регионов: {len(geos)}), "
                 f"~{len(seeds)} сек.",
                 extra={
                     "seeds_total": len(seeds),
-                    "services": len(services),
+                    "anchor_mode": anchor_mode,
+                    "primary": primary,
+                    "secondaries": len(secondaries),
                     "geos": len(geos),
                 },
                 run_id=run_id,
