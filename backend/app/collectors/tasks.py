@@ -544,3 +544,137 @@ def check_site_indexation(self, site_id: str, run_id: str | None = None):
             return out.to_dict()
 
     return _run_async(_run())
+
+
+# ── Wordstat refresh (Studio /queries) ───────────────────────────────────
+
+# Per-fetch sleep so we don't burn the AI Studio quota or trip rate
+# limits. 1 req/sec is conservative — Yandex documents far higher
+# limits but the dynamics endpoint is heavier than search.
+WORDSTAT_INTER_QUERY_SLEEP_SEC = 1.0
+
+
+@celery_app.task(name="wordstat_refresh_site", bind=True, max_retries=1)
+def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
+    """Refresh `wordstat_volume` + `wordstat_trend` for every SearchQuery
+    of a site.
+
+    Studio /queries module is the primary consumer. Runs as a Celery
+    task (not inline) because each site has dozens to hundreds of
+    queries and at 1 req/sec a refresh can take minutes.
+
+    Per CONCEPT.md §5: writes only the wordstat_* columns. Does NOT
+    update positions, impressions, cluster, or anything else. If a
+    single query's fetch fails, log it and move on — partial progress
+    is more useful than aborting the whole batch.
+    """
+    import time
+    import anyio
+    from app.collectors.wordstat import fetch_volume
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.models.search_query import SearchQuery
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "wordstat", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "wordstat",
+                    "error": "Site not found",
+                }
+
+            queries = (await db.execute(
+                select(SearchQuery).where(SearchQuery.site_id == site.id)
+            )).scalars().all()
+            if not queries:
+                await emit_terminal(
+                    db, site_id, "wordstat", "skipped",
+                    "Нет запросов для обновления — сначала запусти "
+                    "сбор Webmaster или поиск новых запросов.",
+                    extra={"reason": "no_queries"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "no_queries"}
+
+            await log_event(
+                db, site_id, "wordstat", "started",
+                f"Обновляю объёмы Wordstat для {len(queries)} запросов "
+                f"(~{len(queries)} сек, ходим по 1 запросу/сек).",
+                extra={"queries_total": len(queries)},
+                run_id=run_id,
+            )
+
+            updated = 0
+            empty = 0
+            failed = 0
+
+            for i, q in enumerate(queries):
+                # Off-load the blocking urllib call so the event loop
+                # stays free between queries — same pattern as the
+                # existing indexation task.
+                try:
+                    volume = await anyio.to_thread.run_sync(
+                        fetch_volume, q.query_text,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "wordstat.refresh_query_failed query=%r err=%s",
+                        q.query_text, exc,
+                    )
+                    failed += 1
+                else:
+                    if volume is None:
+                        empty += 1
+                    else:
+                        q.wordstat_volume = volume.count
+                        q.wordstat_trend = volume.to_dict()["trend"]
+                        q.wordstat_updated_at = volume.fetched_at
+                        updated += 1
+
+                # Commit in batches of 25 so partial progress survives
+                # if the worker is killed mid-run.
+                if (i + 1) % 25 == 0:
+                    await db.commit()
+
+                await anyio.to_thread.run_sync(
+                    time.sleep, WORDSTAT_INTER_QUERY_SLEEP_SEC,
+                )
+
+            # Final commit catches the last <25 rows.
+            await db.commit()
+
+            stats = {
+                "queries_total": len(queries),
+                "updated": updated,
+                "empty": empty,
+                "failed": failed,
+            }
+            if updated == 0:
+                message = (
+                    f"Wordstat не отдал данных ни по одному из {len(queries)} "
+                    "запросов. Проверь YANDEX_SEARCH_API_KEY на /studio/connections."
+                )
+                terminal = "failed"
+            else:
+                message = (
+                    f"Wordstat обновлён: {updated} запросов получили объёмы, "
+                    f"{empty} вернули пусто (редкие фразы), {failed} упали с "
+                    "ошибкой."
+                )
+                terminal = "done"
+
+            await emit_terminal(
+                db, site_id, "wordstat", terminal, message,
+                extra=stats, run_id=run_id,
+            )
+            return {"status": terminal, **stats}
+
+    return _run_async(_run())

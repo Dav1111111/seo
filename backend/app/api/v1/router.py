@@ -13,6 +13,7 @@ from app.api.v1.activity import router as activity_router
 from app.api.v1.admin_ops import router as admin_ops_router
 from app.api.v1.business_truth import router as business_truth_router
 from app.api.v1.playground import router as playground_router
+from app.api.v1.studio import router as studio_router
 
 # Core product loop — public product endpoints:
 #   collectors → dashboard → intent → review → priority → report
@@ -32,3 +33,4 @@ v1_router.include_router(activity_router, tags=["activity"])
 v1_router.include_router(admin_ops_router, tags=["admin-ops"])
 v1_router.include_router(business_truth_router, tags=["business-truth"])
 v1_router.include_router(playground_router, tags=["playground"])
+v1_router.include_router(studio_router, tags=["studio"])

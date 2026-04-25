@@ -550,4 +550,67 @@ export const api = {
       `/sites/${siteId}/onboarding/restart`,
       { method: "POST", base: "admin" },
     ),
+
+  // ── Studio · Queries module (PR-S2) ──────────────────────────────────
+  // Backend contract: backend/app/api/v1/studio.py.
+  // Cache namespacing handled separately via studioKey() — see
+  // frontend/lib/studio-keys.ts and IMPLEMENTATION.md §2.2.
+
+  studioListQueries: (
+    siteId: string,
+    sort: "volume" | "recent" | "alpha" | "position" = "volume",
+    limit = 200,
+  ) =>
+    apiFetch<{
+      site_id: string;
+      total: number;
+      items: Array<{
+        query_id: string;
+        query_text: string;
+        is_branded: boolean;
+        cluster: string | null;
+        wordstat_volume: number | null;
+        wordstat_status:
+          | "fresh"
+          | "stale_30d+"
+          | "never_fetched"
+          | "fetch_returned_empty";
+        wordstat_updated_at: string | null;
+        wordstat_trend: Array<{ date: string; count: number | null }> | null;
+        last_position: number | null;
+        last_impressions_14d: number | null;
+        last_seen_at: string | null;
+      }>;
+      coverage: {
+        total: number;
+        with_volume: number;
+        without_volume: number;
+        stale: number;
+      };
+    }>(
+      `/studio/sites/${siteId}/queries?sort=${sort}&limit=${limit}`,
+      { base: "admin" },
+    ),
+
+  studioDiscoverQueries: (siteId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/queries/discover`,
+      { method: "POST", base: "admin" },
+    ),
+
+  studioRefreshWordstat: (siteId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/queries/wordstat-refresh`,
+      { method: "POST", base: "admin" },
+    ),
 };

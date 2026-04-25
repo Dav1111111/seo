@@ -37,8 +37,7 @@ const MODULES: Array<{
     title: "Запросы",
     description: "Какие запросы у нас собраны, объёмы (Wordstat), тренды. По каким мы видны, по каким — нет.",
     icon: Search,
-    status: "stub",
-    reason: "PR-S2",
+    status: "ready",
   },
   {
     href: "/studio/indexation",
