@@ -939,3 +939,138 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
             return {"status": terminal, **stats}
 
     return _run_async(_run())
+
+
+@celery_app.task(name="studio_indexation_run", bind=True, max_retries=1)
+def studio_indexation_run(self, site_id: str, run_id: str | None = None):
+    """Studio /indexation module trigger — probe + diagnose in one shot.
+
+    The pipeline-internal `check_site_indexation` task only does the
+    SERP probe (it's part of the broader pipeline chain). Studio adds
+    a second leg: when the probe finds < LOW_INDEX_THRESHOLD pages, run
+    the same 3 inspections that `playground.indexation` runs (sitemap,
+    robots.txt, homepage rendering) and synthesise a single diagnostic
+    verdict so the owner sees ONE root cause + ONE fix instead of a
+    five-step wizard.
+
+    Stage stays "indexation" — same activity feed entry as the pipeline
+    check, just with `extra.diagnosis` populated when applicable. The
+    GET endpoint reads the latest indexation event regardless of which
+    task wrote it.
+    """
+    import anyio
+    from app.collectors.yandex_serp import check_indexation
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.playground.scenarios import (
+        LOW_INDEX_THRESHOLD,
+        _inspect_homepage_rendering,
+        _inspect_robots,
+        _inspect_sitemap,
+        _synthesise_diagnosis,
+    )
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "indexation", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {"error": "Site not found"}
+
+            domain = site.domain
+            await log_event(
+                db, site_id, "indexation", "started",
+                f"Проверяю индексацию: site:{domain} + диагностика "
+                f"причины (если страниц мало).",
+                run_id=run_id,
+            )
+
+            # Step 1: SERP probe.
+            out = await anyio.to_thread.run_sync(check_indexation, domain)
+
+            pages = [
+                {"url": p.url, "title": p.title, "position": p.position}
+                for p in out.pages[:20]
+            ]
+
+            if out.error:
+                await emit_terminal(
+                    db, site_id, "indexation", "failed",
+                    f"Search API вернул ошибку: {out.error}",
+                    extra={
+                        "pages_found": out.pages_found,
+                        "pages": pages,
+                        "query": f"site:{out.domain}",
+                        "diagnosis": None,
+                        "error": out.error,
+                    },
+                    run_id=run_id,
+                )
+                return out.to_dict()
+
+            # Step 2: diagnose IF coverage is low.
+            diagnosis: dict | None = None
+            inspections: dict | None = None
+            if out.pages_found < LOW_INDEX_THRESHOLD:
+                sitemap = await anyio.to_thread.run_sync(_inspect_sitemap, domain)
+                robots = await anyio.to_thread.run_sync(_inspect_robots, domain)
+                homepage = await anyio.to_thread.run_sync(
+                    _inspect_homepage_rendering, domain,
+                )
+                diagnosis = _synthesise_diagnosis(
+                    out.pages_found, sitemap, robots, homepage,
+                )
+                inspections = {
+                    "sitemap": sitemap,
+                    "robots": robots,
+                    "homepage": homepage,
+                }
+
+            extra = {
+                "pages_found": out.pages_found,
+                "pages": pages,
+                "query": f"site:{out.domain}",
+                "diagnosis": diagnosis,
+                "inspections": inspections,
+            }
+
+            if out.pages_found == 0:
+                # Honest skipped: not our error, Yandex hasn't crawled.
+                # The diagnostic verdict (if any) explains WHY.
+                base = (
+                    f"Сайт {domain} не найден в индексе Яндекса. "
+                )
+                if diagnosis:
+                    message = base + f"Корневая причина: {diagnosis['verdict']}."
+                else:
+                    message = base + (
+                        "Яндекс просто ещё не добавил его — отправь sitemap "
+                        "в Вебмастер и проверь robots.txt."
+                    )
+                status = "skipped"
+            elif out.pages_found < LOW_INDEX_THRESHOLD and diagnosis:
+                message = (
+                    f"В индексе всего {out.pages_found} страниц — это мало. "
+                    f"Корневая причина: {diagnosis['verdict']}. "
+                    f"{diagnosis['action_ru']}"
+                )
+                status = "done"
+            else:
+                message = (
+                    f"В индексе Яндекса: {out.pages_found} страниц "
+                    f"(показываю первые {min(len(pages), 20)})."
+                )
+                status = "done"
+
+            await emit_terminal(
+                db, site_id, "indexation", status, message,
+                extra=extra, run_id=run_id,
+            )
+            return {**out.to_dict(), "diagnosis": diagnosis}
+
+    return _run_async(_run())

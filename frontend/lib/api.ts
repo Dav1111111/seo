@@ -628,4 +628,35 @@ export const api = {
       `/studio/sites/${siteId}/queries/wordstat-discover`,
       { method: "POST", base: "admin" },
     ),
+
+  // ── PR-S3 · Indexation module ────────────────────────────────────
+  // Backend: backend/app/api/v1/studio.py (IndexationState model).
+  studioGetIndexation: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      domain: string;
+      last_check_at: string | null;
+      status: "fresh" | "stale_7d+" | "never_checked" | "running" | "failed";
+      pages_found: number | null;
+      pages: Array<{ url: string; title: string; position: number }>;
+      diagnosis: {
+        verdict: string;
+        cause_ru: string;
+        action_ru: string;
+        severity: "critical" | "high" | "medium" | "low";
+      } | null;
+      is_running: boolean;
+      error: string | null;
+    }>(`/studio/sites/${siteId}/indexation`, { base: "admin" }),
+
+  studioTriggerIndexationCheck: (siteId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/indexation/check`,
+      { method: "POST", base: "admin" },
+    ),
 };

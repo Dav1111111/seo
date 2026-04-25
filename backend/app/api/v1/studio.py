@@ -379,4 +379,172 @@ async def trigger_wordstat_discover(
     return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
 
 
+# ── Module: Indexation (PR-S3) ────────────────────────────────────────
+
+class IndexedPage(BaseModel):
+    url: str
+    title: str
+    position: int
+
+
+class IndexationDiagnosis(BaseModel):
+    verdict: str           # human-readable cause: "robots.txt блокирует весь сайт"
+    cause_ru: str          # plain-Russian explanation
+    action_ru: str         # specific next step
+    severity: str          # "critical" | "high" | "medium" | "low"
+
+
+class IndexationState(BaseModel):
+    site_id: str
+    domain: str
+    last_check_at: datetime | None
+    status: str            # "fresh" | "stale_7d+" | "never_checked" | "running" | "failed"
+    pages_found: int | None
+    pages: list[IndexedPage]
+    diagnosis: IndexationDiagnosis | None
+    is_running: bool
+    error: str | None
+
+
+# 7-day window: indexation rarely shifts faster than that, so anything
+# older shows up as "устарело" with a CTA to re-check. Critical issues
+# (blocked robots.txt, soft-404) get fixed and stay fixed; the value
+# of a daily re-check is low compared to the API budget.
+INDEXATION_STALE_AFTER_DAYS = 7
+
+
+@router.get(
+    "/sites/{site_id}/indexation",
+    response_model=IndexationState,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_indexation(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> IndexationState:
+    """Read latest indexation state from the activity feed.
+
+    The truth lives in `analysis_events` (latest event with
+    `stage="indexation"`). Both `studio_indexation_run` (this PR's task)
+    and the pipeline-internal `check_site_indexation` write to the same
+    stage so re-checks initiated through other entry points are visible
+    here too.
+    """
+    site = await _site_or_404(db, site_id)
+
+    # Latest indexation event — terminal OR started.
+    result = await db.execute(
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == site_id,
+            AnalysisEvent.stage == "indexation",
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(1),
+    )
+    latest = result.scalar_one_or_none()
+
+    if latest is None:
+        return IndexationState(
+            site_id=str(site_id),
+            domain=site.domain,
+            last_check_at=None,
+            status="never_checked",
+            pages_found=None,
+            pages=[],
+            diagnosis=None,
+            is_running=False,
+            error=None,
+        )
+
+    is_running = latest.status == "started"
+    if is_running:
+        # Started without terminal yet — show "идёт проверка" state.
+        return IndexationState(
+            site_id=str(site_id),
+            domain=site.domain,
+            last_check_at=latest.ts,
+            status="running",
+            pages_found=None,
+            pages=[],
+            diagnosis=None,
+            is_running=True,
+            error=None,
+        )
+
+    extra = latest.extra or {}
+    pages_found = extra.get("pages_found")
+    raw_pages = extra.get("pages") or []
+    pages = [
+        IndexedPage(
+            url=p.get("url", ""),
+            title=p.get("title", ""),
+            position=int(p.get("position", 0)),
+        )
+        for p in raw_pages
+        if isinstance(p, dict) and p.get("url")
+    ]
+
+    raw_diag = extra.get("diagnosis")
+    diagnosis = None
+    if isinstance(raw_diag, dict) and raw_diag.get("verdict"):
+        diagnosis = IndexationDiagnosis(
+            verdict=raw_diag.get("verdict", ""),
+            cause_ru=raw_diag.get("cause_ru", ""),
+            action_ru=raw_diag.get("action_ru", ""),
+            severity=raw_diag.get("severity", "medium"),
+        )
+
+    error = extra.get("error") if latest.status == "failed" else None
+
+    if latest.status == "failed":
+        status = "failed"
+    else:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=INDEXATION_STALE_AFTER_DAYS)
+        status = "fresh" if latest.ts >= cutoff else "stale_7d+"
+
+    return IndexationState(
+        site_id=str(site_id),
+        domain=site.domain,
+        last_check_at=latest.ts,
+        status=status,
+        pages_found=pages_found,
+        pages=pages,
+        diagnosis=diagnosis,
+        is_running=False,
+        error=error,
+    )
+
+
+@router.post(
+    "/sites/{site_id}/indexation/check",
+    response_model=TriggerResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_indexation_check(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TriggerResponse:
+    """Trigger a fresh indexation probe + auto-diagnosis if coverage
+    is low. Runs the same logic as `playground.indexation` scenario
+    but condensed to one task → one verdict.
+    """
+    await _site_or_404(db, site_id)
+
+    recent = await _recent_started_event(db, site_id, "indexation")
+    if recent is not None:
+        return TriggerResponse(
+            status="deduped",
+            task_id=None,
+            run_id=str(recent.run_id) if recent.run_id else "",
+            deduped=True,
+        )
+
+    from app.collectors.tasks import studio_indexation_run
+
+    run_id = str(uuid.uuid4())
+    task = studio_indexation_run.delay(str(site_id), run_id=run_id)
+    return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
+
+
 __all__ = ["router"]

@@ -44,8 +44,7 @@ const MODULES: Array<{
     title: "Индексация",
     description: "Сколько страниц в индексе Яндекса. Если мало — диагностика причины и что чинить.",
     icon: Telescope,
-    status: "stub",
-    reason: "PR-S3",
+    status: "ready",
   },
   {
     href: "/studio/pages",
