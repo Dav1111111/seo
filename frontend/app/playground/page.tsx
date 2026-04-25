@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import useSWR from "swr";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -82,6 +82,212 @@ function JsonBlock({ value }: { value: unknown }) {
       {text}
     </pre>
   );
+}
+
+/** Pretty-render a SERP / page / competitor entry as a clickable row. */
+function LinkRow({
+  position,
+  url,
+  title,
+  reason,
+}: {
+  position?: number;
+  url: string;
+  title?: string;
+  reason?: string;
+}) {
+  return (
+    <li className="flex items-start gap-2 py-1.5 border-b last:border-0 text-sm">
+      {typeof position === "number" && (
+        <span className="text-muted-foreground font-mono text-xs min-w-[1.5rem] text-right">
+          {position}.
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-primary hover:underline break-all"
+        >
+          {title && title !== url ? title : url}
+        </a>
+        {title && title !== url && (
+          <div className="text-[11px] text-muted-foreground truncate mt-0.5">
+            {url}
+          </div>
+        )}
+        {reason && (
+          <div className="text-[11px] text-amber-700 mt-0.5">
+            <span className="text-muted-foreground">причина: </span>
+            {reason}
+          </div>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/** Decide what to render based on which fields the response has.
+ * Each scenario step returns a different shape, but the cues are
+ * obvious — `pages` for indexation results, `raw_serp` for SERP fetch,
+ * `kept`/`dropped` for filter step, `competitors` for the final list.
+ * Fallback: key-value pairs in a small definition list (still no JSON). */
+function ResponseRenderer({ data }: { data: Record<string, unknown> }) {
+  const pages = Array.isArray(data.pages) ? (data.pages as Array<Record<string, unknown>>) : null;
+  const raw = Array.isArray(data.raw_serp) ? (data.raw_serp as Array<Record<string, unknown>>) : null;
+  const kept = Array.isArray(data.kept) ? (data.kept as Array<Record<string, unknown>>) : null;
+  const dropped = Array.isArray(data.dropped) ? (data.dropped as Array<Record<string, unknown>>) : null;
+  const competitors = Array.isArray(data.competitors)
+    ? (data.competitors as Array<Record<string, unknown>>)
+    : null;
+
+  // ── Final competitors list / SERP list / pages list ────────────────
+  if (competitors && competitors.length > 0) {
+    return (
+      <ul className="border rounded divide-y">
+        {competitors.map((c, i) => (
+          <LinkRow
+            key={i}
+            position={typeof c.position === "number" ? c.position : i + 1}
+            url={typeof c.url === "string" ? c.url : ""}
+            title={typeof c.title === "string" ? c.title : undefined}
+          />
+        ))}
+      </ul>
+    );
+  }
+  if (raw && raw.length > 0) {
+    return (
+      <ul className="border rounded divide-y">
+        {raw.map((d, i) => (
+          <LinkRow
+            key={i}
+            position={typeof d.position === "number" ? d.position : i + 1}
+            url={typeof d.url === "string" ? d.url : ""}
+            title={typeof d.title === "string" ? d.title : undefined}
+          />
+        ))}
+      </ul>
+    );
+  }
+  if (pages && pages.length > 0) {
+    return (
+      <ul className="border rounded divide-y">
+        {pages.map((p, i) => (
+          <LinkRow
+            key={i}
+            position={typeof p.position === "number" ? p.position : i + 1}
+            url={typeof p.url === "string" ? p.url : ""}
+            title={typeof p.title === "string" ? p.title : undefined}
+          />
+        ))}
+      </ul>
+    );
+  }
+
+  // ── Filter step: kept + dropped two-column ─────────────────────────
+  if (kept || dropped) {
+    return (
+      <div className="grid gap-3 md:grid-cols-2">
+        <div>
+          <div className="text-xs font-medium mb-1 text-emerald-800">
+            Оставлено: {kept?.length ?? 0}
+          </div>
+          {kept && kept.length > 0 ? (
+            <ul className="border rounded divide-y">
+              {kept.map((c, i) => (
+                <LinkRow
+                  key={i}
+                  position={typeof c.position === "number" ? c.position : undefined}
+                  url={typeof c.url === "string" ? c.url : ""}
+                  title={typeof c.title === "string" ? c.title : undefined}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-muted-foreground italic">пусто</p>
+          )}
+        </div>
+        <div>
+          <div className="text-xs font-medium mb-1 text-amber-800">
+            Отброшено: {dropped?.length ?? 0}
+          </div>
+          {dropped && dropped.length > 0 ? (
+            <ul className="border rounded divide-y">
+              {dropped.map((c, i) => (
+                <LinkRow
+                  key={i}
+                  position={typeof c.position === "number" ? c.position : undefined}
+                  url={typeof c.url === "string" ? c.url : ""}
+                  title={typeof c.title === "string" ? c.title : undefined}
+                  reason={typeof c.reason === "string" ? c.reason : undefined}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-muted-foreground italic">пусто</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Generic fact list — for sitemap / robots / rendering steps ─────
+  // No URL list to draw, just dump the meaningful key-value pairs as
+  // a small definition list. Skip noisy keys (status code, raw bodies).
+  const SKIP = new Set(["body", "raw", "raw_body", "hint_ru"]);
+  const facts = Object.entries(data).filter(
+    ([k, v]) =>
+      !SKIP.has(k) &&
+      v !== null &&
+      v !== undefined &&
+      typeof v !== "object",
+  );
+  if (facts.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground italic">
+        Без структурных данных — см. «Что это значит» выше.
+      </p>
+    );
+  }
+  return (
+    <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
+      {facts.map(([k, v]) => (
+        <Fragment key={k}>
+          <dt className="text-muted-foreground">{prettyKey(k)}</dt>
+          <dd className="font-mono break-all">{String(v)}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+function prettyKey(k: string): string {
+  const dict: Record<string, string> = {
+    pages_found: "Страниц в индексе",
+    docs_returned: "Результатов",
+    kept_count: "Оставлено",
+    dropped_count: "Отброшено",
+    competitors_count: "Конкурентов",
+    valid_xml: "XML валидный",
+    urls_declared: "URL в sitemap",
+    status: "HTTP статус",
+    sitemap_referenced: "Ссылка на sitemap",
+    sitemap_url: "Sitemap URL",
+    disallow_count: "Disallow-правил",
+    title: "Title",
+    text_length: "Символов текста",
+    spa_root_only: "Только пустой <div id=\"root\">",
+    problem: "Проблема",
+    error: "Ошибка",
+    url: "URL",
+    domain: "Домен",
+    query: "Запрос",
+    verdict: "Вердикт",
+    severity: "Уровень",
+  };
+  return dict[k] ?? k;
 }
 
 export default function PlaygroundPage() {
@@ -338,7 +544,15 @@ export default function PlaygroundPage() {
               <div className="text-xs font-medium text-muted-foreground mb-1">
                 Что получили
               </div>
-              <JsonBlock value={step.response_summary} />
+              <ResponseRenderer data={step.response_summary} />
+              <details className="mt-2">
+                <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground select-none">
+                  Показать сырой ответ (JSON)
+                </summary>
+                <div className="mt-2">
+                  <JsonBlock value={step.response_summary} />
+                </div>
+              </details>
             </div>
 
             {step.next_hint_ru && (
