@@ -25,7 +25,9 @@ from urllib.error import HTTPError, URLError
 
 from app.collectors.wordstat import (
     TREND_MONTHS,
+    WordstatTopRequest,
     WordstatVolume,
+    fetch_top_requests,
     fetch_volume,
 )
 
@@ -232,3 +234,112 @@ def test_negative_count_in_response_is_ignored() -> None:
 
     assert result is not None
     assert result.count == 300   # negative dropped
+
+
+# ── fetch_top_requests (semantic expansion / "что ищут со словом X") ──
+
+def test_top_requests_empty_seed_returns_none() -> None:
+    with patch("urllib.request.urlopen") as mock:
+        assert fetch_top_requests("") is None
+        assert fetch_top_requests("   ") is None
+    mock.assert_not_called()
+
+
+def test_top_requests_missing_creds_returns_none() -> None:
+    with patch("urllib.request.urlopen") as mock, \
+         patch("app.collectors.wordstat.settings") as s:
+        s.YANDEX_SEARCH_API_KEY = ""
+        s.YANDEX_CLOUD_FOLDER_ID = "f"
+        assert fetch_top_requests("багги абхазия") is None
+    mock.assert_not_called()
+
+
+def test_top_requests_http_error_returns_none() -> None:
+    err = HTTPError(
+        "https://x", 400, "Bad Request", {},
+        BytesIO(b'{"error":"bad"}'),
+    )
+    with patch("urllib.request.urlopen", side_effect=err), \
+         patch("app.collectors.wordstat.settings") as s:
+        s.YANDEX_SEARCH_API_KEY = "k"
+        s.YANDEX_CLOUD_FOLDER_ID = "f"
+        assert fetch_top_requests("phrase") is None
+
+
+def test_top_requests_empty_results_returns_empty_list() -> None:
+    """Empty results = no related phrases (valid for niche seeds).
+    Distinct from None which means API failure."""
+    with patch(
+        "urllib.request.urlopen", return_value=_ok_response({"results": []}),
+    ), patch("app.collectors.wordstat.settings") as s:
+        s.YANDEX_SEARCH_API_KEY = "k"
+        s.YANDEX_CLOUD_FOLDER_ID = "f"
+        result = fetch_top_requests("very rare seed")
+
+    assert result == []
+
+
+def test_top_requests_parses_phrases_with_counts() -> None:
+    """Real shape we get from the Yandex /topRequests endpoint."""
+    payload = {
+        "totalCount": "3",
+        "results": [
+            {"phrase": "купить квартиру", "count": "8714567"},
+            {"phrase": "купить квартиру вторичка", "count": "880127"},
+            {"phrase": "купить 1 комнатную квартиру", "count": "449042"},
+        ],
+    }
+    with patch(
+        "urllib.request.urlopen", return_value=_ok_response(payload),
+    ), patch("app.collectors.wordstat.settings") as s:
+        s.YANDEX_SEARCH_API_KEY = "k"
+        s.YANDEX_CLOUD_FOLDER_ID = "f"
+        result = fetch_top_requests("купить квартиру")
+
+    assert result is not None
+    assert len(result) == 3
+    assert all(isinstance(r, WordstatTopRequest) for r in result)
+    assert result[0].phrase == "купить квартиру"
+    assert result[0].count == 8714567
+
+
+def test_top_requests_drops_malformed_rows() -> None:
+    """Rows without phrase or count must be skipped silently — never
+    poison the batch."""
+    payload = {
+        "results": [
+            {"phrase": "valid one", "count": "100"},
+            {"phrase": "", "count": "50"},               # empty phrase
+            {"count": "75"},                              # missing phrase
+            {"phrase": "no count"},                       # missing count
+            {"phrase": "negative", "count": "-10"},       # negative
+            {"phrase": "non-numeric", "count": "abc"},    # garbage count
+            "not-a-dict",                                 # wrong type
+            {"phrase": "another valid", "count": "200"},
+        ],
+    }
+    with patch(
+        "urllib.request.urlopen", return_value=_ok_response(payload),
+    ), patch("app.collectors.wordstat.settings") as s:
+        s.YANDEX_SEARCH_API_KEY = "k"
+        s.YANDEX_CLOUD_FOLDER_ID = "f"
+        result = fetch_top_requests("seed")
+
+    assert result is not None
+    phrases = [r.phrase for r in result]
+    assert phrases == ["valid one", "another valid"]
+
+
+def test_top_requests_only_total_count_returns_empty_list() -> None:
+    """Real prod observation: `{"totalCount": "4"}` with no `results`
+    array — niche seed has nothing to return. Treat as empty list, not
+    failure."""
+    payload = {"totalCount": "4"}
+    with patch(
+        "urllib.request.urlopen", return_value=_ok_response(payload),
+    ), patch("app.collectors.wordstat.settings") as s:
+        s.YANDEX_SEARCH_API_KEY = "k"
+        s.YANDEX_CLOUD_FOLDER_ID = "f"
+        result = fetch_top_requests("багги абхазия")
+
+    assert result == []

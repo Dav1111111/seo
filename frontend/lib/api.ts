@@ -613,4 +613,19 @@ export const api = {
       `/studio/sites/${siteId}/queries/wordstat-refresh`,
       { method: "POST", base: "admin" },
     ),
+
+  // Wordstat-based discovery: «что ищут со словом X» semantic expansion
+  // for each service × geo from target_config. Distinct from
+  // studioDiscoverQueries (Cartesian + Suggest + LLM) — see CONCEPT.md
+  // §2.2 and the studio.py docstring.
+  studioWordstatDiscover: (siteId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/queries/wordstat-discover`,
+      { method: "POST", base: "admin" },
+    ),
 };

@@ -51,6 +51,9 @@ log = logging.getLogger(__name__)
 WORDSTAT_DYNAMICS_ENDPOINT = (
     "https://searchapi.api.cloud.yandex.net/v2/wordstat/dynamics"
 )
+WORDSTAT_TOP_REQUESTS_ENDPOINT = (
+    "https://searchapi.api.cloud.yandex.net/v2/wordstat/topRequests"
+)
 DEFAULT_REGION = "REGION_RUSSIA"
 DEFAULT_DEVICES = ("DEVICE_ALL",)
 TREND_MONTHS = 12
@@ -93,10 +96,16 @@ def _twelve_months_ago_iso() -> str:
     return target.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _post(body: dict, api_key: str, timeout: float) -> tuple[int, dict | None, str | None]:
+def _post(
+    body: dict,
+    api_key: str,
+    timeout: float,
+    *,
+    endpoint: str = WORDSTAT_DYNAMICS_ENDPOINT,
+) -> tuple[int, dict | None, str | None]:
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        WORDSTAT_DYNAMICS_ENDPOINT,
+        endpoint,
         data=data,
         method="POST",
         headers={
@@ -222,9 +231,95 @@ def fetch_volume(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class WordstatTopRequest:
+    """One row from `/v2/wordstat/topRequests` — a phrase that contains
+    the seed (or strongly co-occurs with it), with monthly search volume.
+
+    `count` is the integer monthly volume (Yandex returns it as a string;
+    we parse it once here so callers don't have to).
+    """
+
+    phrase: str
+    count: int
+
+    def to_dict(self) -> dict:
+        return {"phrase": self.phrase, "count": self.count}
+
+
+def fetch_top_requests(
+    seed: str,
+    *,
+    region: str = DEFAULT_REGION,
+    devices: Sequence[str] = DEFAULT_DEVICES,
+    timeout: float = REQUEST_TIMEOUT_SEC,
+    api_key: str | None = None,
+    folder_id: str | None = None,
+) -> list[WordstatTopRequest] | None:
+    """Discover phrases people search around `seed` (the «что ищут со словом X»
+    column from manual wordstat.yandex.ru).
+
+    None semantics:
+      - empty seed / missing creds → returns None silently
+      - HTTP error / network / malformed JSON → returns None
+      - 200 with empty `results` → returns [] (valid "no related phrases")
+        so callers can distinguish "no data" from "API failure"
+
+    Note this endpoint does NOT return per-month trend — only an
+    aggregate volume. To populate `wordstat_trend` for these new
+    phrases the caller can run `fetch_volume` afterwards.
+    """
+    cleaned = (seed or "").strip()
+    if not cleaned:
+        return None
+
+    key = api_key or settings.YANDEX_SEARCH_API_KEY
+    folder = folder_id or settings.YANDEX_CLOUD_FOLDER_ID
+    if not key or not folder:
+        return None
+
+    body = {
+        "folderId": folder,
+        "phrase": cleaned,
+        "region": region,
+        "devices": list(devices) or list(DEFAULT_DEVICES),
+    }
+
+    code, data, err = _post(
+        body, key, timeout, endpoint=WORDSTAT_TOP_REQUESTS_ENDPOINT,
+    )
+    if err:
+        log.info(
+            "wordstat.top_requests_failed seed=%r code=%s err=%s",
+            cleaned, code, err,
+        )
+        return None
+
+    rows = (data or {}).get("results") or []
+    out: list[WordstatTopRequest] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        phrase = (row.get("phrase") or "").strip()
+        raw_count = row.get("count")
+        if not phrase or raw_count is None:
+            continue
+        try:
+            n = int(raw_count)
+        except (TypeError, ValueError):
+            continue
+        if n < 0:
+            continue
+        out.append(WordstatTopRequest(phrase=phrase, count=n))
+    return out
+
+
 __all__ = [
     "WordstatVolume",
+    "WordstatTopRequest",
     "fetch_volume",
+    "fetch_top_requests",
     "WORDSTAT_DYNAMICS_ENDPOINT",
+    "WORDSTAT_TOP_REQUESTS_ENDPOINT",
     "TREND_MONTHS",
 ]

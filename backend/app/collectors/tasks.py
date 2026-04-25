@@ -678,3 +678,172 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
             return {"status": terminal, **stats}
 
     return _run_async(_run())
+
+
+# Cap on how many seed phrases we'll send to /topRequests in a single
+# discovery run. Each seed = one API call ≈ 1 sec. With 5 services × 4
+# regions = 20 calls. 50 is a safety lid against runaway target_configs.
+WORDSTAT_DISCOVER_MAX_SEEDS = 50
+# How many phrases to keep per seed. /topRequests returns up to ~200 in
+# practice; we keep the top N to keep the queries table manageable. The
+# user can re-run later to refresh.
+WORDSTAT_DISCOVER_TOP_N_PER_SEED = 30
+
+
+@celery_app.task(name="wordstat_discover_site", bind=True, max_retries=1)
+def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
+    """Discover new search phrases people enter around the site's
+    services + regions, using Wordstat `/topRequests`.
+
+    For each `service × geo_primary` pair from `target_config` we ask
+    Wordstat «what else are people searching with this phrase» and
+    upsert the results into `search_queries` with `wordstat_volume`
+    pre-populated (so the user sees them immediately on /studio/queries
+    without having to click «Обновить объёмы Wordstat» afterwards).
+
+    Per CONCEPT.md §5: writes only to `search_queries` and only the
+    fields directly supported by the discovery payload (query_text,
+    wordstat_volume, wordstat_updated_at). Trend remains NULL — that's
+    a separate /dynamics call which the existing refresh task handles.
+
+    Idempotent on (site_id, query_text) via the table's unique
+    constraint — re-running just refreshes volumes.
+    """
+    import time
+    import anyio
+    from datetime import datetime, timezone
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.collectors.wordstat import fetch_top_requests
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.models.search_query import SearchQuery
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "wordstat_discover", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": "Site not found"}
+
+            cfg = site.target_config or {}
+            services = [s.strip() for s in (cfg.get("services") or []) if s and s.strip()]
+            geos = [g.strip() for g in (cfg.get("geo_primary") or []) if g and g.strip()]
+
+            if not services or not geos:
+                await emit_terminal(
+                    db, site_id, "wordstat_discover", "skipped",
+                    "В профиле сайта нет services или geo_primary — "
+                    "сначала заполни их в настройках.",
+                    extra={"reason": "no_seeds"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "no_seeds"}
+
+            seeds: list[str] = []
+            for svc in services:
+                for geo in geos:
+                    if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
+                        break
+                    seeds.append(f"{svc} {geo}")
+                if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
+                    break
+
+            await log_event(
+                db, site_id, "wordstat_discover", "started",
+                f"Ищу новые запросы через Wordstat: {len(seeds)} "
+                f"seed-фраз ({len(services)} услуг × {len(geos)} регионов), "
+                f"~{len(seeds)} сек.",
+                extra={
+                    "seeds_total": len(seeds),
+                    "services": len(services),
+                    "geos": len(geos),
+                },
+                run_id=run_id,
+            )
+
+            phrases_total = 0
+            phrases_unique: set[str] = set()
+            failed = 0
+            now = datetime.now(timezone.utc)
+
+            for i, seed in enumerate(seeds):
+                try:
+                    rows = await anyio.to_thread.run_sync(
+                        fetch_top_requests, seed,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "wordstat.discover_failed seed=%r err=%s",
+                        seed, exc,
+                    )
+                    failed += 1
+                    rows = None
+
+                if rows:
+                    # Trim to top-N to keep the table reasonable.
+                    rows = sorted(rows, key=lambda r: r.count, reverse=True)
+                    rows = rows[:WORDSTAT_DISCOVER_TOP_N_PER_SEED]
+
+                    for r in rows:
+                        # ON CONFLICT upsert — site_id + query_text is unique.
+                        # Only touch wordstat_volume / updated_at; do NOT
+                        # overwrite is_branded, cluster, last_seen_at etc.
+                        stmt = pg_insert(SearchQuery).values(
+                            site_id=site.id,
+                            query_text=r.phrase,
+                            wordstat_volume=r.count,
+                            wordstat_updated_at=now,
+                            is_branded=False,
+                        ).on_conflict_do_update(
+                            index_elements=["site_id", "query_text"],
+                            set_={
+                                "wordstat_volume": r.count,
+                                "wordstat_updated_at": now,
+                            },
+                        )
+                        await db.execute(stmt)
+                        phrases_total += 1
+                        phrases_unique.add(r.phrase)
+
+                if (i + 1) % 5 == 0:
+                    await db.commit()
+
+                await anyio.to_thread.run_sync(
+                    time.sleep, WORDSTAT_INTER_QUERY_SLEEP_SEC,
+                )
+
+            await db.commit()
+
+            stats = {
+                "seeds_total": len(seeds),
+                "phrases_seen": phrases_total,
+                "phrases_unique": len(phrases_unique),
+                "failed_seeds": failed,
+            }
+            if not phrases_unique:
+                message = (
+                    f"Wordstat не нашёл связанных фраз ни для одного из "
+                    f"{len(seeds)} seed-запросов. Проверь, что в профиле "
+                    "указаны реальные услуги и регионы."
+                )
+                terminal = "failed" if failed else "done"
+            else:
+                message = (
+                    f"Wordstat-discovery: {len(phrases_unique)} уникальных "
+                    f"фраз с объёмами добавлено/обновлено в БД "
+                    f"(seed-фраз обработано: {len(seeds)})."
+                )
+                terminal = "done"
+
+            await emit_terminal(
+                db, site_id, "wordstat_discover", terminal, message,
+                extra=stats, run_id=run_id,
+            )
+            return {"status": terminal, **stats}
+
+    return _run_async(_run())

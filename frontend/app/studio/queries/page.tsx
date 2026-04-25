@@ -25,6 +25,7 @@ import {
   Sparkles as SparklesIcon,
   Telescope,
   RefreshCw,
+  Wand2,
   CheckCircle2,
   Info,
   ArrowLeft,
@@ -170,6 +171,7 @@ export default function StudioQueriesPage() {
   // click so a double-click doesn't hammer the dedup window unnecessarily.
   const [discoverPending, setDiscoverPending] = useState(false);
   const [refreshPending, setRefreshPending] = useState(false);
+  const [wsDiscoverPending, setWsDiscoverPending] = useState(false);
   const [banner, setBanner] = useState<{
     kind: "ok" | "deduped" | "err";
     text: string;
@@ -226,6 +228,30 @@ export default function StudioQueriesPage() {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
       setTimeout(() => setRefreshPending(false), 3000);
+    }
+  }
+
+  async function onWordstatDiscover() {
+    if (!siteId || wsDiscoverPending) return;
+    setWsDiscoverPending(true);
+    setBanner(null);
+    try {
+      const res = await api.studioWordstatDiscover(siteId);
+      if (res.deduped) {
+        setBanner({
+          kind: "deduped",
+          text: `Wordstat-discovery уже идёт (run_id ${res.run_id.slice(0, 8)}…). Подожди, он закончится.`,
+        });
+      } else {
+        setBanner({
+          kind: "ok",
+          text: `Запущен поиск через Wordstat · run_id ${res.run_id.slice(0, 8)}…. Каждая пара "услуга × регион" из профиля даёт ~30 фраз; результаты появятся в таблице по мере поступления.`,
+        });
+      }
+    } catch (e: unknown) {
+      setBanner({ kind: "err", text: getErrorMessage(e) });
+    } finally {
+      setTimeout(() => setWsDiscoverPending(false), 3000);
     }
   }
 
@@ -300,6 +326,21 @@ export default function StudioQueriesPage() {
               )}
             />
             {discoverPending ? "Запускаю…" : "Найти новые запросы"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onWordstatDiscover}
+            disabled={wsDiscoverPending}
+            title="Семантическое расширение через Wordstat: для каждой пары «услуга × регион» из профиля сайта подтягиваем «что ищут со словом X»."
+          >
+            <Wand2
+              className={cn(
+                "h-4 w-4 mr-2",
+                wsDiscoverPending && "animate-pulse",
+              )}
+            />
+            {wsDiscoverPending ? "Запускаю…" : "Найти через Wordstat"}
           </Button>
           <Button
             size="sm"

@@ -342,4 +342,41 @@ async def trigger_wordstat_refresh(
     return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
 
 
+@router.post(
+    "/sites/{site_id}/queries/wordstat-discover",
+    response_model=TriggerResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_wordstat_discover(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TriggerResponse:
+    """Discover new search phrases through Wordstat `/topRequests` —
+    the «что ищут со словом X» semantic expansion that manual
+    wordstat.yandex.ru shows.
+
+    For each `service × geo_primary` pair from the site's `target_config`
+    we ask Wordstat what people search around that combination, and
+    upsert the results into `search_queries`. Distinct stage from the
+    Cartesian-based `discover` (demand_map) so the user can use either,
+    or both, and tell from the activity feed which fed which phrases.
+    """
+    await _site_or_404(db, site_id)
+
+    recent = await _recent_started_event(db, site_id, "wordstat_discover")
+    if recent is not None:
+        return TriggerResponse(
+            status="deduped",
+            task_id=None,
+            run_id=str(recent.run_id) if recent.run_id else "",
+            deduped=True,
+        )
+
+    from app.collectors.tasks import wordstat_discover_site
+
+    run_id = str(uuid.uuid4())
+    task = wordstat_discover_site.delay(str(site_id), run_id=run_id)
+    return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
+
+
 __all__ = ["router"]
