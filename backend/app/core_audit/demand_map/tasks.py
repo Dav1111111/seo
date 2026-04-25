@@ -77,7 +77,11 @@ def demand_map_build_site_task(self, site_id: str, run_id: str | None = None) ->
                     "Сайт не найден в базе.",
                     run_id=run_id,
                 )
-                return {"status": "skipped", "reason": "site_not_found"}
+                return {
+                    "status": "failed",
+                    "stage": "demand_map",
+                    "reason": "site_not_found",
+                }
 
             target_config: dict = dict(site.target_config or {})
             if not target_config:
@@ -111,7 +115,11 @@ def demand_map_build_site_task(self, site_id: str, run_id: str | None = None) ->
                     f"Карта спроса остановлена: {str(exc)[:200]}",
                     run_id=run_id,
                 )
-                raise
+                return {
+                    "status": "failed",
+                    "stage": "demand_map",
+                    "error": str(exc),
+                }
 
             # 2. Enrichment stages (gated by feature flag).
             queries: list = []
@@ -152,9 +160,21 @@ def demand_map_build_site_task(self, site_id: str, run_id: str | None = None) ->
             clusters = rescore_with_observed_overlap(clusters, observed)
 
             # 4. Persist.
-            stats = await persist_demand_map(
-                db, UUID(site_id), clusters, queries
-            )
+            try:
+                stats = await persist_demand_map(
+                    db, UUID(site_id), clusters, queries
+                )
+            except Exception as exc:  # noqa: BLE001
+                await emit_terminal(
+                    db, site_id, "demand_map", "failed",
+                    f"Карта спроса не сохранилась: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "demand_map",
+                    "error": str(exc),
+                }
 
             await emit_terminal(
                 db, site_id, "demand_map", "done",

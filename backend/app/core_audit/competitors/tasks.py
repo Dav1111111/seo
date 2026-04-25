@@ -49,6 +49,66 @@ def _run(coro):
         loop.close()
 
 
+def _queue_review_chain(site_id: str, run_id: str | None) -> bool:
+    """Continue full analysis into review -> priorities -> report."""
+    from app.core_audit.review.tasks import review_site_decisions_task
+
+    try:
+        review_site_decisions_task.apply_async(
+            args=[site_id],
+            kwargs={"run_id": run_id, "chain_report": True},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("competitors.review_chain_dispatch_failed site=%s err=%s", site_id, exc)
+        return False
+
+
+async def _mark_review_chain_dispatch_failed(
+    db,
+    site_id: str,
+    run_id: str | None,
+) -> None:
+    await emit_terminal(
+        db, site_id, "review", "failed",
+        "Не удалось запустить проверку страниц.",
+        run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "priorities", "skipped",
+        "Приоритеты пропущены — проверка страниц не запустилась.",
+        run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "report", "skipped",
+        "Отчёт пропущен — проверка страниц не запустилась.",
+        run_id=run_id,
+    )
+
+
+async def _skip_after_competitor_stop(
+    db,
+    site_id: str,
+    run_id: str | None,
+    *,
+    reason: str,
+    include_deep_dive: bool = True,
+) -> None:
+    """Fill dependent terminals when competitor flow cannot continue."""
+    extra = {"reason": reason}
+    if include_deep_dive:
+        await emit_terminal(
+            db, site_id, "competitor_deep_dive", "skipped",
+            "Глубокий анализ пропущен — нет свежей разведки конкурентов.",
+            extra=extra, run_id=run_id,
+        )
+    await emit_terminal(
+        db, site_id, "opportunities", "skipped",
+        "Точки роста пропущены — нет свежего глубокого анализа конкурентов.",
+        extra=extra, run_id=run_id,
+    )
+
+
 def _business_tokens(target_config: dict) -> set[str]:
     """Union of service + geo tokens from target_config (lowercased).
 
@@ -248,6 +308,14 @@ def competitors_discover_site_task(
                         "Разведка уже идёт — второй запуск пропущен.",
                         run_id=run_id,
                     )
+                    await _skip_after_competitor_stop(
+                        db,
+                        site_id,
+                        run_id,
+                        reason="concurrent_run",
+                    )
+                    if not _queue_review_chain(site_id, run_id):
+                        await _mark_review_chain_dispatch_failed(db, site_id, run_id)
                     return {
                         "status": "skipped",
                         "reason": "concurrent_run",
@@ -299,6 +367,14 @@ def competitors_discover_site_task(
                             "Нет запросов для разведки — сначала запусти сбор из Вебмастера.",
                             run_id=run_id,
                         )
+                        await _skip_after_competitor_stop(
+                            db,
+                            site_id,
+                            run_id,
+                            reason="no_queries_available",
+                        )
+                        if not _queue_review_chain(site_id, run_id):
+                            await _mark_review_chain_dispatch_failed(db, site_id, run_id)
                         return {
                             "status": "skipped",
                             "reason": "no_queries_available",
@@ -380,12 +456,30 @@ def competitors_discover_site_task(
                                 "(брокер задач недоступен).",
                                 run_id=run_id,
                             )
+                            await _skip_after_competitor_stop(
+                                db,
+                                site_id,
+                                run_id,
+                                reason="deep_dive_dispatch_failed",
+                                include_deep_dive=False,
+                            )
+                            if not _queue_review_chain(site_id, run_id):
+                                await _mark_review_chain_dispatch_failed(db, site_id, run_id)
                     else:
                         await emit_terminal(
                             db, site_id, "competitor_deep_dive", "skipped",
                             "Конкуренты не найдены — глубокий анализ пропущен.",
                             run_id=run_id,
                         )
+                        await _skip_after_competitor_stop(
+                            db,
+                            site_id,
+                            run_id,
+                            reason="no_competitors_found",
+                            include_deep_dive=False,
+                        )
+                        if not _queue_review_chain(site_id, run_id):
+                            await _mark_review_chain_dispatch_failed(db, site_id, run_id)
 
                     return {
                         "status": "ok",
@@ -471,6 +565,15 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                         "Нет найденных конкурентов — сначала запусти разведку.",
                         run_id=run_id,
                     )
+                    await _skip_after_competitor_stop(
+                        db,
+                        site_id,
+                        run_id,
+                        reason="no_competitor_profile",
+                        include_deep_dive=False,
+                    )
+                    if not _queue_review_chain(site_id, run_id):
+                        await _mark_review_chain_dispatch_failed(db, site_id, run_id)
                     return {
                         "status": "skipped",
                         "reason": "no_competitor_profile",
@@ -625,6 +728,8 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                     },
                     run_id=run_id,
                 )
+                if not _queue_review_chain(site_id, run_id):
+                    await _mark_review_chain_dispatch_failed(db, site_id, run_id)
 
                 return {
                     "status": "ok",
@@ -650,6 +755,15 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                         f"Глубокий анализ остановлен: {str(exc)[:200]}",
                         run_id=run_id,
                     )
+                    await _skip_after_competitor_stop(
+                        db2,
+                        site_id,
+                        run_id,
+                        reason="deep_dive_failed",
+                        include_deep_dive=False,
+                    )
+                    if not _queue_review_chain(site_id, run_id):
+                        await _mark_review_chain_dispatch_failed(db2, site_id, run_id)
             except Exception:  # noqa: BLE001
                 pass
             return {"status": "error", "site_id": site_id, "err": str(exc)}

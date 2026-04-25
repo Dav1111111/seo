@@ -64,13 +64,15 @@ export function IndexationCard({ siteId }: { siteId: string }) {
 
   const { data, mutate } = useSWR(
     siteId ? ["indexation", siteId] : null,
-    () => api.activity(siteId, 50),
+    () => api.getActivity(siteId, 50),
     { refreshInterval: 5_000 },
   );
 
   // Pick the most recent terminal indexation event.
   const event: ActivityEvent | undefined = data?.events.find(
-    (e) => e.stage === "indexation" && ["done", "failed", "skipped"].includes(e.status),
+    (e: ActivityEvent) =>
+      e.stage === "indexation" &&
+      ["done", "failed", "skipped"].includes(e.status),
   );
   const extra = event ? asIndexationExtra(event.extra) : null;
 

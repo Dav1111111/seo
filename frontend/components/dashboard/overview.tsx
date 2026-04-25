@@ -141,9 +141,9 @@ export function OverviewPage() {
       setBanner({
         kind: "ok",
         msg:
-          "Анализ запущен. Сначала обновим страницы, Вебмастер и карту спроса, " +
-          "потом проверим понимание бизнеса, конкурентов и точки роста. " +
-          "Если данных из Яндекса мало, конкурентный блок будет честно пропущен.",
+          "Полный анализ запущен. Сначала обновим данные сайта, потом найдём " +
+          "проблемы, конкурентов, точки роста, пересчитаем приоритеты и соберём отчёт. " +
+          "Если данных из Яндекса мало, лишние этапы будут честно пропущены.",
       });
     } catch (error: unknown) {
       setBanner({ kind: "err", msg: getErrorMessage(error) });
@@ -224,11 +224,11 @@ export function OverviewPage() {
           <div className="flex flex-col items-end gap-1">
             <Button size="sm" onClick={runQuickAnalysis} disabled={runningFull}>
               <Play className={cn("mr-2 h-4 w-4", runningFull && "animate-pulse")} />
-              {runningFull ? "Запускаю…" : "Быстрый анализ"}
+              {runningFull ? "Запускаю…" : "Запустить полный анализ"}
             </Button>
             <p className="text-[11px] text-muted-foreground max-w-[240px] text-right leading-tight">
-              Обновит данные сайта, затем соберёт конкурентов и точки роста,
-              если хватает запросов из Яндекса.
+              Один понятный прогон: сбор данных, конкуренты, точки роста,
+              приоритеты и отчёт.
             </p>
           </div>
         </div>
@@ -292,8 +292,8 @@ export function OverviewPage() {
       ) : !latestReport ? (
         <Card className="border-dashed">
           <CardContent className="py-4 text-sm text-muted-foreground">
-            Отчётов пока нет. После первого сбора данных ночью — появится первый еженедельный
-            отчёт с корневой проблемой и планом.
+            Отчётов пока нет. Нажми «Запустить полный анализ» — после проверки
+            появится отчёт с корневой проблемой и планом.
           </CardContent>
         </Card>
       ) : null}

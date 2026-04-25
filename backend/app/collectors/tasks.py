@@ -187,7 +187,11 @@ def collect_site_webmaster(site_id: str, run_id: str | None = None):
                     "Сайт не найден в базе.",
                     run_id=run_id,
                 )
-                return {"error": "Site not found"}
+                return {
+                    "status": "failed",
+                    "stage": "webmaster",
+                    "error": "Site not found",
+                }
 
             await log_event(
                 db, site_id, "webmaster", "started",
@@ -207,7 +211,11 @@ def collect_site_webmaster(site_id: str, run_id: str | None = None):
                     f"Вебмастер ответил ошибкой: {str(exc)[:200]}",
                     run_id=run_id,
                 )
-                raise
+                return {
+                    "status": "failed",
+                    "stage": "webmaster",
+                    "error": str(exc),
+                }
             finally:
                 await collector.close()
 
@@ -242,7 +250,11 @@ def crawl_site(site_id: str, run_id: str | None = None):
                     "Сайт не найден в базе.",
                     run_id=run_id,
                 )
-                return {"error": "Site not found"}
+                return {
+                    "status": "failed",
+                    "stage": "crawl",
+                    "error": "Site not found",
+                }
 
             await log_event(
                 db, site_id, "crawl", "started",
@@ -261,7 +273,11 @@ def crawl_site(site_id: str, run_id: str | None = None):
                     f"Краулинг остановлен с ошибкой: {str(exc)[:200]}",
                     run_id=run_id,
                 )
-                raise
+                return {
+                    "status": "failed",
+                    "stage": "crawl",
+                    "error": str(exc),
+                }
 
             await emit_terminal(
                 db, site_id, "crawl", "done",
@@ -282,14 +298,18 @@ def crawl_site(site_id: str, run_id: str | None = None):
     result = _run_async(_run())
 
     # Chain fingerprinting after successful crawl
-    if isinstance(result, dict) and "error" not in result:
+    if isinstance(result, dict) and result.get("status") != "failed" and "error" not in result:
         fingerprint_site.apply_async(args=[site_id], countdown=10)
         result["fingerprint_queued"] = True
         # IndexNow push runs regardless of verification state — the
         # task itself decides to skip if the key isn't verified yet,
         # emits a "skipped" event instead of crashing, so owner sees
         # "not configured" in the activity feed without us gating here.
-        indexnow_ping_site.apply_async(args=[site_id], countdown=30)
+        indexnow_ping_site.apply_async(
+            args=[site_id],
+            kwargs={"run_id": run_id},
+            countdown=30,
+        )
         result["indexnow_queued"] = True
 
     return result

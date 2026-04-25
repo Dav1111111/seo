@@ -19,6 +19,8 @@ from sqlalchemy import select
 from app.core_audit.pipeline.tasks import (
     MIN_MONEY_QUERIES,
     _count_money_queries,
+    _primary_stage_failures,
+    _skip_after_primary_failure,
     _skip_competitor_stages,
 )
 from app.models.analysis_event import AnalysisEvent
@@ -188,3 +190,71 @@ def test_min_money_queries_is_documented_constant():
     """Guardrail: anyone lowering the threshold below 3 should think
     hard — SERP at that size is dominated by aggregators."""
     assert MIN_MONEY_QUERIES >= 3
+
+
+def test_primary_stage_failures_detects_failed_header_results():
+    failures = _primary_stage_failures([
+        {"status": "ok", "stage": "crawl"},
+        {"status": "failed", "stage": "webmaster", "error": "500"},
+        {"stage": "demand_map", "error": "boom"},
+    ])
+    assert failures == [
+        {"stage": "webmaster", "error": "500"},
+        {"stage": "demand_map", "error": "boom"},
+    ]
+
+
+async def test_skip_after_primary_failure_emits_all_downstream_terminals(
+    db,
+    test_site: Site,
+):
+    run_id = uuid.uuid4()
+    from app.core_audit.activity import log_event
+
+    queued = [
+        "crawl", "webmaster", "demand_map",
+        "business_truth",
+        "competitor_discovery", "competitor_deep_dive",
+        "opportunities",
+        "review", "priorities", "report",
+    ]
+    await log_event(
+        db,
+        test_site.id,
+        "pipeline",
+        "started",
+        "trigger",
+        extra={"queued": queued},
+        run_id=run_id,
+    )
+    await log_event(
+        db, test_site.id, "crawl", "failed", "crawl failed", run_id=run_id,
+    )
+    await log_event(
+        db, test_site.id, "webmaster", "done", "ok", run_id=run_id,
+    )
+    await log_event(
+        db, test_site.id, "demand_map", "done", "ok", run_id=run_id,
+    )
+
+    await _skip_after_primary_failure(
+        db,
+        str(test_site.id),
+        str(run_id),
+        [{"stage": "crawl", "error": "boom"}],
+    )
+
+    rows = (await db.execute(
+        select(AnalysisEvent)
+        .where(AnalysisEvent.site_id == test_site.id)
+        .order_by(AnalysisEvent.ts.asc())
+    )).scalars().all()
+    by_stage = {(e.stage, e.status) for e in rows}
+    assert ("business_truth", "skipped") in by_stage
+    assert ("competitor_discovery", "skipped") in by_stage
+    assert ("competitor_deep_dive", "skipped") in by_stage
+    assert ("opportunities", "skipped") in by_stage
+    assert ("review", "skipped") in by_stage
+    assert ("priorities", "skipped") in by_stage
+    assert ("report", "skipped") in by_stage
+    assert ("pipeline", "failed") in by_stage

@@ -127,7 +127,7 @@ INDEXATION_META = ScenarioMeta(
             placeholder_ru="grandtourspirit.ru",
         ),
     ],
-    step_count=4,   # up to 4 if diagnostic continues; 1 if not
+    step_count=5,   # up to 5 if diagnostic continues; 1 if not
 )
 
 

@@ -54,6 +54,7 @@ const WORK_STAGES = [
   "crawl", "webmaster", "demand_map",
   "business_truth",
   "competitor_discovery", "competitor_deep_dive", "opportunities",
+  "review", "priorities", "report",
 ];
 
 export function LastRunSummary({ siteId }: { siteId: string }) {
@@ -191,6 +192,9 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
           <StageChip stage={discovery}                           label="разведка" />
           <StageChip stage={dive}                                label="глубокий анализ" />
           <StageChip stage={opps}                                label="точки роста" />
+          <StageChip stage={byStage.get("review")}               label="проверка страниц" />
+          <StageChip stage={byStage.get("priorities")}           label="приоритеты" />
+          <StageChip stage={byStage.get("report")}               label="отчёт" />
         </div>
 
         <div className="pt-2 flex gap-2 flex-wrap">

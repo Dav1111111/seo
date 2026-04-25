@@ -58,6 +58,7 @@ def review_site_decisions_task(
     site_id: str,
     top_n: int = DEFAULT_TOP_N,
     run_id: str | None = None,
+    chain_report: bool = False,
 ):
     """Review top-N strengthen decisions for a single site. Chains
     priority_rescore_site so fresh recs get scored immediately."""
@@ -87,7 +88,28 @@ def review_site_decisions_task(
                     f"Проверка страниц остановлена: {str(exc)[:200]}",
                     run_id=run_id,
                 )
-                raise
+                if chain_report:
+                    await emit_terminal(
+                        db,
+                        site_id,
+                        "priorities",
+                        "skipped",
+                        "Приоритеты пропущены — проверка страниц не завершилась.",
+                        run_id=run_id,
+                    )
+                    await emit_terminal(
+                        db,
+                        site_id,
+                        "report",
+                        "skipped",
+                        "Отчёт пропущен — нет свежих приоритетов.",
+                        run_id=run_id,
+                    )
+                return {
+                    "status": "failed",
+                    "site_id": site_id,
+                    "error": str(exc),
+                }
 
             await emit_terminal(
                 db,
@@ -110,12 +132,40 @@ def review_site_decisions_task(
             return result
 
     result = _run(_inner())
+    if isinstance(result, dict) and result.get("status") == "failed":
+        return result
+
     # Chain rescore so priorities are fresh right after the review batch.
     try:
         from app.core_audit.priority.tasks import priority_rescore_site
-        priority_rescore_site.delay(site_id, run_id=run_id)
+        priority_rescore_site.delay(
+            site_id,
+            run_id=run_id,
+            chain_report=chain_report,
+        )
     except Exception as exc:
         logger.warning("rescore chain dispatch failed site=%s: %s", site_id, exc)
+        if chain_report:
+            async def _mark_dispatch_failed():
+                async with task_session() as db:
+                    await emit_terminal(
+                        db,
+                        site_id,
+                        "priorities",
+                        "failed",
+                        "Не удалось запустить пересчёт приоритетов.",
+                        run_id=run_id,
+                    )
+                    await emit_terminal(
+                        db,
+                        site_id,
+                        "report",
+                        "skipped",
+                        "Отчёт пропущен — приоритеты не запустились.",
+                        run_id=run_id,
+                    )
+
+            _run(_mark_dispatch_failed())
     return result
 
 

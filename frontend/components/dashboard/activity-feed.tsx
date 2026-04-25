@@ -107,8 +107,8 @@ export function ActivityFeed({ siteId }: { siteId: string }) {
           </div>
         ) : visibleEvents.length === 0 ? (
           <p className="text-sm text-muted-foreground italic py-4 text-center">
-            Событий пока нет. Нажми «Запустить полный анализ» — появятся строки о том,
-            что платформа делает прямо сейчас.
+            Событий пока нет. Нажми «Запустить полный анализ» — здесь будет видно
+            каждый шаг: сбор данных, конкуренты, приоритеты и отчёт.
           </p>
         ) : (
           <ul className="space-y-2">

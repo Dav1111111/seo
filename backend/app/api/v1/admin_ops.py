@@ -103,6 +103,9 @@ async def trigger_full_pipeline(
         "competitor_discovery",
         "competitor_deep_dive",
         "opportunities",
+        "review",
+        "priorities",
+        "report",
     ]
 
     await log_event(

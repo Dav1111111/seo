@@ -135,6 +135,112 @@ async def _skip_competitor_stages(
     )
 
 
+def _primary_stage_failures(results) -> list[dict]:
+    """Return failed primary-stage results from a Celery chord header.
+
+    Header tasks must return failure payloads instead of raising, or the
+    chord callback never runs and the UI keeps an open pipeline forever.
+    """
+    failures: list[dict] = []
+    if not isinstance(results, list):
+        return failures
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").lower()
+        if status == "failed" or item.get("error"):
+            failures.append({
+                "stage": item.get("stage") or "primary",
+                "error": item.get("error") or item.get("reason") or status,
+            })
+    return failures
+
+
+async def _skip_after_primary_failure(
+    db, site_id: str, run_id: str | None, failures: list[dict],
+) -> None:
+    """Terminal-fill downstream stages when a primary stage failed.
+
+    Full pipeline declares every expected stage up front. If crawl,
+    Webmaster, or demand_map failed, we should not run downstream AI/SERP
+    work, but every queued downstream stage still needs a terminal row so
+    the wrapper closes cleanly as `pipeline:failed`.
+    """
+    failed_names = ", ".join(str(f.get("stage") or "primary") for f in failures)
+    extra = {"primary_failures": failures}
+
+    await emit_terminal(
+        db, site_id, "business_truth", "skipped",
+        f"Понимание бизнеса пропущено: сначала упал этап {failed_names}.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "competitor_discovery", "skipped",
+        f"Разведка конкурентов пропущена: сначала упал этап {failed_names}.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "competitor_deep_dive", "skipped",
+        "Глубокий анализ пропущен — нет свежей разведки.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "opportunities", "skipped",
+        "Точки роста пропущены — полный анализ не дошёл до конкурентов.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "review", "skipped",
+        "Проверка страниц пропущена — сначала надо починить базовый сбор.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "priorities", "skipped",
+        "Приоритеты пропущены — нет свежей проверки страниц.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "report", "skipped",
+        "Отчёт пропущен — полный анализ завершился с ошибкой до аналитики.",
+        extra=extra, run_id=run_id,
+    )
+
+
+def _queue_review_chain(site_id: str, run_id: str | None) -> bool:
+    from app.core_audit.review.tasks import review_site_decisions_task
+
+    try:
+        review_site_decisions_task.apply_async(
+            args=[site_id],
+            kwargs={"run_id": run_id, "chain_report": True},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pipeline.review_chain_dispatch_failed site=%s err=%s", site_id, exc)
+        return False
+
+
+async def _mark_review_chain_dispatch_failed(
+    db, site_id: str, run_id: str | None,
+) -> None:
+    await emit_terminal(
+        db, site_id, "review", "failed",
+        "Не удалось запустить проверку страниц.",
+        run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "priorities", "skipped",
+        "Приоритеты пропущены — проверка страниц не запустилась.",
+        run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "report", "skipped",
+        "Отчёт пропущен — проверка страниц не запустилась.",
+        run_id=run_id,
+    )
+
+
 @celery_app.task(
     name="pipeline_after_primary", bind=True, max_retries=0,
 )
@@ -150,6 +256,20 @@ def pipeline_after_primary_task(
     competitor discovery on money-query count. Keeping this callback
     small — heavy lifting stays in the specialized tasks it fires.
     """
+    failures = _primary_stage_failures(_collected_results)
+    if failures:
+        async def _skip_failed() -> None:
+            async with task_session() as db:
+                await _skip_after_primary_failure(db, site_id, run_id, failures)
+
+        _run(_skip_failed())
+        return {
+            "status": "failed",
+            "site_id": site_id,
+            "action": "skipped_downstream_after_primary_failure",
+            "primary_failures": failures,
+        }
+
     # Step 4 — BusinessTruth rebuild (fire-and-forget; its own task
     # emits started/done events under stage="business_truth").
     from app.core_audit.business_truth.tasks import (
@@ -183,6 +303,12 @@ def pipeline_after_primary_task(
             await _skip_competitor_stages(db, site_id, run_id, money_q)
 
     _run(_skip())
+    if not _queue_review_chain(site_id, run_id):
+        async def _mark_review_failed() -> None:
+            async with task_session() as db:
+                await _mark_review_chain_dispatch_failed(db, site_id, run_id)
+
+        _run(_mark_review_failed())
     return {
         "status": "ok",
         "site_id": site_id,
@@ -193,5 +319,6 @@ def pipeline_after_primary_task(
 
 __all__ = [
     "MIN_MONEY_QUERIES",
+    "_primary_stage_failures",
     "pipeline_after_primary_task",
 ]

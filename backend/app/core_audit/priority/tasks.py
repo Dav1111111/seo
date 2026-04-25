@@ -42,7 +42,12 @@ def _format_priority_rescore_message(result: dict) -> tuple[str, dict]:
 
 
 @celery_app.task(name="priority_rescore_site", bind=True, max_retries=1)
-def priority_rescore_site(self, site_id: str, run_id: str | None = None):
+def priority_rescore_site(
+    self,
+    site_id: str,
+    run_id: str | None = None,
+    chain_report: bool = False,
+):
     """Rescore all latest-review recommendations for a site."""
 
     async def _inner():
@@ -66,7 +71,20 @@ def priority_rescore_site(self, site_id: str, run_id: str | None = None):
                     f"Пересчёт приоритетов остановлен: {str(exc)[:200]}",
                     run_id=run_id,
                 )
-                raise
+                if chain_report:
+                    await emit_terminal(
+                        db,
+                        site_id,
+                        "report",
+                        "skipped",
+                        "Отчёт пропущен — приоритеты не пересчитались.",
+                        run_id=run_id,
+                    )
+                return {
+                    "status": "failed",
+                    "site_id": site_id,
+                    "error": str(exc),
+                }
 
             message, extra = _format_priority_rescore_message(result)
             await emit_terminal(
@@ -80,4 +98,23 @@ def priority_rescore_site(self, site_id: str, run_id: str | None = None):
             )
             return result
 
-    return _run(_inner())
+    result = _run(_inner())
+    if chain_report and isinstance(result, dict) and result.get("status") != "failed":
+        try:
+            from app.core_audit.report.tasks import report_build_site
+            report_build_site.delay(site_id, None, run_id=run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("report chain dispatch failed site=%s: %s", site_id, exc)
+            async def _mark_report_dispatch_failed():
+                async with task_session() as db:
+                    await emit_terminal(
+                        db,
+                        site_id,
+                        "report",
+                        "failed",
+                        "Не удалось запустить сборку отчёта.",
+                        run_id=run_id,
+                    )
+
+            _run(_mark_report_dispatch_failed())
+    return result
