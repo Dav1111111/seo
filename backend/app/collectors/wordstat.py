@@ -255,6 +255,7 @@ def fetch_top_requests(
     timeout: float = REQUEST_TIMEOUT_SEC,
     api_key: str | None = None,
     folder_id: str | None = None,
+    retry_on_429: bool = True,
 ) -> list[WordstatTopRequest] | None:
     """Discover phrases people search around `seed` (the «что ищут со словом X»
     column from manual wordstat.yandex.ru).
@@ -265,10 +266,17 @@ def fetch_top_requests(
       - 200 with empty `results` → returns [] (valid "no related phrases")
         so callers can distinguish "no data" from "API failure"
 
+    Rate-limit handling: `/topRequests` is much harsher than `/dynamics`
+    — empirical limit ≈ 1 req per 8-12 sec. On HTTP 429 we sleep 30 sec
+    and retry exactly once (still cheaper than losing the whole batch
+    when one slow seed bunches up against the next call).
+
     Note this endpoint does NOT return per-month trend — only an
     aggregate volume. To populate `wordstat_trend` for these new
     phrases the caller can run `fetch_volume` afterwards.
     """
+    import time as _time
+
     cleaned = (seed or "").strip()
     if not cleaned:
         return None
@@ -288,6 +296,12 @@ def fetch_top_requests(
     code, data, err = _post(
         body, key, timeout, endpoint=WORDSTAT_TOP_REQUESTS_ENDPOINT,
     )
+    if code == 429 and retry_on_429:
+        log.info("wordstat.top_requests_429 seed=%r — backoff 30s", cleaned)
+        _time.sleep(30.0)
+        code, data, err = _post(
+            body, key, timeout, endpoint=WORDSTAT_TOP_REQUESTS_ENDPOINT,
+        )
     if err:
         log.info(
             "wordstat.top_requests_failed seed=%r code=%s err=%s",

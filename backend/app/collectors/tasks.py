@@ -681,13 +681,20 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
 
 
 # Cap on how many seed phrases we'll send to /topRequests in a single
-# discovery run. Each seed = one API call ≈ 1 sec. With 5 services × 4
-# regions = 20 calls. 50 is a safety lid against runaway target_configs.
-WORDSTAT_DISCOVER_MAX_SEEDS = 50
+# discovery run. /topRequests has a much harsher rate limit than
+# /dynamics — empirically ≈ 1 req per 10 sec. With 12-sec sleep + 30-sec
+# 429 back-off, 30 seeds = 6-12 minutes wall time. Hard cap at 30 to
+# bound worst-case duration.
+WORDSTAT_DISCOVER_MAX_SEEDS = 30
 # How many phrases to keep per seed. /topRequests returns up to ~200 in
 # practice; we keep the top N to keep the queries table manageable. The
 # user can re-run later to refresh.
 WORDSTAT_DISCOVER_TOP_N_PER_SEED = 30
+# Sleep between /topRequests calls. /dynamics is OK at 1 sec, but
+# /topRequests routinely 429s when polled faster than ~8-10 sec. 12 sec
+# gives a comfort margin and lets the 30-sec one-shot 429 retry inside
+# fetch_top_requests be a true rare event.
+WORDSTAT_TOP_REQUESTS_SLEEP_SEC = 12.0
 
 
 @celery_app.task(name="wordstat_discover_site", bind=True, max_retries=1)
@@ -774,19 +781,19 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
             anchor_mode: str
             if primary:
                 anchor_mode = "primary_anchored"
-                # Layer 1: primary × geo
+                # Layer 1: primary alone — picks up wide-context phrases
+                # ("багги тур", "багги отзывы", "багги техника").
+                seeds.append(primary)
+                # Layer 2: primary × geo — narrows to local intent
+                # ("багги сочи", "багги абхазия").
                 for geo in geos:
                     if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
                         break
                     seeds.append(f"{primary} {geo}")
-                # Layer 2: secondary + primary × geo
-                for sec in secondaries:
-                    for geo in geos:
-                        if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
-                            break
-                        seeds.append(f"{sec} {primary} {geo}")
-                    if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
-                        break
+                # NOTE: secondary × primary × geo expansion was tried
+                # and produced near-empty results (Wordstat /topRequests
+                # is shallow — phrases must literally contain the seed,
+                # so a 3-word seed almost never has children). Skip.
             else:
                 anchor_mode = "services_legacy"
                 for svc in services:
@@ -801,17 +808,19 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 f"привязка к «{primary}»" if primary
                 else f"услуги без привязки ({len(services)} шт.)"
             )
+            est_sec = int(len(seeds) * WORDSTAT_TOP_REQUESTS_SLEEP_SEC)
             await log_event(
                 db, site_id, "wordstat_discover", "started",
                 f"Ищу новые запросы через Wordstat: {len(seeds)} "
-                f"seed-фраз ({anchor_descr}, регионов: {len(geos)}), "
-                f"~{len(seeds)} сек.",
+                f"seed-фраз ({anchor_descr}, регионов: {len(geos)}). "
+                f"Wordstat-API режет на 429, идём по ~{int(WORDSTAT_TOP_REQUESTS_SLEEP_SEC)} сек/запрос. "
+                f"Оценка: ~{est_sec} сек.",
                 extra={
                     "seeds_total": len(seeds),
                     "anchor_mode": anchor_mode,
                     "primary": primary,
-                    "secondaries": len(secondaries),
                     "geos": len(geos),
+                    "est_sec": est_sec,
                 },
                 run_id=run_id,
             )
@@ -864,7 +873,7 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                     await db.commit()
 
                 await anyio.to_thread.run_sync(
-                    time.sleep, WORDSTAT_INTER_QUERY_SLEEP_SEC,
+                    time.sleep, WORDSTAT_TOP_REQUESTS_SLEEP_SEC,
                 )
 
             await db.commit()
