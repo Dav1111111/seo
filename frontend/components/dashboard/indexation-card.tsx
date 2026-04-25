@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Search, ExternalLink, AlertCircle, CheckCircle2 } from "lucide-react";
-import { IndexNowSetup } from "@/components/dashboard/indexnow-setup";
 
 /**
  * Honest indexation status — asks Yandex Search API `site:domain` directly
@@ -171,8 +170,6 @@ export function IndexationCard({ siteId }: { siteId: string }) {
             )}
           </div>
         )}
-
-        <IndexNowSetup siteId={siteId} />
       </CardContent>
     </Card>
   );
