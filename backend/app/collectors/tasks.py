@@ -681,20 +681,22 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
 
 
 # Cap on how many seed phrases we'll send to /topRequests in a single
-# discovery run. /topRequests has a much harsher rate limit than
-# /dynamics — empirically ≈ 1 req per 10 sec. With 12-sec sleep + 30-sec
-# 429 back-off, 30 seeds = 6-12 minutes wall time. Hard cap at 30 to
-# bound worst-case duration.
-WORDSTAT_DISCOVER_MAX_SEEDS = 30
+# discovery run. Verified with the actual 429 body:
+#   "search-api.wordstatRequestsPerHour.rate rate quota limit exceed:
+#    allowed 100 requests"
+# So the hard ceiling is 100 calls/hour shared across ALL sites on the
+# same Cloud key. 10 seeds per run leaves headroom for refreshing two
+# sites + the dynamics-based wordstat-refresh task without burning the
+# whole budget on one click.
+WORDSTAT_DISCOVER_MAX_SEEDS = 10
 # How many phrases to keep per seed. /topRequests returns up to ~200 in
-# practice; we keep the top N to keep the queries table manageable. The
-# user can re-run later to refresh.
+# practice; we keep the top N to keep the queries table manageable.
 WORDSTAT_DISCOVER_TOP_N_PER_SEED = 30
-# Sleep between /topRequests calls. /dynamics is OK at 1 sec, but
-# /topRequests routinely 429s when polled faster than ~8-10 sec. 12 sec
-# gives a comfort margin and lets the 30-sec one-shot 429 retry inside
-# fetch_top_requests be a true rare event.
-WORDSTAT_TOP_REQUESTS_SLEEP_SEC = 12.0
+# Sleep between /topRequests calls. 100 req/hour = 1 req per 36 sec
+# average. 40 sec gives a small safety margin so a single back-off
+# doesn't blow past the window. Yes, this means a 10-seed run takes
+# ~7 minutes — that's the API talking, not us.
+WORDSTAT_TOP_REQUESTS_SLEEP_SEC = 40.0
 
 
 @celery_app.task(name="wordstat_discover_site", bind=True, max_retries=1)
@@ -813,8 +815,8 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 db, site_id, "wordstat_discover", "started",
                 f"Ищу новые запросы через Wordstat: {len(seeds)} "
                 f"seed-фраз ({anchor_descr}, регионов: {len(geos)}). "
-                f"Wordstat-API режет на 429, идём по ~{int(WORDSTAT_TOP_REQUESTS_SLEEP_SEC)} сек/запрос. "
-                f"Оценка: ~{est_sec} сек.",
+                f"Лимит API — 100 запросов/час, идём по {int(WORDSTAT_TOP_REQUESTS_SLEEP_SEC)} сек/запрос. "
+                f"Оценка: ~{est_sec // 60} мин {est_sec % 60} сек.",
                 extra={
                     "seeds_total": len(seeds),
                     "anchor_mode": anchor_mode,
@@ -836,12 +838,21 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                         fetch_top_requests, seed,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    # fetch_top_requests already swallows urllib errors
+                    # internally — this catches only truly unexpected
+                    # crashes (corrupted module state, etc.).
                     logger.warning(
-                        "wordstat.discover_failed seed=%r err=%s",
+                        "wordstat.discover_crashed seed=%r err=%s",
                         seed, exc,
                     )
-                    failed += 1
                     rows = None
+
+                # `None` from fetch_top_requests means API failure
+                # (429, HTTP error, network). Empty result is `[]`,
+                # distinct. Count Nones as failed so the terminal
+                # message can be honest about hitting the hourly quota.
+                if rows is None:
+                    failed += 1
 
                 if rows:
                     # Trim to top-N to keep the table reasonable.
@@ -885,17 +896,39 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 "failed_seeds": failed,
             }
             if not phrases_unique:
-                message = (
-                    f"Wordstat не нашёл связанных фраз ни для одного из "
-                    f"{len(seeds)} seed-запросов. Проверь, что в профиле "
-                    "указаны реальные услуги и регионы."
-                )
-                terminal = "failed" if failed else "done"
+                if failed >= len(seeds):
+                    message = (
+                        f"Wordstat вернул 429 на все {len(seeds)} запросов — "
+                        "часовой лимит исчерпан (100 запросов/час, делится "
+                        "со всеми сайтами на этом ключе). Подожди час и "
+                        "попробуй снова."
+                    )
+                    terminal = "failed"
+                elif failed:
+                    message = (
+                        f"Wordstat частично 429-ил ({failed} из {len(seeds)} "
+                        "seed-фраз). Часовой лимит на исходе. Подожди час "
+                        "и перезапусти, либо смирись с тем что пришло."
+                    )
+                    terminal = "failed"
+                else:
+                    message = (
+                        f"Wordstat не нашёл связанных фраз ни для одного из "
+                        f"{len(seeds)} seed-запросов. Проверь, что в профиле "
+                        "указан реальный primary_product."
+                    )
+                    terminal = "done"
             else:
+                tail = ""
+                if failed:
+                    tail = (
+                        f" {failed} seed-фраз 429-ило (часовой лимит Wordstat "
+                        "близок), результат частичный."
+                    )
                 message = (
                     f"Wordstat-discovery: {len(phrases_unique)} уникальных "
                     f"фраз с объёмами добавлено/обновлено в БД "
-                    f"(seed-фраз обработано: {len(seeds)})."
+                    f"(seed-фраз обработано: {len(seeds)}).{tail}"
                 )
                 terminal = "done"
 
