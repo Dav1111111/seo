@@ -659,4 +659,85 @@ export const api = {
       `/studio/sites/${siteId}/indexation/check`,
       { method: "POST", base: "admin" },
     ),
+
+  // ── PR-S4 · Pages module ─────────────────────────────────────────
+  studioListPages: (
+    siteId: string,
+    sort: "recent_review" | "crawl" | "alpha" | "recs" = "recent_review",
+    limit = 100,
+  ) =>
+    apiFetch<{
+      site_id: string;
+      total: number;
+      items: Array<{
+        page_id: string;
+        url: string;
+        path: string;
+        title: string | null;
+        in_index: boolean;
+        in_sitemap: boolean;
+        http_status: number | null;
+        last_crawled_at: string | null;
+        has_review: boolean;
+        last_reviewed_at: string | null;
+        n_recommendations: number;
+        n_pending: number;
+        n_applied: number;
+      }>;
+    }>(
+      `/studio/sites/${siteId}/pages?sort=${sort}&limit=${limit}`,
+      { base: "admin" },
+    ),
+
+  studioGetPage: (siteId: string, pageId: string) =>
+    apiFetch<{
+      page_id: string;
+      site_id: string;
+      url: string;
+      path: string;
+      title: string | null;
+      h1: string | null;
+      meta_description: string | null;
+      word_count: number | null;
+      in_index: boolean;
+      in_sitemap: boolean;
+      http_status: number | null;
+      has_schema: boolean;
+      last_crawled_at: string | null;
+      review: {
+        review_id: string;
+        status: string;
+        skip_reason: string | null;
+        reviewer_model: string;
+        reviewed_at: string;
+        cost_usd: number;
+        page_level_summary: Record<string, unknown> | null;
+        top_queries_snapshot: Record<string, unknown> | null;
+        recommendations: Array<{
+          rec_id: string;
+          category: string;
+          priority: string;
+          user_status: string;
+          before_text: string | null;
+          after_text: string | null;
+          reasoning_ru: string;
+          priority_score: number | null;
+          impact_score: number | null;
+          confidence_score: number | null;
+          ease_score: number | null;
+        }>;
+      } | null;
+      outcomes: Array<{
+        snapshot_id: string;
+        recommendation_id: string;
+        source: string;
+        applied_at: string;
+        baseline_metrics: Record<string, unknown> | null;
+        followup_at: string | null;
+        followup_metrics: Record<string, unknown> | null;
+        delta: Record<string, unknown> | null;
+        note_ru: string | null;
+      }>;
+      cross_links: Record<string, boolean>;
+    }>(`/studio/sites/${siteId}/pages/${pageId}`, { base: "admin" }),
 };

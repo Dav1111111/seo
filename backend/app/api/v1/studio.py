@@ -33,7 +33,10 @@ from app.database import get_db
 from app.models.analysis_event import AnalysisEvent
 from app.models.daily_metric import DailyMetric
 from app.models.search_query import SearchQuery
+from app.models.outcome_snapshot import OutcomeSnapshot
+from app.models.page import Page
 from app.models.site import Site
+from app.core_audit.review.models import PageReview, PageReviewRecommendation
 
 
 router = APIRouter(prefix="/admin/studio")
@@ -545,6 +548,353 @@ async def trigger_indexation_check(
     run_id = str(uuid.uuid4())
     task = studio_indexation_run.delay(str(site_id), run_id=run_id)
     return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
+
+
+# ── Module: Pages (PR-S4) ─────────────────────────────────────────────
+#
+# /studio/pages and /studio/pages/{id} are the workspace where owner
+# sees one page's content review, recommendations, applied history and
+# (eventually) per-page positions. v1 surfaces the data we already have:
+# Page row, latest PageReview, recommendations list, OutcomeSnapshots
+# filtered by page_url.
+#
+# What's deliberately deferred (CONCEPT.md §5: empty cards must explain
+# WHY rather than ship half-baked):
+#   - position graph per query for the page (no page↔query link table —
+#     the right place is to add one in PR-S5 competitors work)
+#   - content versioning / true before-after (we only store last crawl)
+#   - per-page outcome baseline (current OutcomeSnapshot._baseline_metrics
+#     is site-wide; converting it is its own scope)
+# Cross-links to /studio/competitors are rendered as <DisabledLink> per
+# IMPLEMENTATION.md §2.1 until PR-S5 ships.
+
+
+class PageListItem(BaseModel):
+    """Compact card payload for the /studio/pages list."""
+    page_id: str
+    url: str
+    path: str
+    title: str | None
+    in_index: bool
+    in_sitemap: bool
+    http_status: int | None
+    last_crawled_at: datetime | None
+    has_review: bool
+    last_reviewed_at: datetime | None
+    n_recommendations: int       # total recs on latest review
+    n_pending: int               # recs still in user_status="pending"
+    n_applied: int               # recs in user_status="applied"
+
+
+class PageListResponse(BaseModel):
+    site_id: str
+    total: int
+    items: list[PageListItem]
+
+
+PAGES_LIST_DEFAULT_LIMIT = 100
+PAGES_LIST_MAX_LIMIT = 500
+
+
+@router.get(
+    "/sites/{site_id}/pages",
+    response_model=PageListResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def list_pages(
+    site_id: uuid.UUID,
+    sort: str = Query("recent_review", pattern="^(recent_review|crawl|alpha|recs)$"),
+    limit: int = Query(PAGES_LIST_DEFAULT_LIMIT, ge=1, le=PAGES_LIST_MAX_LIMIT),
+    db: AsyncSession = Depends(get_db),
+) -> PageListResponse:
+    """List pages with review/recommendation summary.
+
+    sort:
+      recent_review — pages with the freshest review on top, then those
+                      without a review at all. Default — owner usually
+                      wants to act on what was just analysed.
+      crawl         — by last_crawled_at desc (what's freshest from the
+                      crawler regardless of review status).
+      alpha         — by url alphabetical (auditable scan).
+      recs          — by total recommendation count desc (where the
+                      work is concentrated).
+    """
+    site = await _site_or_404(db, site_id)
+
+    pages = (await db.execute(
+        select(Page).where(Page.site_id == site.id),
+    )).scalars().all()
+
+    page_ids = [p.id for p in pages]
+
+    # Load the latest review per page in one query: pick the row with
+    # max reviewed_at per page_id. SQLAlchemy + Postgres distinct on
+    # would be cleaner, but a simple grouping works on current scale
+    # (site has <500 pages).
+    review_rows = (await db.execute(
+        select(PageReview)
+        .where(PageReview.site_id == site.id)
+        .order_by(desc(PageReview.reviewed_at)),
+    )).scalars().all()
+    latest_review_by_page: dict[uuid.UUID, PageReview] = {}
+    for r in review_rows:
+        if r.page_id not in latest_review_by_page:
+            latest_review_by_page[r.page_id] = r
+
+    # Recommendation aggregates per review_id.
+    rec_counts: dict[uuid.UUID, dict] = {}
+    if latest_review_by_page:
+        review_ids = [r.id for r in latest_review_by_page.values()]
+        rec_rows = (await db.execute(
+            select(
+                PageReviewRecommendation.review_id,
+                PageReviewRecommendation.user_status,
+            ).where(PageReviewRecommendation.review_id.in_(review_ids)),
+        )).all()
+        for review_id, user_status in rec_rows:
+            d = rec_counts.setdefault(
+                review_id, {"total": 0, "pending": 0, "applied": 0},
+            )
+            d["total"] += 1
+            if user_status == "pending":
+                d["pending"] += 1
+            elif user_status == "applied":
+                d["applied"] += 1
+
+    items: list[PageListItem] = []
+    for page in pages:
+        review = latest_review_by_page.get(page.id)
+        counts = rec_counts.get(review.id) if review else None
+        items.append(PageListItem(
+            page_id=str(page.id),
+            url=page.url,
+            path=page.path,
+            title=page.title,
+            in_index=page.in_index,
+            in_sitemap=page.in_sitemap,
+            http_status=page.http_status,
+            last_crawled_at=page.last_crawled_at,
+            has_review=review is not None,
+            last_reviewed_at=review.reviewed_at if review else None,
+            n_recommendations=counts["total"] if counts else 0,
+            n_pending=counts["pending"] if counts else 0,
+            n_applied=counts["applied"] if counts else 0,
+        ))
+
+    if sort == "recent_review":
+        items.sort(
+            key=lambda it: (
+                it.last_reviewed_at is None,
+                # Reverse for recency: negate by using min as fallback
+                -(it.last_reviewed_at.timestamp() if it.last_reviewed_at else 0),
+            ),
+        )
+    elif sort == "crawl":
+        items.sort(
+            key=lambda it: -(
+                it.last_crawled_at.timestamp() if it.last_crawled_at else 0
+            ),
+        )
+    elif sort == "alpha":
+        items.sort(key=lambda it: it.url.lower())
+    elif sort == "recs":
+        items.sort(key=lambda it: -it.n_recommendations)
+
+    return PageListResponse(
+        site_id=str(site_id),
+        total=len(items),
+        items=items[:limit],
+    )
+
+
+# ── Page detail (PR-S4) ──────────────────────────────────────────────
+
+
+class RecommendationOut(BaseModel):
+    rec_id: str
+    category: str
+    priority: str
+    user_status: str
+    before_text: str | None
+    after_text: str | None
+    reasoning_ru: str
+    priority_score: float | None
+    impact_score: float | None
+    confidence_score: float | None
+    ease_score: float | None
+
+
+class PageReviewOut(BaseModel):
+    review_id: str
+    status: str
+    skip_reason: str | None
+    reviewer_model: str
+    reviewed_at: datetime
+    cost_usd: float
+    page_level_summary: dict | None
+    top_queries_snapshot: dict | None
+    recommendations: list[RecommendationOut]
+
+
+class OutcomeOut(BaseModel):
+    snapshot_id: str
+    recommendation_id: str
+    source: str
+    applied_at: datetime
+    baseline_metrics: dict | None
+    followup_at: datetime | None
+    followup_metrics: dict | None
+    delta: dict | None
+    note_ru: str | None
+
+
+class PageDetail(BaseModel):
+    page_id: str
+    site_id: str
+    url: str
+    path: str
+    title: str | None
+    h1: str | None
+    meta_description: str | None
+    word_count: int | None
+    in_index: bool
+    in_sitemap: bool
+    http_status: int | None
+    has_schema: bool
+    last_crawled_at: datetime | None
+    review: PageReviewOut | None    # null if site never had its review run
+    outcomes: list[OutcomeOut]      # snapshots filtered by page_url
+    # Cross-link readiness: frontend uses this to enable/disable links.
+    # Source of truth = IMPLEMENTATION.md §1 status table.
+    cross_links: dict[str, bool]
+
+
+@router.get(
+    "/sites/{site_id}/pages/{page_id}",
+    response_model=PageDetail,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_page_detail(
+    site_id: uuid.UUID,
+    page_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> PageDetail:
+    """Page workspace payload — page + latest review + recs + outcomes."""
+    site = await _site_or_404(db, site_id)
+
+    page = (await db.execute(
+        select(Page).where(Page.id == page_id, Page.site_id == site.id),
+    )).scalar_one_or_none()
+    if page is None:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    # Latest review row.
+    review = (await db.execute(
+        select(PageReview)
+        .where(PageReview.page_id == page.id)
+        .order_by(desc(PageReview.reviewed_at))
+        .limit(1),
+    )).scalar_one_or_none()
+
+    review_out: PageReviewOut | None = None
+    if review is not None:
+        rec_rows = (await db.execute(
+            select(PageReviewRecommendation)
+            .where(PageReviewRecommendation.review_id == review.id)
+            .order_by(
+                # Pending first, then by priority_score desc.
+                PageReviewRecommendation.user_status.asc(),
+                desc(PageReviewRecommendation.priority_score),
+            ),
+        )).scalars().all()
+
+        recommendations = [
+            RecommendationOut(
+                rec_id=str(r.id),
+                category=r.category,
+                priority=r.priority,
+                user_status=r.user_status,
+                before_text=r.before_text,
+                after_text=r.after_text,
+                reasoning_ru=r.reasoning_ru,
+                priority_score=float(r.priority_score) if r.priority_score is not None else None,
+                impact_score=float(r.impact_score) if r.impact_score is not None else None,
+                confidence_score=float(r.confidence_score) if r.confidence_score is not None else None,
+                ease_score=float(r.ease_score) if r.ease_score is not None else None,
+            )
+            for r in rec_rows
+        ]
+
+        review_out = PageReviewOut(
+            review_id=str(review.id),
+            status=review.status,
+            skip_reason=review.skip_reason,
+            reviewer_model=review.reviewer_model,
+            reviewed_at=review.reviewed_at,
+            cost_usd=float(review.cost_usd) if review.cost_usd is not None else 0.0,
+            page_level_summary=review.page_level_summary,
+            top_queries_snapshot=review.top_queries_snapshot,
+            recommendations=recommendations,
+        )
+
+    # Outcome snapshots tied to this page via page_url. The current
+    # baseline metric is site-wide (see _baseline_metrics in admin_ops),
+    # but the snapshot itself is per-recommendation, so per-page filter
+    # by URL gives the right list of "what was applied for this page".
+    outcome_rows = (await db.execute(
+        select(OutcomeSnapshot)
+        .where(
+            OutcomeSnapshot.site_id == site.id,
+            OutcomeSnapshot.page_url == page.url,
+        )
+        .order_by(desc(OutcomeSnapshot.applied_at)),
+    )).scalars().all()
+
+    outcomes = [
+        OutcomeOut(
+            snapshot_id=str(o.id),
+            recommendation_id=o.recommendation_id,
+            source=o.source,
+            applied_at=o.applied_at,
+            baseline_metrics=o.baseline_metrics,
+            followup_at=o.followup_at,
+            followup_metrics=o.followup_metrics,
+            delta=o.delta,
+            note_ru=o.note_ru,
+        )
+        for o in outcome_rows
+    ]
+
+    # Cross-link readiness flags. Source of truth: IMPLEMENTATION.md §1.
+    # Hardcoded here intentionally — there is no runtime "module
+    # registry" table, and the doc-before-merge rule means flipping a
+    # status is a doc change + this file change, paired in one PR.
+    cross_links = {
+        "queries": True,        # PR-S2 ✅
+        "indexation": True,     # PR-S3 ✅
+        "competitors": False,   # PR-S5 ⏳
+        "analytics": False,     # PR-S6 ⏳
+        "outcomes": False,      # PR-S8 ⏳
+    }
+
+    return PageDetail(
+        page_id=str(page.id),
+        site_id=str(site.id),
+        url=page.url,
+        path=page.path,
+        title=page.title,
+        h1=page.h1,
+        meta_description=page.meta_description,
+        word_count=page.word_count,
+        in_index=page.in_index,
+        in_sitemap=page.in_sitemap,
+        http_status=page.http_status,
+        has_schema=page.has_schema,
+        last_crawled_at=page.last_crawled_at,
+        review=review_out,
+        outcomes=outcomes,
+        cross_links=cross_links,
+    )
 
 
 __all__ = ["router"]

@@ -49,10 +49,9 @@ const MODULES: Array<{
   {
     href: "/studio/pages",
     title: "Страницы",
-    description: "Workspace для каждой страницы: контент, позиции, конкуренты, рекомендации с before/after.",
+    description: "Workspace для каждой страницы: контент, ревью, рекомендации с применением и замером эффекта.",
     icon: FileText,
-    status: "stub",
-    reason: "PR-S4",
+    status: "ready",
   },
   {
     href: "/studio/competitors",
