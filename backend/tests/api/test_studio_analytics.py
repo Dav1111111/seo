@@ -37,7 +37,7 @@ async def test_get_analytics_empty_site(
     db: AsyncSession, test_site: Site,
 ) -> None:
     """No daily_metrics rows → empty series, zero totals, lag dates None."""
-    resp = await get_analytics(site_id=test_site.id, db=db)
+    resp = await get_analytics(site_id=test_site.id, days=90, db=db)
     assert resp.series == []
     assert resp.totals.impressions_sum == 0
     assert resp.totals.clicks_sum == 0
@@ -51,7 +51,7 @@ async def test_get_analytics_404_for_unknown_site(db: AsyncSession) -> None:
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        await get_analytics(site_id=uuid.uuid4(), db=db)
+        await get_analytics(site_id=uuid.uuid4(), days=90, db=db)
     assert exc.value.status_code == 404
 
 

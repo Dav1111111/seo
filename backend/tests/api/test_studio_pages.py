@@ -23,7 +23,7 @@ pytestmark = pytest.mark.asyncio
 async def test_list_pages_empty_returns_zero(
     db: AsyncSession, test_site: Site,
 ) -> None:
-    resp = await list_pages(site_id=test_site.id, db=db)
+    resp = await list_pages(site_id=test_site.id, sort="recent_review", limit=100, db=db)
     assert resp.total == 0
     assert resp.items == []
     assert resp.site_id == str(test_site.id)
@@ -33,7 +33,7 @@ async def test_list_pages_404_for_unknown_site(db: AsyncSession) -> None:
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        await list_pages(site_id=uuid.uuid4(), db=db)
+        await list_pages(site_id=uuid.uuid4(), sort="recent_review", limit=100, db=db)
     assert exc.value.status_code == 404
 
 
@@ -48,7 +48,7 @@ async def test_list_pages_with_rows_no_review(
     ])
     await db.flush()
 
-    resp = await list_pages(site_id=test_site.id, db=db)
+    resp = await list_pages(site_id=test_site.id, sort="recent_review", limit=100, db=db)
     assert resp.total == 2
     assert all(item.has_review is False for item in resp.items)
     assert all(item.n_recommendations == 0 for item in resp.items)

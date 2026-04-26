@@ -30,7 +30,7 @@ async def test_list_queries_empty_site_returns_zero_total(
 ) -> None:
     """Empty site = zero total + empty items + zeroed coverage block.
     No 500, no None — UI relies on a stable shape."""
-    resp = await list_queries(site_id=test_site.id, db=db)
+    resp = await list_queries(site_id=test_site.id, sort="volume", limit=200, db=db)
     assert resp.total == 0
     assert resp.items == []
     assert resp.coverage["total"] == 0
@@ -47,7 +47,7 @@ async def test_list_queries_404_for_unknown_site(
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        await list_queries(site_id=uuid.uuid4(), db=db)
+        await list_queries(site_id=uuid.uuid4(), sort="volume", limit=200, db=db)
     assert exc.value.status_code == 404
 
 
@@ -80,7 +80,7 @@ async def test_list_queries_coverage_counts_volume_state(
     ])
     await db.flush()
 
-    resp = await list_queries(site_id=test_site.id, db=db)
+    resp = await list_queries(site_id=test_site.id, sort="volume", limit=200, db=db)
     assert resp.total == 3
     assert resp.coverage["with_volume"] == 2
     assert resp.coverage["without_volume"] == 1
