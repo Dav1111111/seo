@@ -160,17 +160,26 @@ async def list_queries(
         )
 
     # One round-trip to grab the latest position per query, scoped to
-    # this site. We pull the most recent `query_performance` row per
+    # this site. We pull recent `query_performance` rows per
     # dimension_id and join in Python rather than do a per-row
     # subquery in SQL — N is small (<1000 typically) and the join is
     # trivial in memory.
+    #
+    # Date floor (last 30 days): positions are stable; the owner doesn't
+    # need historic series here, and pulling the entire history of
+    # query_performance for a chatty site can mean tens of thousands of
+    # rows. The 14-day impressions window we compute below sits inside
+    # this floor, so the math doesn't change.
+    metrics_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date()
     metrics_q = (
         select(DailyMetric)
         .where(
             DailyMetric.site_id == site_id,
             DailyMetric.metric_type == "query_performance",
+            DailyMetric.date >= metrics_cutoff,
         )
         .order_by(desc(DailyMetric.date))
+        .limit(50000)  # safety net; >50k rows in 30d means a real problem
     )
     metric_rows = (await db.execute(metrics_q)).scalars().all()
 
@@ -297,18 +306,23 @@ async def trigger_discover(
     pipeline (CONCEPT.md §2.2: independence + reuse)."""
     await _site_or_404(db, site_id)
 
+    # Generate the run_id up-front so the deduped branch returns a
+    # valid id even when the recent event is missing one (older rows /
+    # legacy paths). Frontend keys SWR/toast off run_id — empty string
+    # silently breaks the activity stream subscription.
+    run_id = str(uuid.uuid4())
+
     recent = await _recent_started_event(db, site_id, "demand_map")
     if recent is not None:
         return TriggerResponse(
             status="deduped",
             task_id=None,
-            run_id=str(recent.run_id) if recent.run_id else "",
+            run_id=str(recent.run_id) if recent.run_id else run_id,
             deduped=True,
         )
 
     from app.core_audit.demand_map.tasks import demand_map_build_site_task
 
-    run_id = str(uuid.uuid4())
     task = demand_map_build_site_task.delay(str(site_id), run_id=run_id)
     return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
 
@@ -330,18 +344,19 @@ async def trigger_wordstat_refresh(
     """
     await _site_or_404(db, site_id)
 
+    run_id = str(uuid.uuid4())
+
     recent = await _recent_started_event(db, site_id, "wordstat")
     if recent is not None:
         return TriggerResponse(
             status="deduped",
             task_id=None,
-            run_id=str(recent.run_id) if recent.run_id else "",
+            run_id=str(recent.run_id) if recent.run_id else run_id,
             deduped=True,
         )
 
     from app.collectors.tasks import wordstat_refresh_site
 
-    run_id = str(uuid.uuid4())
     task = wordstat_refresh_site.delay(str(site_id), run_id=run_id)
     return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
 
@@ -367,18 +382,19 @@ async def trigger_wordstat_discover(
     """
     await _site_or_404(db, site_id)
 
+    run_id = str(uuid.uuid4())
+
     recent = await _recent_started_event(db, site_id, "wordstat_discover")
     if recent is not None:
         return TriggerResponse(
             status="deduped",
             task_id=None,
-            run_id=str(recent.run_id) if recent.run_id else "",
+            run_id=str(recent.run_id) if recent.run_id else run_id,
             deduped=True,
         )
 
     from app.collectors.tasks import wordstat_discover_site
 
-    run_id = str(uuid.uuid4())
     task = wordstat_discover_site.delay(str(site_id), run_id=run_id)
     return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
 
@@ -535,18 +551,19 @@ async def trigger_indexation_check(
     """
     await _site_or_404(db, site_id)
 
+    run_id = str(uuid.uuid4())
+
     recent = await _recent_started_event(db, site_id, "indexation")
     if recent is not None:
         return TriggerResponse(
             status="deduped",
             task_id=None,
-            run_id=str(recent.run_id) if recent.run_id else "",
+            run_id=str(recent.run_id) if recent.run_id else run_id,
             deduped=True,
         )
 
     from app.collectors.tasks import studio_indexation_run
 
-    run_id = str(uuid.uuid4())
     task = studio_indexation_run.delay(str(site_id), run_id=run_id)
     return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
 
@@ -626,21 +643,21 @@ async def list_pages(
         select(Page).where(Page.site_id == site.id),
     )).scalars().all()
 
-    page_ids = [p.id for p in pages]
-
-    # Load the latest review per page in one query: pick the row with
-    # max reviewed_at per page_id. SQLAlchemy + Postgres distinct on
-    # would be cleaner, but a simple grouping works on current scale
-    # (site has <500 pages).
-    review_rows = (await db.execute(
+    # Latest review per page in ONE query via Postgres `DISTINCT ON`.
+    # Postgres requires the `DISTINCT ON` columns to match the leading
+    # `ORDER BY` columns, so page_id comes first and reviewed_at desc
+    # second. Naive `select(PageReview).order_by(reviewed_at desc)` was
+    # pulling all history (≈ 500 pages × 20 reviews per page) — this
+    # cuts it to one row per page.
+    latest_reviews = (await db.execute(
         select(PageReview)
         .where(PageReview.site_id == site.id)
-        .order_by(desc(PageReview.reviewed_at)),
+        .distinct(PageReview.page_id)
+        .order_by(PageReview.page_id, desc(PageReview.reviewed_at)),
     )).scalars().all()
-    latest_review_by_page: dict[uuid.UUID, PageReview] = {}
-    for r in review_rows:
-        if r.page_id not in latest_review_by_page:
-            latest_review_by_page[r.page_id] = r
+    latest_review_by_page: dict[uuid.UUID, PageReview] = {
+        r.page_id: r for r in latest_reviews
+    }
 
     # Recommendation aggregates per review_id.
     rec_counts: dict[uuid.UUID, dict] = {}
@@ -691,9 +708,14 @@ async def list_pages(
             ),
         )
     elif sort == "crawl":
+        # Same two-tuple pattern as `recent_review`: pages without a
+        # crawl timestamp go to the BOTTOM, not the top. The earlier
+        # `-(ts or 0)` form ranked None as 0 which floated never-crawled
+        # pages above genuine recent crawls.
         items.sort(
-            key=lambda it: -(
-                it.last_crawled_at.timestamp() if it.last_crawled_at else 0
+            key=lambda it: (
+                it.last_crawled_at is None,
+                -(it.last_crawled_at.timestamp() if it.last_crawled_at else 0),
             ),
         )
     elif sort == "alpha":
@@ -870,11 +892,15 @@ async def get_page_detail(
     # Hardcoded here intentionally — there is no runtime "module
     # registry" table, and the doc-before-merge rule means flipping a
     # status is a doc change + this file change, paired in one PR.
+    #
+    # `analytics` is deliberately NOT exposed as a per-page cross-link:
+    # we don't have per-page analytics data — Webmaster query_performance
+    # and Metrica site_traffic are site-wide. The frontend page workspace
+    # links to `/studio/analytics` from the site-level shell instead.
     cross_links = {
         "queries": True,        # PR-S2 ✅
         "indexation": True,     # PR-S3 ✅
         "competitors": True,    # PR-S5 ✅
-        "analytics": False,     # PR-S6 ⏳
         "outcomes": False,      # PR-S8 ⏳
     }
 
@@ -995,14 +1021,16 @@ async def get_analytics(
     )).all()
 
     # 2. Metrica site_traffic — site-wide rows (dimension_id IS NULL).
+    # MetricaCollector writes visits/pageviews/bounce_rate/avg_duration
+    # into the dedicated columns (see collectors/metrica.py:131-148);
+    # those columns are the canonical source.
     traffic_rows = (await db.execute(
         select(
             DailyMetric.date,
-            DailyMetric.impressions,    # repurposed: Metrica writes visits here? Check below.
-            DailyMetric.clicks,
-            DailyMetric.ctr,
-            DailyMetric.avg_position,
-            DailyMetric.extra,
+            DailyMetric.visits,
+            DailyMetric.pageviews,
+            DailyMetric.bounce_rate,
+            DailyMetric.avg_duration,
         )
         .where(
             DailyMetric.site_id == site.id,
@@ -1013,10 +1041,12 @@ async def get_analytics(
     )).all()
 
     # 3. Webmaster indexing — daily snapshot of pages_indexed.
+    # webmaster.py:286-299 writes the count into the dedicated
+    # `pages_indexed` column; `impressions` is 0 for these rows.
     indexing_rows = (await db.execute(
         select(
             DailyMetric.date,
-            DailyMetric.impressions.label("pages_indexed"),
+            DailyMetric.pages_indexed,
         )
         .where(
             DailyMetric.site_id == site.id,
@@ -1049,16 +1079,14 @@ async def get_analytics(
 
     for row in traffic_rows:
         bucket = _ensure(row.date)
-        # MetricaCollector packs visits/pageviews/bounce/duration into
-        # `extra` JSONB. Fall back to direct columns if extra is empty
-        # (defensive for older rows written before that contract).
-        extra = row.extra or {}
-        bucket["visits"] = int(extra.get("visits") or row.impressions or 0)
-        bucket["pageviews"] = int(extra.get("pageviews") or row.clicks or 0)
-        if extra.get("bounce_rate") is not None:
-            bucket["bounce_rate"] = float(extra["bounce_rate"])
-        if extra.get("avg_duration_seconds") is not None:
-            bucket["avg_duration_sec"] = float(extra["avg_duration_seconds"])
+        # MetricaCollector writes to the dedicated columns directly —
+        # read them straight, no JSONB indirection.
+        bucket["visits"] = int(row.visits or 0)
+        bucket["pageviews"] = int(row.pageviews or 0)
+        if row.bounce_rate is not None:
+            bucket["bounce_rate"] = float(row.bounce_rate)
+        if row.avg_duration is not None:
+            bucket["avg_duration_sec"] = float(row.avg_duration)
         metrica_latest = max(metrica_latest or "", row.date.isoformat())
 
     for row in indexing_rows:

@@ -23,13 +23,14 @@
  *   - no anything → "сначала запусти конвейер"
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
+import { fmtDayAge, pluralRu } from "@/lib/format";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -52,15 +53,9 @@ import {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function fmtAge(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  const ms = Date.now() - d.getTime();
-  const day = Math.floor(ms / (24 * 60 * 60 * 1000));
-  if (day < 1) return "сегодня";
-  if (day === 1) return "1 день назад";
-  return `${day} дн назад`;
-}
+// Date-string lag uses calendar-day comparison (lib/format.ts ·
+// fmtDayAge) so a Moscow user at 23:00 doesn't see "today's" data
+// labelled "1 день назад" because of timezone math.
 
 function fmtNumber(n: number | null | undefined): string {
   if (n == null) return "—";
@@ -127,8 +122,13 @@ export default function StudioAnalyticsPage() {
   const hasSearch = (totals?.days_with_search_data ?? 0) > 0;
   const hasTraffic = (totals?.days_with_traffic_data ?? 0) > 0;
 
-  // Pre-format series for chart-friendly axis labels.
-  const formatted = series.map((p) => ({ ...p, _label: shortDate(p.date) }));
+  // Pre-format series for chart-friendly axis labels. Memoized — a
+  // fresh array on every render makes Recharts re-build its SVGs even
+  // when the underlying data hasn't changed (e.g. on hover state).
+  const formatted = useMemo(
+    () => series.map((p) => ({ ...p, _label: shortDate(p.date) })),
+    [series],
+  );
 
   return (
     <div className="p-6 space-y-5 max-w-6xl">
@@ -178,7 +178,7 @@ export default function StudioAnalyticsPage() {
               <>
                 Webmaster (показы / позиции / индексация) до{" "}
                 <strong>{data.webmaster_latest_date}</strong> ·{" "}
-                {fmtAge(data.webmaster_latest_date + "T00:00:00Z")}
+                {fmtDayAge(data.webmaster_latest_date)}
                 {". "}
               </>
             )}
@@ -186,7 +186,7 @@ export default function StudioAnalyticsPage() {
               <>
                 Метрика (визиты / поведение) до{" "}
                 <strong>{data.metrica_latest_date}</strong> ·{" "}
-                {fmtAge(data.metrica_latest_date + "T00:00:00Z")}.
+                {fmtDayAge(data.metrica_latest_date)}.
               </>
             )}
           </span>
@@ -231,7 +231,7 @@ export default function StudioAnalyticsPage() {
       {!isLoading && hasSearch && (
         <ChartSection
           title="Видимость в Яндексе"
-          subtitle={`${fmtNumber(totals?.impressions_sum)} показов · ${fmtNumber(totals?.clicks_sum)} кликов · CTR ${
+          subtitle={`${fmtNumber(totals?.impressions_sum)} ${pluralRu(totals?.impressions_sum ?? 0, ["показ", "показа", "показов"])} · ${fmtNumber(totals?.clicks_sum)} ${pluralRu(totals?.clicks_sum ?? 0, ["клик", "клика", "кликов"])} · CTR ${
             totals?.impressions_sum
               ? (
                   ((totals?.clicks_sum || 0) / totals.impressions_sum) *
@@ -332,7 +332,7 @@ export default function StudioAnalyticsPage() {
       {!isLoading && hasTraffic ? (
         <ChartSection
           title="Поведение посетителей"
-          subtitle={`${fmtNumber(totals?.visits_sum)} визитов · ${fmtNumber(totals?.pageviews_sum)} просмотров · отказы ${fmtPct(totals?.avg_bounce_rate_mean)}`}
+          subtitle={`${fmtNumber(totals?.visits_sum)} ${pluralRu(totals?.visits_sum ?? 0, ["визит", "визита", "визитов"])} · ${fmtNumber(totals?.pageviews_sum)} ${pluralRu(totals?.pageviews_sum ?? 0, ["просмотр", "просмотра", "просмотров"])} · отказы ${fmtPct(totals?.avg_bounce_rate_mean)}`}
           source="Метрика"
         >
           <ResponsiveContainer width="100%" height={240}>
@@ -415,7 +415,7 @@ export default function StudioAnalyticsPage() {
       {!isLoading && totals?.indexed_latest != null && (
         <ChartSection
           title="Индексация"
-          subtitle={`сейчас в индексе: ${fmtNumber(totals.indexed_latest)} страниц`}
+          subtitle={`сейчас в индексе: ${fmtNumber(totals.indexed_latest)} ${pluralRu(totals.indexed_latest ?? 0, ["страница", "страницы", "страниц"])}`}
           source="Webmaster"
         >
           <ResponsiveContainer width="100%" height={200}>

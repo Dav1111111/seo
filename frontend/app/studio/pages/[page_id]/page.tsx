@@ -39,6 +39,7 @@ import { useParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
+import { fmtAge, pluralRu } from "@/lib/format";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -63,18 +64,6 @@ import {
 import { cn } from "@/lib/utils";
 
 // ── Helpers ──────────────────────────────────────────────────────────
-
-function fmtAge(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
-  const min = Math.floor(ms / 60000);
-  if (min < 1) return "только что";
-  if (min < 60) return `${min} мин назад`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} ч назад`;
-  const day = Math.floor(hr / 24);
-  return `${day} дн назад`;
-}
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -709,7 +698,7 @@ function daysUntilFollowup(appliedAt: string): string {
   const target = new Date(appliedAt).getTime() + 14 * 24 * 60 * 60 * 1000;
   const days = Math.ceil((target - Date.now()) / (24 * 60 * 60 * 1000));
   if (days <= 0) return "скоро";
-  return `${days} дн`;
+  return `${days} ${pluralRu(days, ["день", "дня", "дней"])}`;
 }
 
 function DeltaBadge({

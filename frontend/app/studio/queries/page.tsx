@@ -7,6 +7,8 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
+import { pluralRu } from "@/lib/format";
+import { useTimeoutSetter } from "@/lib/hooks/use-timeout";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -176,6 +178,7 @@ export default function StudioQueriesPage() {
     kind: "ok" | "deduped" | "err";
     text: string;
   } | null>(null);
+  const setSafeTimeout = useTimeoutSetter();
 
   const { data, error, isLoading, mutate } = useSWR(
     siteId ? studioKey("queries", siteId, sort) : null,
@@ -203,7 +206,7 @@ export default function StudioQueriesPage() {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
       // 3-second cooldown so the dedup-guard message stays visible
-      setTimeout(() => setDiscoverPending(false), 3000);
+      setSafeTimeout(() => setDiscoverPending(false), 3000);
     }
   }
 
@@ -221,13 +224,13 @@ export default function StudioQueriesPage() {
       } else {
         setBanner({
           kind: "ok",
-          text: `Запущено обновление объёмов Wordstat · run_id ${res.run_id.slice(0, 8)}…. Это займёт ~${data?.total ?? "несколько"} секунд.`,
+          text: `Запущено обновление объёмов Wordstat · run_id ${res.run_id.slice(0, 8)}…. Это займёт ~${data?.total ?? "несколько"} ${pluralRu(data?.total ?? 0, ["секунду", "секунды", "секунд"])}.`,
         });
       }
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
-      setTimeout(() => setRefreshPending(false), 3000);
+      setSafeTimeout(() => setRefreshPending(false), 3000);
     }
   }
 
@@ -251,7 +254,7 @@ export default function StudioQueriesPage() {
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
-      setTimeout(() => setWsDiscoverPending(false), 3000);
+      setSafeTimeout(() => setWsDiscoverPending(false), 3000);
     }
   }
 
@@ -286,7 +289,7 @@ export default function StudioQueriesPage() {
 
   const coverage = data?.coverage;
   const subtitle = coverage
-    ? `${coverage.total} запросов · ${coverage.with_volume} с объёмом · ${coverage.stale} устарели`
+    ? `${coverage.total} ${pluralRu(coverage.total, ["запрос", "запроса", "запросов"])} · ${coverage.with_volume} с объёмом · ${coverage.stale} ${pluralRu(coverage.stale, ["устарел", "устарели", "устарели"])}`
     : "загружаю…";
 
   // ── Empty-state messaging (CONCEPT §5: explain WHY) ──────────────
@@ -438,8 +441,9 @@ export default function StudioQueriesPage() {
             <p className="text-sm text-muted-foreground">
               Запросов в БД: <strong>{coverage?.total}</strong>, но ни одного
               с заполненным <code>wordstat_volume</code>. Нажми «Обновить
-              объёмы Wordstat» — это займёт ~{coverage?.total ?? 0} секунд (по
-              одному запросу в секунду).
+              объёмы Wordstat» — это займёт ~{coverage?.total ?? 0}{" "}
+              {pluralRu(coverage?.total ?? 0, ["секунду", "секунды", "секунд"])}{" "}
+              (по одному запросу в секунду).
             </p>
           </CardContent>
         </Card>

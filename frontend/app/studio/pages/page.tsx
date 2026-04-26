@@ -24,6 +24,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
+import { fmtAge, pluralRu } from "@/lib/format";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -45,18 +46,6 @@ const SORT_OPTIONS: Array<{ value: SortMode; label: string }> = [
   { value: "alpha", label: "По алфавиту" },
   { value: "recs", label: "По кол-ву рекомендаций" },
 ];
-
-function fmtAge(iso: string | null): string {
-  if (!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
-  const min = Math.floor(ms / 60000);
-  if (min < 1) return "только что";
-  if (min < 60) return `${min} мин`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} ч`;
-  const day = Math.floor(hr / 24);
-  return `${day} дн`;
-}
 
 function shortPath(p: string): string {
   if (!p || p === "/") return "/";
@@ -113,9 +102,18 @@ export default function StudioPagesIndex() {
         </h1>
         <p className="text-sm text-muted-foreground mt-1">
           {data
-            ? `${data.total} страниц на сайте · ` +
-              `${data.items.filter((p) => p.has_review).length} с ревью · ` +
-              `${data.items.reduce((s, p) => s + p.n_pending, 0)} рекомендаций ждут действия`
+            ? (() => {
+                const reviewed = data.items.filter((p) => p.has_review).length;
+                const pending = data.items.reduce(
+                  (s, p) => s + p.n_pending,
+                  0,
+                );
+                return (
+                  `${data.total} ${pluralRu(data.total, ["страница", "страницы", "страниц"])} на сайте · ` +
+                  `${reviewed} с ревью · ` +
+                  `${pending} ${pluralRu(pending, ["рекомендация", "рекомендации", "рекомендаций"])} ${pluralRu(pending, ["ждёт", "ждут", "ждут"])} действия`
+                );
+              })()
             : "загружаю…"}
         </p>
       </div>
@@ -221,7 +219,7 @@ export default function StudioPagesIndex() {
                         <CheckCircle2 className="h-4 w-4 text-emerald-600" />
                         <span className="text-xs text-muted-foreground">
                           {p.n_pending > 0
-                            ? `${p.n_pending} ждут`
+                            ? `${p.n_pending} ${pluralRu(p.n_pending, ["ждёт", "ждут", "ждут"])}`
                             : `${p.n_applied} применено`}
                         </span>
                       </>

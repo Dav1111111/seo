@@ -23,13 +23,15 @@
  * "no data" without context.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
+import { pluralRu } from "@/lib/format";
+import { useTimeoutSetter } from "@/lib/hooks/use-timeout";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -51,18 +53,6 @@ import {
 import { cn } from "@/lib/utils";
 
 // ── Helpers ──────────────────────────────────────────────────────────
-
-function fmtAge(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
-  const min = Math.floor(ms / 60000);
-  if (min < 1) return "только что";
-  if (min < 60) return `${min} мин назад`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} ч назад`;
-  const day = Math.floor(hr / 24);
-  return `${day} дн назад`;
-}
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -102,10 +92,18 @@ export default function StudioCompetitorsPage() {
     text: string;
   } | null>(null);
   const [appliedSet, setAppliedSet] = useState<Set<string>>(new Set());
+  const setSafeTimeout = useTimeoutSetter();
 
-  const { data: comp, error: compErr, isLoading: compLoading, mutate: mutateComp } = useSWR(
+  const { data: comp, error: compErr, isLoading: compLoading } = useSWR(
     siteId ? studioKey("competitors", siteId) : null,
     () => api.getCompetitors(siteId),
+    {
+      // While a trigger is running we have no `is_running` flag from
+      // the backend (this endpoint is fire-and-forget) — `busy` is the
+      // cleanest local signal. Poll every 4 s while a trigger is live;
+      // stop once `busy` clears (after the 3 s cooldown).
+      refreshInterval: () => (busy !== null ? 4000 : 0),
+    },
   );
   const { data: gaps } = useSWR(
     siteId ? studioKey("comp_gaps", siteId) : null,
@@ -115,10 +113,40 @@ export default function StudioCompetitorsPage() {
     siteId ? studioKey("comp_dive", siteId) : null,
     () => api.getCompetitorDeepDive(siteId),
   );
-  const { data: opps, mutate: mutateOpps } = useSWR(
+  const { data: opps } = useSWR(
     siteId ? studioKey("comp_opps", siteId) : null,
     () => api.getGrowthOpportunities(siteId),
+    {
+      refreshInterval: () => (busy !== null ? 4000 : 0),
+    },
   );
+
+  // Hydrate `appliedSet` from already-persisted outcomes so navigating
+  // away + back doesn't lose the "applied" flag (PR-S8 will own a real
+  // /studio/outcomes view; until then, this is the ground truth).
+  // Outcomes carry `recommendation_id` which for opportunities is
+  // exactly the `opp.id` we pass to markApplied.
+  const { data: outcomesData } = useSWR(
+    siteId ? studioKey("outcomes", siteId) : null,
+    () => api.getOutcomes(siteId),
+  );
+  useEffect(() => {
+    const ids = outcomesData?.outcomes
+      ?.filter((o) => o.source === "opportunity")
+      .map((o) => o.recommendation_id);
+    if (!ids || ids.length === 0) return;
+    setAppliedSet((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const id of ids) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [outcomesData]);
 
   async function onDiscover() {
     if (!siteId || busy) return;
@@ -130,15 +158,12 @@ export default function StudioCompetitorsPage() {
         kind: "ok",
         text: `Разведка запущена · task ${res.task_id.slice(0, 8)}…. Discovery → автоматом запустит deep-dive. Результат через 1–2 минуты, страница обновится сама.`,
       });
-      // Re-fetch after 30 sec to catch new state
-      setTimeout(() => {
-        mutateComp();
-        mutateOpps();
-      }, 30000);
+      // SWR `refreshInterval` (above) handles polling while busy — no
+      // manual setTimeout-mutate needed.
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
-      setTimeout(() => setBusy(null), 3000);
+      setSafeTimeout(() => setBusy(null), 3000);
     }
   }
 
@@ -152,11 +177,10 @@ export default function StudioCompetitorsPage() {
         kind: "ok",
         text: `Глубокий анализ запущен · task ${res.task_id.slice(0, 8)}…. Это пересоберёт opportunities. Результат через ~1 минуту.`,
       });
-      setTimeout(() => mutateOpps(), 30000);
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
-      setTimeout(() => setBusy(null), 3000);
+      setSafeTimeout(() => setBusy(null), 3000);
     }
   }
 
@@ -224,7 +248,7 @@ export default function StudioCompetitorsPage() {
             {compLoading
               ? "загружаю…"
               : queriesProbed
-                ? `Разведано по ${queriesProbed} запросам · найдено ${competitors.length} конкурентов · ${oppsList.length} opportunities`
+                ? `Разведано по ${queriesProbed} ${pluralRu(queriesProbed, ["запросу", "запросам", "запросам"])} · найдено ${competitors.length} ${pluralRu(competitors.length, ["конкурент", "конкурента", "конкурентов"])} · ${oppsList.length} ${pluralRu(oppsList.length, ["opportunity", "opportunities", "opportunities"])}`
                 : "разведка ещё не запускалась"}
           </p>
         </div>

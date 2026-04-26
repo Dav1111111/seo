@@ -23,6 +23,8 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
+import { fmtAge } from "@/lib/format";
+import { useTimeoutSetter } from "@/lib/hooks/use-timeout";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -38,19 +40,6 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-function fmtAge(iso: string | null): string {
-  if (!iso) return "никогда";
-  const d = new Date(iso);
-  const ms = Date.now() - d.getTime();
-  const min = Math.floor(ms / 60000);
-  if (min < 1) return "только что";
-  if (min < 60) return `${min} мин назад`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} ч назад`;
-  const day = Math.floor(hr / 24);
-  return `${day} дн назад`;
-}
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -92,6 +81,7 @@ export default function StudioIndexationPage() {
     kind: "ok" | "deduped" | "err";
     text: string;
   } | null>(null);
+  const setSafeTimeout = useTimeoutSetter();
 
   const { data, isLoading, mutate } = useSWR(
     siteId ? studioKey("indexation", siteId) : null,
@@ -126,7 +116,7 @@ export default function StudioIndexationPage() {
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
-      setTimeout(() => setPending(false), 3000);
+      setSafeTimeout(() => setPending(false), 3000);
     }
   }
 
