@@ -37,6 +37,7 @@ from app.models.outcome_snapshot import OutcomeSnapshot
 from app.models.page import Page
 from app.models.site import Site
 from app.core_audit.review.models import PageReview, PageReviewRecommendation
+from sqlalchemy import func as sa_func
 
 
 router = APIRouter(prefix="/admin/studio")
@@ -894,6 +895,213 @@ async def get_page_detail(
         review=review_out,
         outcomes=outcomes,
         cross_links=cross_links,
+    )
+
+
+# ── Module: Analytics (PR-S6) ─────────────────────────────────────────
+#
+# /studio/analytics surfaces site-wide trends from both Webmaster
+# (search visibility) and Metrica (visitor behaviour). One endpoint
+# returns four daily series so the frontend renders all charts from a
+# single fetch — no waterfall, no per-chart loading flicker.
+#
+# Data lag (be honest about it in the UI):
+#   - Webmaster query_performance: 5–10 days behind today's date.
+#   - Webmaster indexing/search_events: 5–10 days behind.
+#   - Metrica site_traffic: 1 day behind (yesterday available).
+#
+# Aggregation pattern (verified vs dashboard.py): SUM impressions/
+# clicks across queries by date, AVG positions by date.
+
+
+from app.models.daily_metric import DailyMetric
+
+
+class AnalyticsPoint(BaseModel):
+    """One daily data point. Numbers are nullable when the source
+    didn't report that day (rendering = gap in the chart).
+    """
+    date: str                 # ISO yyyy-mm-dd
+    impressions: int | None = None
+    clicks: int | None = None
+    avg_position: float | None = None
+    visits: int | None = None
+    pageviews: int | None = None
+    bounce_rate: float | None = None
+    avg_duration_sec: float | None = None
+    pages_indexed: int | None = None
+
+
+class AnalyticsTotals(BaseModel):
+    """Plain-number totals to render above each chart, so owner sees
+    «за 90 дней: 12 000 показов» without doing math from the chart."""
+    impressions_sum: int = 0
+    clicks_sum: int = 0
+    visits_sum: int = 0
+    pageviews_sum: int = 0
+    avg_position_mean: float | None = None
+    avg_bounce_rate_mean: float | None = None
+    indexed_latest: int | None = None
+    days_with_search_data: int = 0
+    days_with_traffic_data: int = 0
+
+
+class AnalyticsResponse(BaseModel):
+    site_id: str
+    days: int
+    series: list[AnalyticsPoint]
+    totals: AnalyticsTotals
+    # Honest lag indicators — UI shows "Webmaster данные с лагом 5 дней"
+    webmaster_latest_date: str | None
+    metrica_latest_date: str | None
+
+
+ANALYTICS_DEFAULT_DAYS = 90
+ANALYTICS_MAX_DAYS = 365
+
+
+@router.get(
+    "/sites/{site_id}/analytics",
+    response_model=AnalyticsResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_analytics(
+    site_id: uuid.UUID,
+    days: int = Query(ANALYTICS_DEFAULT_DAYS, ge=7, le=ANALYTICS_MAX_DAYS),
+    db: AsyncSession = Depends(get_db),
+) -> AnalyticsResponse:
+    """Daily series for the last `days` days, all four metric_types
+    merged into one timeline by date.
+    """
+    site = await _site_or_404(db, site_id)
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
+
+    # 1. Webmaster query_performance — aggregate across all queries.
+    search_rows = (await db.execute(
+        select(
+            DailyMetric.date,
+            sa_func.sum(DailyMetric.impressions).label("impressions"),
+            sa_func.sum(DailyMetric.clicks).label("clicks"),
+            sa_func.avg(DailyMetric.avg_position).label("avg_position"),
+        )
+        .where(
+            DailyMetric.site_id == site.id,
+            DailyMetric.metric_type == "query_performance",
+            DailyMetric.date >= cutoff,
+        )
+        .group_by(DailyMetric.date)
+        .order_by(DailyMetric.date),
+    )).all()
+
+    # 2. Metrica site_traffic — site-wide rows (dimension_id IS NULL).
+    traffic_rows = (await db.execute(
+        select(
+            DailyMetric.date,
+            DailyMetric.impressions,    # repurposed: Metrica writes visits here? Check below.
+            DailyMetric.clicks,
+            DailyMetric.ctr,
+            DailyMetric.avg_position,
+            DailyMetric.extra,
+        )
+        .where(
+            DailyMetric.site_id == site.id,
+            DailyMetric.metric_type == "site_traffic",
+            DailyMetric.date >= cutoff,
+        )
+        .order_by(DailyMetric.date),
+    )).all()
+
+    # 3. Webmaster indexing — daily snapshot of pages_indexed.
+    indexing_rows = (await db.execute(
+        select(
+            DailyMetric.date,
+            DailyMetric.impressions.label("pages_indexed"),
+        )
+        .where(
+            DailyMetric.site_id == site.id,
+            DailyMetric.metric_type == "indexing",
+            DailyMetric.date >= cutoff,
+        )
+        .order_by(DailyMetric.date),
+    )).all()
+
+    # Merge by date.
+    by_date: dict[str, dict] = {}
+
+    def _ensure(d) -> dict:
+        key = d.isoformat()
+        if key not in by_date:
+            by_date[key] = {"date": key}
+        return by_date[key]
+
+    webmaster_latest: str | None = None
+    metrica_latest: str | None = None
+
+    for row in search_rows:
+        bucket = _ensure(row.date)
+        bucket["impressions"] = int(row.impressions or 0)
+        bucket["clicks"] = int(row.clicks or 0)
+        bucket["avg_position"] = (
+            float(row.avg_position) if row.avg_position is not None else None
+        )
+        webmaster_latest = max(webmaster_latest or "", row.date.isoformat())
+
+    for row in traffic_rows:
+        bucket = _ensure(row.date)
+        # MetricaCollector packs visits/pageviews/bounce/duration into
+        # `extra` JSONB. Fall back to direct columns if extra is empty
+        # (defensive for older rows written before that contract).
+        extra = row.extra or {}
+        bucket["visits"] = int(extra.get("visits") or row.impressions or 0)
+        bucket["pageviews"] = int(extra.get("pageviews") or row.clicks or 0)
+        if extra.get("bounce_rate") is not None:
+            bucket["bounce_rate"] = float(extra["bounce_rate"])
+        if extra.get("avg_duration_seconds") is not None:
+            bucket["avg_duration_sec"] = float(extra["avg_duration_seconds"])
+        metrica_latest = max(metrica_latest or "", row.date.isoformat())
+
+    for row in indexing_rows:
+        bucket = _ensure(row.date)
+        bucket["pages_indexed"] = int(row.pages_indexed or 0)
+
+    series = [
+        AnalyticsPoint(**by_date[k])
+        for k in sorted(by_date.keys())
+    ]
+
+    # Totals.
+    impressions_sum = sum(p.impressions or 0 for p in series)
+    clicks_sum = sum(p.clicks or 0 for p in series)
+    visits_sum = sum(p.visits or 0 for p in series)
+    pageviews_sum = sum(p.pageviews or 0 for p in series)
+    pos_values = [p.avg_position for p in series if p.avg_position is not None]
+    avg_pos_mean = sum(pos_values) / len(pos_values) if pos_values else None
+    bounce_values = [p.bounce_rate for p in series if p.bounce_rate is not None]
+    avg_bounce_mean = sum(bounce_values) / len(bounce_values) if bounce_values else None
+    indexed_pts = [p.pages_indexed for p in series if p.pages_indexed is not None]
+    indexed_latest = indexed_pts[-1] if indexed_pts else None
+
+    days_with_search = sum(1 for p in series if p.impressions is not None)
+    days_with_traffic = sum(1 for p in series if p.visits is not None)
+
+    return AnalyticsResponse(
+        site_id=str(site_id),
+        days=days,
+        series=series,
+        totals=AnalyticsTotals(
+            impressions_sum=impressions_sum,
+            clicks_sum=clicks_sum,
+            visits_sum=visits_sum,
+            pageviews_sum=pageviews_sum,
+            avg_position_mean=avg_pos_mean,
+            avg_bounce_rate_mean=avg_bounce_mean,
+            indexed_latest=indexed_latest,
+            days_with_search_data=days_with_search,
+            days_with_traffic_data=days_with_traffic,
+        ),
+        webmaster_latest_date=webmaster_latest,
+        metrica_latest_date=metrica_latest,
     )
 
 

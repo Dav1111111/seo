@@ -689,6 +689,37 @@ export const api = {
       { base: "admin" },
     ),
 
+  // ── PR-S6 · Analytics module ─────────────────────────────────────
+  studioGetAnalytics: (siteId: string, days = 90) =>
+    apiFetch<{
+      site_id: string;
+      days: number;
+      series: Array<{
+        date: string;
+        impressions: number | null;
+        clicks: number | null;
+        avg_position: number | null;
+        visits: number | null;
+        pageviews: number | null;
+        bounce_rate: number | null;
+        avg_duration_sec: number | null;
+        pages_indexed: number | null;
+      }>;
+      totals: {
+        impressions_sum: number;
+        clicks_sum: number;
+        visits_sum: number;
+        pageviews_sum: number;
+        avg_position_mean: number | null;
+        avg_bounce_rate_mean: number | null;
+        indexed_latest: number | null;
+        days_with_search_data: number;
+        days_with_traffic_data: number;
+      };
+      webmaster_latest_date: string | null;
+      metrica_latest_date: string | null;
+    }>(`/studio/sites/${siteId}/analytics?days=${days}`, { base: "admin" }),
+
   studioGetPage: (siteId: string, pageId: string) =>
     apiFetch<{
       page_id: string;

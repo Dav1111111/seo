@@ -63,10 +63,9 @@ const MODULES: Array<{
   {
     href: "/studio/analytics",
     title: "Аналитика",
-    description: "Webmaster + Метрика — показы, клики, CTR, поведение, конверсия. Тренды и графики.",
+    description: "Видимость в Яндексе (показы / клики / позиции), поведение посетителей, тренд индексации — за 30/90/180/365 дней.",
     icon: BarChart3,
-    status: "stub",
-    reason: "PR-S6",
+    status: "ready",
   },
   {
     href: "/studio/ads",
