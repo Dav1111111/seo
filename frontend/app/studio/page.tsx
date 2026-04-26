@@ -56,10 +56,9 @@ const MODULES: Array<{
   {
     href: "/studio/competitors",
     title: "Конкуренты",
-    description: "Реальные конкуренты, что у них есть, чего нет у нас. Без обзорной мешанины.",
+    description: "Реальные конкуренты, что у них есть, чего нет у нас. Opportunities + список + gap'ы + сравнение.",
     icon: Swords,
-    status: "stub",
-    reason: "PR-S5",
+    status: "ready",
   },
   {
     href: "/studio/analytics",

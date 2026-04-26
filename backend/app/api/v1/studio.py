@@ -872,7 +872,7 @@ async def get_page_detail(
     cross_links = {
         "queries": True,        # PR-S2 ✅
         "indexation": True,     # PR-S3 ✅
-        "competitors": False,   # PR-S5 ⏳
+        "competitors": True,    # PR-S5 ✅
         "analytics": False,     # PR-S6 ⏳
         "outcomes": False,      # PR-S8 ⏳
     }
