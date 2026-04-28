@@ -570,6 +570,25 @@ export const api = {
       },
     ),
 
+  // Day 5 — harmful visibility: queries we rank for that are spam or
+  // disputed. Read-only lens on existing classified data.
+  studioHarmfulVisibility: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      counts: { spam: number; disputed: number; total: number };
+      items: Array<{
+        query_id: string;
+        query_text: string;
+        relevance: "spam" | "disputed";
+        relevance_set_by: "rules" | "llm" | "user" | null;
+        relevance_reason_ru: string | null;
+        last_position: number | null;
+        last_impressions_14d: number | null;
+        wordstat_volume: number | null;
+        suggested_action_ru: string;
+      }>;
+    }>(`/studio/sites/${siteId}/queries/harmful`, { base: "admin" }),
+
   studioDiscoverQueries: (siteId: string) =>
     apiFetch<{
       status: "queued" | "deduped";

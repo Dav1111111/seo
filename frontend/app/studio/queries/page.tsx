@@ -35,6 +35,8 @@ import {
   Check,
   X as XIcon,
   HelpCircle,
+  AlertTriangle,
+  ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -554,6 +556,38 @@ export default function StudioQueriesPage() {
           </button>
         ))}
       </div>
+
+      {/* Harmful-visibility cross-link — only shown when there's
+          something to fix. Computed cheaply on the client from the
+          existing data — counts spam+disputed rows where we have a
+          position (proxy for «we rank somewhere»). The /harmful page
+          does the real top-30 cut on the backend. */}
+      {data && (() => {
+        const candidates = data.items.filter(
+          (it) =>
+            (it.relevance === "spam" || it.relevance === "disputed") &&
+            it.last_position != null &&
+            it.last_position <= 30,
+        );
+        if (candidates.length === 0) return null;
+        return (
+          <Link
+            href="/studio/queries/harmful"
+            className="block rounded-md border border-amber-300 bg-amber-50 hover:bg-amber-100 transition-colors px-3 py-2 text-sm flex items-center gap-2"
+          >
+            <AlertTriangle className="h-4 w-4 text-amber-600 flex-shrink-0" />
+            <span className="flex-1">
+              <strong>{candidates.length}</strong>{" "}
+              {pluralRu(candidates.length, ["запрос", "запроса", "запросов"])} с
+              вредной видимостью —{" "}
+              {pluralRu(candidates.length, ["ранжируется", "ранжируются", "ранжируются"])}{" "}
+              в топ-30, но классификатор пометил{" "}
+              {pluralRu(candidates.length, ["его", "их", "их"])} как мусор/спорный
+            </span>
+            <ChevronRight className="h-4 w-4 text-amber-700 flex-shrink-0" />
+          </Link>
+        );
+      })()}
 
       {/* Relevance filter chips — clicking toggles a class out of view.
           Default: spam hidden (the whole reason classifier exists). */}

@@ -73,11 +73,12 @@ Studio v2 — следующий слой: **умный анализ, котор
 
 ### Этап 5 · Отчёт «вредная видимость»
 
-- [ ] **Backend.** Endpoint `GET /admin/studio/sites/{id}/harmful-visibility` возвращает запросы где `relevance=spam OR disputed` И `last_position <= 30`.
-- [ ] **Backend.** Для каждого запроса — связанная страница (по daily_metrics dimension), top-3 конкурента, объяснение «почему ранжируемся не туда».
-- [ ] **Frontend.** Новая секция в `/studio/queries` или отдельная страница `/studio/queries/harmful` — список с рекомендациями.
+- [x] **Backend.** Endpoint `GET /admin/studio/sites/{id}/queries/harmful` возвращает запросы где `relevance ∈ {spam, disputed}` И `last_position <= 30`.
+- [x] **Backend.** Каждый item содержит позицию, показы 14д, объём Wordstat, причину классификации, и rule-based `suggested_action_ru` (severity-aware: жёстче для топ-10).
+- [x] **Frontend.** Отдельная страница `/studio/queries/harmful` — totals + карточки сортированы по объёму. Spam-карточки с rose-границей, disputed — с amber. Топ-10 позиции подсвечены danger-цветом.
+- [x] **Frontend.** Cross-link на `/studio/queries` — амбер-баннер с количеством, виден только когда есть что чинить.
 
-**Оценка: 4-6 часов.** Тривиально поверх этапа 4.
+**Сделано ✅** 2026-04-28. Per-page conn (top-3 конкурента, страница на сайте) deferred — нужен page↔query link table, который пока не строится.
 
 ---
 
@@ -223,4 +224,8 @@ Studio v2 — следующий слой: **умный анализ, котор
 
 | Дата | Этап | Коммит | Что вошло |
 |---|---|---|---|
-| 2026-04-27 | Профиль-редактор (предтеча Этапа 4) | (commit pending) | endpoint `GET/PUT /admin/studio/sites/{id}/profile`, страница `app/studio/profile/page.tsx` с chip-редакторами и dirty-banner, карточка в индексе Студии, маркер `_profile_edited` для telemetry |
+| 2026-04-27 | Профиль-редактор (предтеча Этапа 4) | e570db4 | endpoint `GET/PUT /admin/studio/sites/{id}/profile`, страница `app/studio/profile/page.tsx` с chip-редакторами и dirty-banner, карточка в индексе Студии, маркер `_profile_edited` для telemetry |
+| 2026-04-27 | Этап 4 День 2 — миграция + rules-классификатор | 7bdd252 | alembic `c4d8e9f1a2b3` добавляет `relevance / relevance_set_by / relevance_set_at / relevance_reason_ru` в `search_queries` + индекс `(site_id, relevance)` + CHECK constraints. `app/core_audit/relevance.py` — ProfileSlice + classify_by_rules (whole-word match, only `own` verdict). 16 тестов |
+| 2026-04-28 | Этап 4 День 3 — LLM классификатор + Celery + endpoint | 29ad401 | `app/core_audit/relevance_llm.py` (Haiku via tool_use, structured output). `classify_queries_site_task` в `app/collectors/tasks.py` — rules first, LLM batches of 30, never overwrites set_by='user'. Endpoint `POST .../queries/classify`. Live-test: 45 запросов на grandtourspirit за 33 сек, $0.048, 0 failures. Распределение: 8 own / 6 adjacent / 9 disputed / 22 spam |
+| 2026-04-28 | Этап 4 День 4 — UI релевантности | 5ab44cc | `QueryRow` + `relevance_counts` в ответе list_queries. PATCH `/queries/{qid}/relevance` для override. Frontend: бейджи per-row, фильтр-чипы, кнопка «Классифицировать», popover override, 👤 marker для user-set, spam с line-through |
+| 2026-04-28 | Этап 5 — вредная видимость | (commit pending) | endpoint `GET .../queries/harmful` (top-30 cut, severity-aware suggested_action_ru), страница `app/studio/queries/harmful/page.tsx` с totals + карточками, cross-link с амбер-баннером из `/studio/queries` |
