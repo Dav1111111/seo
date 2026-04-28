@@ -151,10 +151,12 @@ Studio v2 — следующий слой: **умный анализ, котор
 
 **Без этого классификатор унаследует мусор из профиля** (помнишь «прокат» в багги-сайте, который потянул левые фразы из Wordstat).
 
-- [ ] Endpoint `PATCH /admin/studio/sites/{id}/profile` — позволяет редактировать services / geo_primary / primary_product / secondary_products.
-- [ ] Frontend: страница `/studio/profile` или модалка в `/studio/connections` — owner видит что система считает его бизнесом и может править.
+- [x] Endpoint `GET /admin/studio/sites/{id}/profile` + `PUT .../profile` — читает/пишет primary_product / services / secondary_products / geo_primary / geo_secondary / narrative_ru. Валидация: непустой primary_product, непустой geo_primary, лимиты длины.
+- [x] Frontend: страница `/studio/profile` — chip-редакторы для массивов, textarea для narrative, dirty-banner, индикатор «отредактировано вручную vs LLM».
+- [x] Карточка «Профиль бизнеса» в индексе Студии (поверх остальных модулей — намекает что это надо посмотреть в первую очередь).
+- [x] Activity-маркер в `target_config._profile_edited` — telemetry для отслеживания drift между LLM и owner-редакцией.
 
-**Оценка: 1 день.** Сделать **до** этапа 4.
+**Сделано ✅** 2026-04-27.
 
 ### 4. Тесты на реальных данных
 
@@ -221,4 +223,4 @@ Studio v2 — следующий слой: **умный анализ, котор
 
 | Дата | Этап | Коммит | Что вошло |
 |---|---|---|---|
-| — | — | — | пока ничего |
+| 2026-04-27 | Профиль-редактор (предтеча Этапа 4) | (commit pending) | endpoint `GET/PUT /admin/studio/sites/{id}/profile`, страница `app/studio/profile/page.tsx` с chip-редакторами и dirty-banner, карточка в индексе Студии, маркер `_profile_edited` для telemetry |

@@ -1254,4 +1254,190 @@ async def list_outcomes(
     )
 
 
+# ── Module: Profile editor (Studio v2 prerequisite) ───────────────────
+#
+# /studio/profile lets the owner inspect and edit `target_config` —
+# what the system thinks is their business. This is a HARD prerequisite
+# for the query classifier (v2 etap 4): if the profile says they
+# rent buggies but their actual product is buggy expeditions, the
+# classifier will incorrectly tag rental queries as relevant.
+#
+# v1 onboarding generates this via LLM and persists it on confirm,
+# but the LLM hallucinates ("прокат" leaked into grandtourspirit's
+# services list — pure invention). The editor lets owner override.
+#
+# Source of truth: `sites.target_config` JSONB. Read & write only the
+# fields owner-editable in v1. `business_truth`, `service_weights`,
+# `competitor_*`, `growth_opportunities` etc. are computed by tasks
+# and out of scope here.
+
+
+class ProfileEditable(BaseModel):
+    """The owner-facing slice of target_config. v1 editor scope."""
+    primary_product: str = ""
+    services: list[str] = []
+    secondary_products: list[str] = []
+    geo_primary: list[str] = []
+    geo_secondary: list[str] = []
+    narrative_ru: str = ""
+
+
+class ProfileResponse(BaseModel):
+    site_id: str
+    domain: str
+    profile: ProfileEditable
+    # Reflect when the editor saved last + by whom — telemetry for
+    # detecting drift between LLM-generated and human-edited state.
+    last_edited_at: datetime | None
+    last_edited_by: str | None  # "onboarding" | "owner" | None
+
+
+@router.get(
+    "/sites/{site_id}/profile",
+    response_model=ProfileResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_profile(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> ProfileResponse:
+    """Read the editable slice of target_config."""
+    site = await _site_or_404(db, site_id)
+    cfg = site.target_config or {}
+
+    def _strs(key: str) -> list[str]:
+        raw = cfg.get(key) or []
+        return [str(x).strip() for x in raw if x and str(x).strip()]
+
+    profile = ProfileEditable(
+        primary_product=str(cfg.get("primary_product") or "").strip(),
+        services=_strs("services"),
+        secondary_products=_strs("secondary_products"),
+        geo_primary=_strs("geo_primary"),
+        geo_secondary=_strs("geo_secondary"),
+        narrative_ru=str(cfg.get("narrative_ru") or "").strip(),
+    )
+
+    edited = cfg.get("_profile_edited") or {}
+    return ProfileResponse(
+        site_id=str(site_id),
+        domain=site.domain,
+        profile=profile,
+        last_edited_at=(
+            datetime.fromisoformat(edited["at"])
+            if isinstance(edited.get("at"), str)
+            else None
+        ),
+        last_edited_by=edited.get("by"),
+    )
+
+
+PROFILE_PRIMARY_MAX_LEN = 80
+PROFILE_LIST_MAX_ITEMS = 30
+PROFILE_LIST_ITEM_MAX_LEN = 80
+PROFILE_NARRATIVE_MAX_LEN = 4000
+
+
+@router.put(
+    "/sites/{site_id}/profile",
+    response_model=ProfileResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def put_profile(
+    site_id: uuid.UUID,
+    body: ProfileEditable,
+    db: AsyncSession = Depends(get_db),
+) -> ProfileResponse:
+    """Persist owner-edited profile back into target_config.
+
+    Validation:
+      - primary_product non-empty (the classifier anchors on it)
+      - geo_primary non-empty (regions are the second anchor)
+      - list lengths capped to keep target_config reasonable in
+        downstream LLM prompts
+      - per-item length capped to prevent prompt-injection via huge
+        strings
+    """
+    from sqlalchemy import update
+
+    site = await _site_or_404(db, site_id)
+
+    primary = body.primary_product.strip()
+    if not primary:
+        raise HTTPException(
+            status_code=422,
+            detail="primary_product is required — the classifier anchors on it",
+        )
+    if len(primary) > PROFILE_PRIMARY_MAX_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail=f"primary_product longer than {PROFILE_PRIMARY_MAX_LEN} chars",
+        )
+
+    def _clean_list(items: list[str], label: str) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for it in items:
+            v = (it or "").strip()
+            if not v:
+                continue
+            if len(v) > PROFILE_LIST_ITEM_MAX_LEN:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"{label} item longer than "
+                        f"{PROFILE_LIST_ITEM_MAX_LEN} chars: {v[:30]}…"
+                    ),
+                )
+            key = v.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(v)
+            if len(out) >= PROFILE_LIST_MAX_ITEMS:
+                break
+        return out
+
+    services = _clean_list(body.services, "services")
+    secondary = _clean_list(body.secondary_products, "secondary_products")
+    geo_primary = _clean_list(body.geo_primary, "geo_primary")
+    geo_secondary = _clean_list(body.geo_secondary, "geo_secondary")
+
+    if not geo_primary:
+        raise HTTPException(
+            status_code=422,
+            detail="geo_primary is required — pick at least one region",
+        )
+
+    narrative = body.narrative_ru.strip()
+    if len(narrative) > PROFILE_NARRATIVE_MAX_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"narrative_ru longer than "
+                f"{PROFILE_NARRATIVE_MAX_LEN} chars"
+            ),
+        )
+
+    new_cfg = dict(site.target_config or {})
+    new_cfg["primary_product"] = primary
+    new_cfg["services"] = services
+    new_cfg["secondary_products"] = secondary
+    new_cfg["geo_primary"] = geo_primary
+    new_cfg["geo_secondary"] = geo_secondary
+    new_cfg["narrative_ru"] = narrative
+    new_cfg["_profile_edited"] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "by": "owner",
+    }
+
+    await db.execute(
+        update(Site).where(Site.id == site.id).values(target_config=new_cfg),
+    )
+    await db.commit()
+
+    # Re-read so we return the canonical post-write shape.
+    return await get_profile(site_id, db)
+
+
 __all__ = ["router"]

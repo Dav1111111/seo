@@ -626,6 +626,47 @@ export const api = {
       { base: "admin" },
     ),
 
+  // ── V2 prerequisite · Profile editor ─────────────────────────────
+  // Backend: backend/app/api/v1/studio.py · get_profile / put_profile
+  studioGetProfile: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      domain: string;
+      profile: {
+        primary_product: string;
+        services: string[];
+        secondary_products: string[];
+        geo_primary: string[];
+        geo_secondary: string[];
+        narrative_ru: string;
+      };
+      last_edited_at: string | null;
+      last_edited_by: string | null;
+    }>(`/studio/sites/${siteId}/profile`, { base: "admin" }),
+
+  studioPutProfile: (
+    siteId: string,
+    body: {
+      primary_product: string;
+      services: string[];
+      secondary_products: string[];
+      geo_primary: string[];
+      geo_secondary: string[];
+      narrative_ru: string;
+    },
+  ) =>
+    apiFetch<{
+      site_id: string;
+      domain: string;
+      profile: typeof body;
+      last_edited_at: string | null;
+      last_edited_by: string | null;
+    }>(`/studio/sites/${siteId}/profile`, {
+      method: "PUT",
+      base: "admin",
+      body: JSON.stringify(body),
+    }),
+
   // ── PR-S8 · Outcomes module ──────────────────────────────────────
   studioListOutcomes: (siteId: string) =>
     apiFetch<{

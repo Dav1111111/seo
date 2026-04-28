@@ -2,6 +2,7 @@ import Link from "next/link";
 import {
   Activity, Search, Telescope, FileText, Swords,
   BarChart3, Megaphone, History, ChevronRight, Sparkles,
+  UserSquare,
 } from "lucide-react";
 
 /**
@@ -25,6 +26,13 @@ const MODULES: Array<{
   status: ModuleStatus;
   reason?: string;
 }> = [
+  {
+    href: "/studio/profile",
+    title: "Профиль бизнеса",
+    description: "Что система считает твоим бизнесом — продукт, услуги, регионы. От этого зависит классификация запросов и Wordstat.",
+    icon: UserSquare,
+    status: "ready",
+  },
   {
     href: "/studio/connections",
     title: "Коннекторы",
