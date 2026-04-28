@@ -901,7 +901,7 @@ async def get_page_detail(
         "queries": True,        # PR-S2 ✅
         "indexation": True,     # PR-S3 ✅
         "competitors": True,    # PR-S5 ✅
-        "outcomes": False,      # PR-S8 ⏳
+        "outcomes": True,       # PR-S8 ✅
     }
 
     return PageDetail(
@@ -1130,6 +1130,127 @@ async def get_analytics(
         ),
         webmaster_latest_date=webmaster_latest,
         metrica_latest_date=metrica_latest,
+    )
+
+
+# ── Module: Outcomes (PR-S8) ──────────────────────────────────────────
+#
+# /studio/outcomes is the «before / after» module — it reads what was
+# applied (PR-S4 «Применил & замерить эффект» button + PR-S5 opportunity
+# apply) and shows the 14-day delta when followup_at fills in.
+#
+# Trigger flow (already shipped):
+#   user clicks Применил → POST /admin/sites/{id}/outcomes/applied
+#                         → OutcomeSnapshot row with baseline_metrics
+#                         → 14 days pass
+#                         → outcomes_followup_daily_task fills
+#                            followup_metrics + delta
+#
+# This endpoint is read-only — it groups snapshots by source / page_url
+# so owner sees «what I changed for this page → what happened» rather
+# than a flat list of recommendation_ids.
+
+
+class OutcomeListItem(BaseModel):
+    snapshot_id: str
+    recommendation_id: str
+    source: str                 # "priority" | "opportunity"
+    page_url: str | None
+    applied_at: datetime
+    followup_at: datetime | None
+    baseline_metrics: dict | None
+    followup_metrics: dict | None
+    delta: dict | None
+    note_ru: str | None
+    days_since_applied: int     # for «замер через N дней» UI hint
+
+
+class OutcomeStats(BaseModel):
+    """Top-of-page summary numbers."""
+    total: int
+    awaiting_followup: int       # applied < 14 days ago
+    measured: int                # followup_at is not null
+    avg_impressions_pct: float | None
+    avg_clicks_pct: float | None
+    avg_position_delta: float | None
+
+
+class OutcomesResponse(BaseModel):
+    site_id: str
+    stats: OutcomeStats
+    items: list[OutcomeListItem]
+
+
+@router.get(
+    "/sites/{site_id}/outcomes",
+    response_model=OutcomesResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def list_outcomes(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> OutcomesResponse:
+    """List of all outcome snapshots for a site, newest first."""
+    await _site_or_404(db, site_id)
+
+    rows = (await db.execute(
+        select(OutcomeSnapshot)
+        .where(OutcomeSnapshot.site_id == site_id)
+        .order_by(desc(OutcomeSnapshot.applied_at)),
+    )).scalars().all()
+
+    now = datetime.now(timezone.utc)
+    items: list[OutcomeListItem] = []
+    measured_deltas: list[dict] = []
+    awaiting = 0
+
+    for r in rows:
+        applied_at = r.applied_at
+        # OutcomeSnapshot.applied_at may be naive in older rows; coerce
+        # to UTC-aware so the subtraction below doesn't blow up.
+        if applied_at.tzinfo is None:
+            applied_at = applied_at.replace(tzinfo=timezone.utc)
+        days_since = max(0, (now - applied_at).days)
+
+        if r.followup_at is None:
+            awaiting += 1
+        else:
+            if isinstance(r.delta, dict):
+                measured_deltas.append(r.delta)
+
+        items.append(OutcomeListItem(
+            snapshot_id=str(r.id),
+            recommendation_id=r.recommendation_id,
+            source=r.source,
+            page_url=r.page_url,
+            applied_at=applied_at,
+            followup_at=r.followup_at,
+            baseline_metrics=r.baseline_metrics,
+            followup_metrics=r.followup_metrics,
+            delta=r.delta,
+            note_ru=r.note_ru,
+            days_since_applied=days_since,
+        ))
+
+    def _avg(key: str) -> float | None:
+        vals = [d.get(key) for d in measured_deltas if d.get(key) is not None]
+        if not vals:
+            return None
+        return round(sum(vals) / len(vals), 2)
+
+    stats = OutcomeStats(
+        total=len(items),
+        awaiting_followup=awaiting,
+        measured=len(measured_deltas),
+        avg_impressions_pct=_avg("impressions_pct"),
+        avg_clicks_pct=_avg("clicks_pct"),
+        avg_position_delta=_avg("position_delta"),
+    )
+
+    return OutcomesResponse(
+        site_id=str(site_id),
+        stats=stats,
+        items=items,
     )
 
 

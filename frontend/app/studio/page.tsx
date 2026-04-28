@@ -80,8 +80,7 @@ const MODULES: Array<{
     title: "До / После",
     description: "Каждое применённое изменение фиксируется до и через 14 дней — автоматический замер эффекта.",
     icon: History,
-    status: "stub",
-    reason: "PR-S8 (после 14 дней работы PR-S4)",
+    status: "ready",
   },
 ];
 
@@ -115,7 +114,7 @@ function StatusBadge({ status, reason }: { status: ModuleStatus; reason?: string
 
 export default function StudioIndexPage() {
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 sm:p-6 space-y-6">
       <div>
         <h1 className="text-2xl font-bold flex items-center gap-2">
           <Sparkles className="h-6 w-6 text-primary" />

@@ -55,10 +55,18 @@ def outcomes_followup_daily_task(self) -> dict:
                 )
             )).scalars().all()
 
+            # Webmaster lag-aware window — same constants as
+            # admin_ops._baseline_metrics so baseline and followup
+            # are computed in the same shape (a fair comparison).
+            from app.api.v1.admin_ops import (
+                BASELINE_WINDOW_DAYS,
+                WEBMASTER_LAG_DAYS,
+            )
+
             for snap in rows:
-                # Fresh last-7-days window for the site
                 today = date.today()
-                week_ago = today - timedelta(days=7)
+                window_end = today - timedelta(days=WEBMASTER_LAG_DAYS)
+                window_start = window_end - timedelta(days=BASELINE_WINDOW_DAYS)
                 row = (await db.execute(
                     select(
                         func.coalesce(func.sum(DailyMetric.impressions), 0).label("imp"),
@@ -67,7 +75,7 @@ def outcomes_followup_daily_task(self) -> dict:
                     ).where(
                         DailyMetric.site_id == snap.site_id,
                         DailyMetric.metric_type == "query_performance",
-                        DailyMetric.date.between(week_ago, today),
+                        DailyMetric.date.between(window_start, window_end),
                     )
                 )).first()
 
@@ -75,6 +83,8 @@ def outcomes_followup_daily_task(self) -> dict:
                     "impressions_7d": int(row.imp or 0) if row else 0,
                     "clicks_7d": int(row.clk or 0) if row else 0,
                     "avg_position": float(row.pos) if row and row.pos else None,
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
                 }
                 base = snap.baseline_metrics or {}
                 delta = {

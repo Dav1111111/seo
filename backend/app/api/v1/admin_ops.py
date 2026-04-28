@@ -148,17 +148,30 @@ class MarkAppliedBody(BaseModel):
     note_ru: str | None = Field(default=None, max_length=1000)
 
 
+#: Webmaster query_performance lags ~5–10 days. If we read "last 7
+#: days from today" the window is 0–2 days of real data + 5–7 zero
+#: days. Both baseline and followup are computed in that mostly-empty
+#: zone → deltas come out near zero independent of whether the user's
+#: edit worked. Shift the window backward by WEBMASTER_LAG_DAYS so it
+#: lands fully inside the populated zone. Followup task uses the same
+#: constant for symmetry.
+WEBMASTER_LAG_DAYS = 7
+BASELINE_WINDOW_DAYS = 7
+
+
 async def _baseline_metrics(
     db: AsyncSession, site_id: uuid.UUID, page_url: str | None,
 ) -> dict[str, Any]:
-    """Last-7-days site-wide metrics as baseline.
+    """Site-wide metrics over a 7-day window shifted back by the
+    Webmaster lag, used as the «before» snapshot for outcomes.
 
-    Page-level slicing stays out of scope for v1 — Webmaster doesn't
-    give us URL-level query-performance reliably enough to break
-    attribution by page.
+    Page-level slicing stays out of scope for Studio v1 — Webmaster
+    doesn't give us URL-level query-performance reliably enough to
+    break attribution by page. Studio v2 will tackle per-page.
     """
     today = date.today()
-    week_ago = today - timedelta(days=7)
+    window_end = today - timedelta(days=WEBMASTER_LAG_DAYS)
+    window_start = window_end - timedelta(days=BASELINE_WINDOW_DAYS)
     row = (await db.execute(
         select(
             func.coalesce(func.sum(DailyMetric.impressions), 0).label("impressions"),
@@ -167,15 +180,23 @@ async def _baseline_metrics(
         ).where(
             DailyMetric.site_id == site_id,
             DailyMetric.metric_type == "query_performance",
-            DailyMetric.date.between(week_ago, today),
+            DailyMetric.date.between(window_start, window_end),
         )
     )).first()
     if row is None:
-        return {"impressions_7d": 0, "clicks_7d": 0, "avg_position": None}
+        return {
+            "impressions_7d": 0,
+            "clicks_7d": 0,
+            "avg_position": None,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+        }
     return {
         "impressions_7d": int(row.impressions or 0),
         "clicks_7d": int(row.clicks or 0),
         "avg_position": float(row.avg_position) if row.avg_position else None,
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
     }
 
 

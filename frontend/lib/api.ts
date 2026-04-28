@@ -689,6 +689,33 @@ export const api = {
       { base: "admin" },
     ),
 
+  // ── PR-S8 · Outcomes module ──────────────────────────────────────
+  studioListOutcomes: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      stats: {
+        total: number;
+        awaiting_followup: number;
+        measured: number;
+        avg_impressions_pct: number | null;
+        avg_clicks_pct: number | null;
+        avg_position_delta: number | null;
+      };
+      items: Array<{
+        snapshot_id: string;
+        recommendation_id: string;
+        source: "priority" | "opportunity";
+        page_url: string | null;
+        applied_at: string;
+        followup_at: string | null;
+        baseline_metrics: Record<string, unknown> | null;
+        followup_metrics: Record<string, unknown> | null;
+        delta: Record<string, unknown> | null;
+        note_ru: string | null;
+        days_since_applied: number;
+      }>;
+    }>(`/studio/sites/${siteId}/outcomes`, { base: "admin" }),
+
   // ── PR-S6 · Analytics module ─────────────────────────────────────
   studioGetAnalytics: (siteId: string, days = 90) =>
     apiFetch<{
