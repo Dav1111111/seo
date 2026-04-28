@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base, TimestampMixin
@@ -21,3 +21,15 @@ class SearchQuery(Base, TimestampMixin):
     wordstat_volume: Mapped[int | None] = mapped_column(Integer)
     wordstat_trend: Mapped[dict | None] = mapped_column(JSONB)
     wordstat_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Studio v2 etap 4 — relevance classification.
+    # Values: own / adjacent / disputed / spam / unclassified.
+    # set_by:  rules / llm / user (user wins forever, never overwritten).
+    relevance: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="unclassified",
+    )
+    relevance_set_by: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    relevance_set_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    relevance_reason_ru: Mapped[str | None] = mapped_column(Text, nullable=True)
