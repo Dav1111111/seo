@@ -107,6 +107,11 @@ class QueryRow(BaseModel):
     last_position: float | None
     last_impressions_14d: int | None
     last_seen_at: datetime | None
+    # Studio v2 etap 4 — relevance fields
+    relevance: str                    # own / adjacent / disputed / spam / unclassified
+    relevance_set_by: str | None      # rules / llm / user
+    relevance_set_at: datetime | None
+    relevance_reason_ru: str | None
 
 
 class QueriesResponse(BaseModel):
@@ -116,6 +121,8 @@ class QueriesResponse(BaseModel):
     # Module-level summary so UI can render a header line without
     # iterating items:
     coverage: dict[str, int]   # {"with_volume": N, "without_volume": M, ...}
+    # Relevance distribution — UI shows it as a progress strip on top.
+    relevance_counts: dict[str, int]  # {"own": N, "adjacent": M, ...}
 
 
 @router.get(
@@ -239,6 +246,10 @@ async def list_queries(
                 last_position=last_position,
                 last_impressions_14d=impressions_14d_by_qid.get(q.id),
                 last_seen_at=q.last_seen_at,
+                relevance=q.relevance or "unclassified",
+                relevance_set_by=q.relevance_set_by,
+                relevance_set_at=q.relevance_set_at,
+                relevance_reason_ru=q.relevance_reason_ru,
             )
         )
 
@@ -247,11 +258,26 @@ async def list_queries(
         # known position go to the bottom.
         items.sort(key=lambda r: (r.last_position is None, r.last_position or 0))
 
+    # Relevance distribution — counted on the FULL site, not just the
+    # paginated `items` slice, so the UI strip is honest.
+    relevance_counts = {k: 0 for k in (
+        "own", "adjacent", "disputed", "spam", "unclassified",
+    )}
+    full_count_rows = (await db.execute(
+        select(SearchQuery.relevance, sa_func.count())
+        .where(SearchQuery.site_id == site_id)
+        .group_by(SearchQuery.relevance)
+    )).all()
+    for rel, n in full_count_rows:
+        if rel in relevance_counts:
+            relevance_counts[rel] = int(n)
+
     return QueriesResponse(
         site_id=site_id,
         total=coverage["total"],
         items=items,
         coverage=coverage,
+        relevance_counts=relevance_counts,
     )
 
 
@@ -359,6 +385,69 @@ async def trigger_wordstat_refresh(
 
     task = wordstat_refresh_site.delay(str(site_id), run_id=run_id)
     return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
+
+
+class RelevanceOverrideBody(BaseModel):
+    relevance: str  # "own" | "adjacent" | "disputed" | "spam" — no "unclassified" from user
+
+
+@router.patch(
+    "/sites/{site_id}/queries/{query_id}/relevance",
+    dependencies=[Depends(_require_admin)],
+)
+async def patch_query_relevance(
+    site_id: uuid.UUID,
+    query_id: uuid.UUID,
+    body: RelevanceOverrideBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Owner override for the classifier verdict.
+
+    set_by='user' wins forever — the classify task NEVER overwrites
+    rows where set_by='user' (see classify_queries_site_task in
+    collectors/tasks.py).
+    """
+    from sqlalchemy import update
+    from app.core_audit.relevance import RELEVANCE_VALUES
+
+    if body.relevance not in RELEVANCE_VALUES or body.relevance == "unclassified":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"relevance must be one of: "
+                f"{[v for v in RELEVANCE_VALUES if v != 'unclassified']}"
+            ),
+        )
+
+    site = await _site_or_404(db, site_id)
+    q = (await db.execute(
+        select(SearchQuery).where(
+            SearchQuery.id == query_id,
+            SearchQuery.site_id == site.id,
+        )
+    )).scalar_one_or_none()
+    if q is None:
+        raise HTTPException(status_code=404, detail="query not found")
+
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(SearchQuery)
+        .where(SearchQuery.id == query_id)
+        .values(
+            relevance=body.relevance,
+            relevance_set_by="user",
+            relevance_set_at=now,
+            relevance_reason_ru="Помечено вручную владельцем — классификатор не перезатрёт.",
+        )
+    )
+    await db.commit()
+
+    return {
+        "query_id": str(query_id),
+        "relevance": body.relevance,
+        "relevance_set_by": "user",
+        "relevance_set_at": now.isoformat(),
+    }
 
 
 @router.post(

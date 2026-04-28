@@ -517,6 +517,10 @@ export const api = {
         last_position: number | null;
         last_impressions_14d: number | null;
         last_seen_at: string | null;
+        relevance: "own" | "adjacent" | "disputed" | "spam" | "unclassified";
+        relevance_set_by: "rules" | "llm" | "user" | null;
+        relevance_set_at: string | null;
+        relevance_reason_ru: string | null;
       }>;
       coverage: {
         total: number;
@@ -524,9 +528,46 @@ export const api = {
         without_volume: number;
         stale: number;
       };
+      relevance_counts: {
+        own: number;
+        adjacent: number;
+        disputed: number;
+        spam: number;
+        unclassified: number;
+      };
     }>(
       `/studio/sites/${siteId}/queries?sort=${sort}&limit=${limit}`,
       { base: "admin" },
+    ),
+
+  studioClassifyQueries: (siteId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/queries/classify`,
+      { method: "POST", base: "admin" },
+    ),
+
+  studioOverrideRelevance: (
+    siteId: string,
+    queryId: string,
+    relevance: "own" | "adjacent" | "disputed" | "spam",
+  ) =>
+    apiFetch<{
+      query_id: string;
+      relevance: string;
+      relevance_set_by: string;
+      relevance_set_at: string;
+    }>(
+      `/studio/sites/${siteId}/queries/${queryId}/relevance`,
+      {
+        method: "PATCH",
+        base: "admin",
+        body: JSON.stringify({ relevance }),
+      },
     ),
 
   studioDiscoverQueries: (siteId: string) =>

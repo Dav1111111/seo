@@ -31,6 +31,10 @@ import {
   CheckCircle2,
   Info,
   ArrowLeft,
+  Brain,
+  Check,
+  X as XIcon,
+  HelpCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -105,6 +109,83 @@ function StatusBadge({ status }: { status: StatusKey }) {
   );
 }
 
+// ── Relevance (Studio v2 etap 4) ────────────────────────────────────
+
+type RelevanceKey =
+  | "own"
+  | "adjacent"
+  | "disputed"
+  | "spam"
+  | "unclassified";
+
+const RELEVANCE_META: Record<
+  RelevanceKey,
+  { label: string; short: string; className: string; dotColor: string }
+> = {
+  own: {
+    label: "наш запрос",
+    short: "наш",
+    className: "bg-emerald-50 text-emerald-800 border-emerald-300",
+    dotColor: "bg-emerald-500",
+  },
+  adjacent: {
+    label: "смежный — клиент может искать",
+    short: "смежный",
+    className: "bg-blue-50 text-blue-800 border-blue-300",
+    dotColor: "bg-blue-500",
+  },
+  disputed: {
+    label: "спорный — нужна проверка",
+    short: "спорный",
+    className: "bg-amber-50 text-amber-800 border-amber-300",
+    dotColor: "bg-amber-500",
+  },
+  spam: {
+    label: "мусор — не наша тема",
+    short: "мусор",
+    className: "bg-muted text-muted-foreground border line-through opacity-70",
+    dotColor: "bg-muted-foreground",
+  },
+  unclassified: {
+    label: "не классифицирован",
+    short: "—",
+    className: "bg-muted text-muted-foreground border border-dashed",
+    dotColor: "bg-muted-foreground/40",
+  },
+};
+
+const SET_BY_LABEL: Record<string, string> = {
+  rules: "правило",
+  llm: "LLM",
+  user: "вручную",
+};
+
+function RelevanceBadge({
+  relevance,
+  setBy,
+  reason,
+}: {
+  relevance: RelevanceKey;
+  setBy: string | null;
+  reason: string | null;
+}) {
+  const meta = RELEVANCE_META[relevance];
+  const titleParts: string[] = [meta.label];
+  if (setBy) titleParts.push(`источник: ${SET_BY_LABEL[setBy] ?? setBy}`);
+  if (reason) titleParts.push(`«${reason}»`);
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium whitespace-nowrap",
+        meta.className,
+      )}
+      title={titleParts.join(" · ")}
+    >
+      {meta.short}
+    </span>
+  );
+}
+
 /** Inline 12-bar sparkline with no chart lib — pure flex children with
  *  relative heights. Months with null counts render as faded zero bars
  *  so gaps in the data are honest, not invisible. */
@@ -174,6 +255,13 @@ export default function StudioQueriesPage() {
   const [discoverPending, setDiscoverPending] = useState(false);
   const [refreshPending, setRefreshPending] = useState(false);
   const [wsDiscoverPending, setWsDiscoverPending] = useState(false);
+  const [classifyPending, setClassifyPending] = useState(false);
+  const [overrideBusy, setOverrideBusy] = useState<Record<string, boolean>>({});
+  // Filter — by default hide spam (the whole point of classification).
+  // Toggling a chip flips that class in/out of the visible set.
+  const [hidden, setHidden] = useState<Set<RelevanceKey>>(
+    () => new Set(["spam"]),
+  );
   const [banner, setBanner] = useState<{
     kind: "ok" | "deduped" | "err";
     text: string;
@@ -231,6 +319,53 @@ export default function StudioQueriesPage() {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
       setSafeTimeout(() => setRefreshPending(false), 3000);
+    }
+  }
+
+  async function onClassify() {
+    if (!siteId || classifyPending) return;
+    setClassifyPending(true);
+    setBanner(null);
+    try {
+      const res = await api.studioClassifyQueries(siteId);
+      if (res.deduped) {
+        setBanner({
+          kind: "deduped",
+          text: `Классификация уже идёт (run_id ${res.run_id.slice(0, 8)}…). Подожди, она закончится — таблица обновится автоматически.`,
+        });
+      } else {
+        setBanner({
+          kind: "ok",
+          text: `Запущена классификация · run_id ${res.run_id.slice(0, 8)}…. Правила бесплатно, LLM Haiku пакетами по 30 — это займёт ~30-60 секунд.`,
+        });
+      }
+    } catch (e: unknown) {
+      setBanner({ kind: "err", text: getErrorMessage(e) });
+    } finally {
+      setSafeTimeout(() => setClassifyPending(false), 3000);
+    }
+  }
+
+  async function onOverrideRelevance(
+    queryId: string,
+    next: "own" | "adjacent" | "disputed" | "spam",
+  ) {
+    if (!siteId || overrideBusy[queryId]) return;
+    setOverrideBusy((b) => ({ ...b, [queryId]: true }));
+    setBanner(null);
+    try {
+      await api.studioOverrideRelevance(siteId, queryId, next);
+      // Optimistic refresh — the row just changed locally, refetch
+      // so the badge reflects user-set state plus the «вручную» tag.
+      await mutate();
+    } catch (e: unknown) {
+      setBanner({ kind: "err", text: getErrorMessage(e) });
+    } finally {
+      setOverrideBusy((b) => {
+        const next = { ...b };
+        delete next[queryId];
+        return next;
+      });
     }
   }
 
@@ -316,6 +451,21 @@ export default function StudioQueriesPage() {
           <p className="text-sm text-muted-foreground mt-1">{subtitle}</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="default"
+            size="sm"
+            onClick={onClassify}
+            disabled={classifyPending}
+            title="Классифицирует все запросы по релевантности (наш / смежный / спорный / мусор). Правила бесплатно, остальное через Haiku — около 5 центов на 100 запросов."
+          >
+            <Brain
+              className={cn(
+                "h-4 w-4 mr-2",
+                classifyPending && "animate-pulse",
+              )}
+            />
+            {classifyPending ? "Запускаю…" : "Классифицировать"}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -405,6 +555,64 @@ export default function StudioQueriesPage() {
         ))}
       </div>
 
+      {/* Relevance filter chips — clicking toggles a class out of view.
+          Default: spam hidden (the whole reason classifier exists). */}
+      {data?.relevance_counts && (
+        <div className="flex items-center gap-1.5 text-sm flex-wrap">
+          <span className="text-muted-foreground mr-1">Показывать:</span>
+          {(
+            ["own", "adjacent", "disputed", "unclassified", "spam"] as RelevanceKey[]
+          ).map((key) => {
+            const count = data.relevance_counts[key] ?? 0;
+            const meta = RELEVANCE_META[key];
+            const isHidden = hidden.has(key);
+            return (
+              <button
+                key={key}
+                onClick={() =>
+                  setHidden((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(key)) next.delete(key);
+                    else next.add(key);
+                    return next;
+                  })
+                }
+                disabled={count === 0}
+                className={cn(
+                  "rounded-md border px-2 py-0.5 text-xs inline-flex items-center gap-1.5 transition-opacity",
+                  count === 0 && "opacity-40 cursor-not-allowed",
+                  isHidden && count > 0 && "opacity-50",
+                )}
+                title={
+                  count === 0
+                    ? `Нет запросов класса «${meta.short}»`
+                    : isHidden
+                      ? `Кликни чтобы показать «${meta.short}»`
+                      : `Кликни чтобы спрятать «${meta.short}»`
+                }
+              >
+                <span
+                  className={cn(
+                    "h-2 w-2 rounded-full flex-shrink-0",
+                    meta.dotColor,
+                  )}
+                />
+                <span>{meta.short}</span>
+                <span className="text-muted-foreground tabular-nums">
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+          {data.relevance_counts.unclassified > 0 && (
+            <span className="text-xs text-amber-700 ml-2">
+              <HelpCircle className="h-3 w-3 inline mr-0.5" />
+              {data.relevance_counts.unclassified} ещё не классифицированы — нажми «Классифицировать»
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Body */}
       {error ? (
         <Card>
@@ -448,63 +656,97 @@ export default function StudioQueriesPage() {
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="min-w-[260px]">Запрос</TableHead>
-                <TableHead className="text-right">Объём</TableHead>
-                <TableHead>Статус</TableHead>
-                <TableHead className="text-right">Позиция</TableHead>
-                <TableHead className="text-right">Показы 14д</TableHead>
-                <TableHead>Тренд</TableHead>
-                <TableHead>Кластер</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {data?.items.map((row) => (
-                <TableRow key={row.query_id}>
-                  <TableCell className="font-medium">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span>{row.query_text}</span>
-                      {row.is_branded && (
-                        <Badge
-                          variant="outline"
-                          className="text-[10px] bg-blue-50 text-blue-800 border-blue-300"
-                        >
-                          бренд
-                        </Badge>
-                      )}
-                    </div>
-                  </TableCell>
-                  <TableCell
-                    className={cn(
-                      "text-right tabular-nums",
-                      row.wordstat_volume == null && "text-muted-foreground/50",
-                    )}
-                  >
-                    {formatNumber(row.wordstat_volume)}
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={row.wordstat_status as StatusKey} />
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {formatPosition(row.last_position)}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">
-                    {formatNumber(row.last_impressions_14d)}
-                  </TableCell>
-                  <TableCell>
-                    <Sparkline trend={row.wordstat_trend} />
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {row.cluster ?? "—"}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
+        (() => {
+          const visible = (data?.items || []).filter(
+            (row) => !hidden.has(row.relevance as RelevanceKey),
+          );
+          if (visible.length === 0) {
+            return (
+              <Card className="border-dashed">
+                <CardContent className="pt-6 text-sm text-muted-foreground">
+                  По текущим фильтрам ничего не показано. Все запросы
+                  спрятаны через чипы выше — кликни нужный класс чтобы
+                  его показать.
+                </CardContent>
+              </Card>
+            );
+          }
+          return (
+            <Card>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="min-w-[260px]">Запрос</TableHead>
+                    <TableHead>Класс</TableHead>
+                    <TableHead className="text-right">Объём</TableHead>
+                    <TableHead>Статус</TableHead>
+                    <TableHead className="text-right">Позиция</TableHead>
+                    <TableHead className="text-right">Показы 14д</TableHead>
+                    <TableHead>Тренд</TableHead>
+                    <TableHead>Кластер</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {visible.map((row) => (
+                    <TableRow key={row.query_id}>
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span
+                            className={cn(
+                              row.relevance === "spam" && "text-muted-foreground line-through",
+                            )}
+                          >
+                            {row.query_text}
+                          </span>
+                          {row.is_branded && (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] bg-blue-50 text-blue-800 border-blue-300"
+                            >
+                              бренд
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <RelevanceCell
+                          row={row}
+                          busy={!!overrideBusy[row.query_id]}
+                          onOverride={(next) =>
+                            onOverrideRelevance(row.query_id, next)
+                          }
+                        />
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right tabular-nums",
+                          row.wordstat_volume == null && "text-muted-foreground/50",
+                        )}
+                      >
+                        {formatNumber(row.wordstat_volume)}
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={row.wordstat_status as StatusKey} />
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatPosition(row.last_position)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-muted-foreground">
+                        {formatNumber(row.last_impressions_14d)}
+                      </TableCell>
+                      <TableCell>
+                        <Sparkline trend={row.wordstat_trend} />
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {row.cluster ?? "—"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Card>
+          );
+        })()
       )}
 
       {/* Manual refresh button — table is not auto-refresh; after a
@@ -520,6 +762,105 @@ export default function StudioQueriesPage() {
             <RefreshCw className="h-3 w-3 mr-1" /> Перечитать таблицу
           </Button>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Relevance cell — badge + override popover ───────────────────────
+
+type QueryRowShape = {
+  query_id: string;
+  relevance: "own" | "adjacent" | "disputed" | "spam" | "unclassified";
+  relevance_set_by: "rules" | "llm" | "user" | null;
+  relevance_reason_ru: string | null;
+};
+
+function RelevanceCell({
+  row,
+  busy,
+  onOverride,
+}: {
+  row: QueryRowShape;
+  busy: boolean;
+  onOverride: (next: "own" | "adjacent" | "disputed" | "spam") => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        disabled={busy}
+        className="inline-flex items-center gap-1 disabled:opacity-50"
+        title="Кликни чтобы поправить класс — твой выбор закрепится и не перезапишется автоматическим классификатором"
+      >
+        <RelevanceBadge
+          relevance={row.relevance}
+          setBy={row.relevance_set_by}
+          reason={row.relevance_reason_ru}
+        />
+        {row.relevance_set_by === "user" && (
+          <span
+            title="Класс установлен вручную владельцем — классификатор не перезатрёт"
+            className="text-[10px] text-muted-foreground"
+          >
+            👤
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          {/* click-outside catcher */}
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="fixed inset-0 z-10 cursor-default"
+            aria-label="Закрыть меню"
+          />
+          <div className="absolute z-20 mt-1 right-0 rounded-md border bg-popover shadow-md p-1 text-xs min-w-[160px]">
+            <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground tracking-wide">
+              Поменять класс
+            </div>
+            {(
+              [
+                ["own", "наш"],
+                ["adjacent", "смежный"],
+                ["disputed", "спорный"],
+                ["spam", "мусор"],
+              ] as Array<["own" | "adjacent" | "disputed" | "spam", string]>
+            ).map(([val, label]) => {
+              const meta = RELEVANCE_META[val];
+              const isCurrent = row.relevance === val;
+              return (
+                <button
+                  key={val}
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    if (!isCurrent) onOverride(val);
+                  }}
+                  disabled={isCurrent}
+                  className={cn(
+                    "w-full flex items-center gap-2 px-2 py-1.5 rounded-sm text-left",
+                    !isCurrent && "hover:bg-accent",
+                    isCurrent && "opacity-60",
+                  )}
+                >
+                  <span
+                    className={cn("h-2 w-2 rounded-full", meta.dotColor)}
+                  />
+                  <span>{label}</span>
+                  {isCurrent && (
+                    <Check className="h-3 w-3 ml-auto text-muted-foreground" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );
