@@ -362,6 +362,40 @@ async def trigger_wordstat_refresh(
 
 
 @router.post(
+    "/sites/{site_id}/queries/classify",
+    response_model=TriggerResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_classify_queries(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TriggerResponse:
+    """Studio v2 etap 4 — kick off rules + LLM classification of all
+    SearchQuery rows for this site.
+
+    Idempotent on the user-override invariant: rows where
+    relevance_set_by='user' are NEVER touched. Rules + LLM verdicts
+    can be re-run freely.
+    """
+    await _site_or_404(db, site_id)
+
+    recent = await _recent_started_event(db, site_id, "classify_queries")
+    if recent is not None:
+        return TriggerResponse(
+            status="deduped",
+            task_id=None,
+            run_id=str(recent.run_id) if recent.run_id else "",
+            deduped=True,
+        )
+
+    from app.collectors.tasks import classify_queries_site_task
+
+    run_id = str(uuid.uuid4())
+    task = classify_queries_site_task.delay(str(site_id), run_id=run_id)
+    return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
+
+
+@router.post(
     "/sites/{site_id}/queries/wordstat-discover",
     response_model=TriggerResponse,
     dependencies=[Depends(_require_admin)],

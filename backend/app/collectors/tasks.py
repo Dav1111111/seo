@@ -1074,3 +1074,203 @@ def studio_indexation_run(self, site_id: str, run_id: str | None = None):
             return {**out.to_dict(), "diagnosis": diagnosis}
 
     return _run_async(_run())
+
+
+@celery_app.task(name="classify_queries_site", bind=True, max_retries=1)
+def classify_queries_site_task(self, site_id: str, run_id: str | None = None):
+    """Studio v2 etap 4 — classify SearchQuery rows by relevance.
+
+    Pipeline per site:
+
+      1. Load site + ProfileSlice + narrative_ru.
+      2. Pull every SearchQuery for the site WHERE
+            relevance_set_by IS NULL OR relevance_set_by = 'rules'
+         User-overridden rows (relevance_set_by='user') are ALWAYS
+         skipped — owner's verdict wins forever.
+      3. Apply rules first. Anything that returns a verdict gets
+         written with set_by='rules' (cheap path).
+      4. Whatever rules deferred goes to LLM in CLASSIFY_BATCH_SIZE
+         batches. Verdicts written with set_by='llm'.
+      5. Anything still missing after LLM (rare — model timeouts /
+         malformed output) stays as 'unclassified'.
+
+    Activity feed: stage="classify_queries", emit_terminal at the
+    end with totals + cost.
+
+    Idempotent: re-running on a site already classified just
+    re-classifies the rules+llm rows, never user rows.
+    """
+    import anyio
+    from datetime import datetime, timezone
+    from sqlalchemy import or_
+
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.core_audit.relevance import (
+        ProfileSlice,
+        classify_by_rules,
+    )
+    from app.core_audit.relevance_llm import (
+        CLASSIFY_BATCH_SIZE,
+        classify_by_llm,
+    )
+    from app.models.search_query import SearchQuery
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "classify_queries", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": "Site not found"}
+
+            profile = ProfileSlice.from_target_config(site.target_config)
+            narrative = (
+                site.target_config.get("narrative_ru")
+                if site.target_config else ""
+            ) or ""
+
+            if not profile.primary_product or not profile.geo_primary:
+                await emit_terminal(
+                    db, site_id, "classify_queries", "skipped",
+                    "Профиль неполный — заполни primary_product и "
+                    "geo_primary в /studio/profile перед классификацией.",
+                    extra={"reason": "incomplete_profile"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "incomplete_profile"}
+
+            # Rows we may overwrite — never user-set ones.
+            rows = (await db.execute(
+                select(SearchQuery).where(
+                    SearchQuery.site_id == site.id,
+                    or_(
+                        SearchQuery.relevance_set_by.is_(None),
+                        SearchQuery.relevance_set_by == "rules",
+                        SearchQuery.relevance_set_by == "llm",
+                    ),
+                )
+            )).scalars().all()
+
+            if not rows:
+                await emit_terminal(
+                    db, site_id, "classify_queries", "done",
+                    "Нет запросов для классификации.",
+                    extra={"total": 0},
+                    run_id=run_id,
+                )
+                return {"status": "done", "total": 0}
+
+            await log_event(
+                db, site_id, "classify_queries", "started",
+                f"Классифицирую {len(rows)} запросов: правила, потом "
+                f"LLM пакетами по {CLASSIFY_BATCH_SIZE}.",
+                extra={"total": len(rows), "primary": profile.primary_product},
+                run_id=run_id,
+            )
+
+            now = datetime.now(timezone.utc)
+
+            # ── Pass 1: rules ──────────────────────────────────
+            rules_hits = 0
+            llm_pending: list[tuple[int, SearchQuery]] = []  # (idx-in-list, row)
+            for r in rows:
+                v = classify_by_rules(r.query_text, profile)
+                if v is not None:
+                    r.relevance = v.relevance
+                    r.relevance_set_by = v.set_by
+                    r.relevance_set_at = now
+                    r.relevance_reason_ru = v.reason_ru
+                    rules_hits += 1
+                else:
+                    llm_pending.append((len(llm_pending), r))
+
+            await db.commit()
+
+            # ── Pass 2: LLM in batches ────────────────────────
+            llm_hits = 0
+            llm_cost = 0.0
+            llm_input_tokens = 0
+            llm_output_tokens = 0
+            llm_failures = 0
+
+            for start in range(0, len(llm_pending), CLASSIFY_BATCH_SIZE):
+                batch = llm_pending[start : start + CLASSIFY_BATCH_SIZE]
+                batch_queries = [row.query_text for _, row in batch]
+
+                try:
+                    result = await anyio.to_thread.run_sync(
+                        classify_by_llm,
+                        batch_queries,
+                        profile,
+                        narrative,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "classify_queries.llm_batch_failed start=%d size=%d "
+                        "err=%s",
+                        start, len(batch), exc,
+                    )
+                    llm_failures += len(batch)
+                    continue
+
+                llm_cost += result.cost_usd
+                llm_input_tokens += result.input_tokens
+                llm_output_tokens += result.output_tokens
+
+                for batch_idx, (_, row) in enumerate(batch):
+                    verdict = result.verdicts.get(batch_idx)
+                    if verdict is None:
+                        # Model didn't return this index — leave row
+                        # alone (will retry on next run).
+                        continue
+                    row.relevance = verdict.relevance
+                    row.relevance_set_by = verdict.set_by
+                    row.relevance_set_at = now
+                    row.relevance_reason_ru = verdict.reason_ru
+                    llm_hits += 1
+
+                # Commit per-batch so partial progress survives a
+                # worker crash mid-run.
+                await db.commit()
+
+            stats = {
+                "total": len(rows),
+                "rules_hits": rules_hits,
+                "llm_hits": llm_hits,
+                "llm_failures": llm_failures,
+                "llm_batches": (len(llm_pending) + CLASSIFY_BATCH_SIZE - 1)
+                    // CLASSIFY_BATCH_SIZE,
+                "llm_cost_usd": round(llm_cost, 5),
+                "llm_input_tokens": llm_input_tokens,
+                "llm_output_tokens": llm_output_tokens,
+            }
+
+            unclassified_left = len(rows) - rules_hits - llm_hits
+            if unclassified_left > 0:
+                message = (
+                    f"Классифицировано {rules_hits + llm_hits} из {len(rows)}: "
+                    f"{rules_hits} правилами, {llm_hits} LLM. "
+                    f"{unclassified_left} остались без класса "
+                    f"(LLM вернул не на всё)."
+                )
+                terminal = "done"  # not a failure — partial is fine
+            else:
+                message = (
+                    f"Классифицировано {len(rows)} запросов: "
+                    f"{rules_hits} правилами, {llm_hits} LLM. "
+                    f"Стоимость: ${llm_cost:.4f}."
+                )
+                terminal = "done"
+
+            await emit_terminal(
+                db, site_id, "classify_queries", terminal, message,
+                extra=stats, run_id=run_id,
+            )
+            return {"status": terminal, **stats}
+
+    return _run_async(_run())
