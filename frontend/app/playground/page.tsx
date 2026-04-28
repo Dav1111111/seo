@@ -319,17 +319,22 @@ export default function PlaygroundPage() {
   }
 
   async function runStep(step_index: number) {
-    if (!selected) return;
+    if (!selected || busy) return;
     setBusy(true);
     setFatal(null);
     try {
+      // Snapshot `prior` from the latest committed state — readers via
+      // closure could see a stale `results` if the user double-clicks
+      // before this fetch completes. `busy` above guards re-entry; the
+      // snapshot guards against React 18 batching surprises.
+      const priorSnapshot = results
+        .slice(0, step_index)
+        .map((x) => ({ response_summary: x.response_summary }));
       const r = await api.runPlaygroundStep({
         scenario_id: selected.id,
         step_index,
         inputs,
-        prior: results.map((x) => ({
-          response_summary: x.response_summary,
-        })),
+        prior: priorSnapshot,
       });
       // Replace if re-running an existing step, otherwise append
       setResults((prev) => {
@@ -346,7 +351,7 @@ export default function PlaygroundPage() {
 
   if (isLoading || !data) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="p-4 sm:p-6 space-y-4">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-32 w-full" />
       </div>
@@ -356,7 +361,7 @@ export default function PlaygroundPage() {
   // Scenario list view
   if (!selected) {
     return (
-      <div className="p-6 max-w-4xl space-y-5">
+      <div className="p-4 sm:p-6 max-w-4xl space-y-5">
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
             <FlaskConical className="h-6 w-6" />
@@ -406,7 +411,7 @@ export default function PlaygroundPage() {
     results.length > 0 && results[results.length - 1]?.next_available;
 
   return (
-    <div className="p-6 max-w-4xl space-y-5">
+    <div className="p-4 sm:p-6 max-w-4xl space-y-5">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <Button

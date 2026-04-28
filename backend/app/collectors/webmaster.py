@@ -8,7 +8,6 @@ from datetime import date, timedelta
 from urllib.parse import quote
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -144,6 +143,10 @@ class WebmasterCollector(BaseCollector):
             "indexing": 0,
             "window_start": start_date.isoformat(),
             "window_end": end_date.isoformat(),
+            # Per-step failures we used to only log; now surfaced so
+            # the caller's terminal event can be honest about partial
+            # data. Empty list on success.
+            "errors": [],
         }
 
         # 1. Popular queries
@@ -169,26 +172,25 @@ class WebmasterCollector(BaseCollector):
             if not query_text:
                 continue
 
-            # Upsert search_query
-            stmt = pg_insert(SearchQuery).values(
-                site_id=site_id,
-                query_text=query_text,
-                yandex_query_id=str(query_id),
-                last_seen_at=today,
-            ).on_conflict_do_update(
-                index_elements=["site_id", "query_text"],
-                set_={"yandex_query_id": str(query_id), "last_seen_at": today},
-            )
-            result = await db.execute(stmt)
-
-            # Get the search_query id
-            sq_row = await db.execute(
-                select(SearchQuery.id).where(
-                    SearchQuery.site_id == site_id,
-                    SearchQuery.query_text == query_text,
+            # Upsert search_query and grab the id back in one round-trip
+            # via RETURNING. The previous version did INSERT ... ON
+            # CONFLICT then a separate SELECT to find the id, which
+            # doubled the queries-per-popular-query count.
+            stmt = (
+                pg_insert(SearchQuery)
+                .values(
+                    site_id=site_id,
+                    query_text=query_text,
+                    yandex_query_id=str(query_id),
+                    last_seen_at=today,
                 )
+                .on_conflict_do_update(
+                    index_elements=["site_id", "query_text"],
+                    set_={"yandex_query_id": str(query_id), "last_seen_at": today},
+                )
+                .returning(SearchQuery.id)
             )
-            sq_id = sq_row.scalar_one_or_none()
+            sq_id = (await db.execute(stmt)).scalar_one_or_none()
             if not sq_id:
                 logger.warning("SearchQuery not found after upsert: %s", query_text)
                 continue
@@ -304,6 +306,7 @@ class WebmasterCollector(BaseCollector):
                 stats["indexing"] += 1
         except Exception as exc:
             logger.warning("Indexing history fetch failed: %s", exc)
+            stats["errors"].append({"step": "indexing", "error": str(exc)[:200]})
 
         # 3. Search events (appeared/removed)
         logger.info("Fetching search events")
@@ -339,6 +342,7 @@ class WebmasterCollector(BaseCollector):
                 await db.execute(stmt)
         except Exception as exc:
             logger.warning("Search events fetch failed: %s", exc)
+            stats["errors"].append({"step": "search_events", "error": str(exc)[:200]})
 
         await db.commit()
         logger.info("Webmaster collection done: %s", stats)

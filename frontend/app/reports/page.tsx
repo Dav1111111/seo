@@ -5,6 +5,7 @@ import Link from "next/link";
 import useSWR from "swr";
 import { api } from "@/lib/api";
 import { useCurrentSiteId } from "@/lib/site-context";
+import { getErrorMessage } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -28,8 +29,8 @@ export default function ReportsPage() {
     try {
       await api.triggerReport(siteId);
       setBanner({ kind: "ok", msg: "Сборка отчёта поставлена в очередь. Готов будет через 1–2 минуты." });
-    } catch (e: any) {
-      setBanner({ kind: "err", msg: e?.message ?? String(e) });
+    } catch (e: unknown) {
+      setBanner({ kind: "err", msg: getErrorMessage(e) });
     } finally {
       setTriggering(false);
     }
@@ -38,7 +39,7 @@ export default function ReportsPage() {
   const items: any[] = data?.items ?? [];
 
   return (
-    <div className="space-y-6">
+    <div className="p-4 sm:p-6 space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold">Отчёты</h1>
@@ -67,7 +68,7 @@ export default function ReportsPage() {
 
       {error && (
         <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">
-          {String((error as any)?.message || error)}
+          {getErrorMessage(error)}
         </div>
       )}
 
@@ -101,7 +102,7 @@ export default function ReportsPage() {
                         <HealthBadge score={r.health_score} />
                       </div>
                       <div className="text-xs text-muted-foreground mt-0.5">
-                        {r.generated_at ? new Date(r.generated_at).toLocaleString("ru") : "—"}
+                        {r.generated_at ? formatGeneratedAt(r.generated_at) : "—"}
                         {" · "}
                         ${Number(r.llm_cost_usd ?? 0).toFixed(4)}
                       </div>
@@ -116,6 +117,14 @@ export default function ReportsPage() {
       </Card>
     </div>
   );
+}
+
+// Backend serves naive UTC ISO strings (no `Z`/offset). Parsing without
+// the `Z` makes `new Date()` interpret them as local time, which then
+// renders an hour or two off from the actual generation moment.
+function formatGeneratedAt(iso: string): string {
+  const utcIso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+  return new Date(utcIso).toLocaleString("ru");
 }
 
 function HealthBadge({ score }: { score: number | null | undefined }) {

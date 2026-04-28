@@ -202,7 +202,7 @@ export default function StudioCompetitorsPage() {
 
   if (siteLoading) {
     return (
-      <div className="p-6 space-y-3">
+      <div className="p-4 sm:p-6 space-y-3">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-32 w-full" />
       </div>
@@ -211,7 +211,7 @@ export default function StudioCompetitorsPage() {
 
   if (!currentSite) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <Card className="border-dashed max-w-2xl">
           <CardContent className="pt-6 space-y-2">
             <div className="font-medium">Сайт не выбран</div>
@@ -231,7 +231,7 @@ export default function StudioCompetitorsPage() {
   const gapsList = gaps?.gaps || [];
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
+    <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
       {/* Header */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
@@ -390,8 +390,8 @@ export default function StudioCompetitorsPage() {
             </Card>
           ) : (
             <Card>
-              <CardContent className="pt-4 px-0">
-                <table className="w-full text-sm">
+              <CardContent className="pt-4 px-0 overflow-x-auto">
+                <table className="w-full text-sm min-w-[560px]">
                   <thead className="text-xs text-muted-foreground border-b">
                     <tr>
                       <th className="text-left px-4 py-2 font-normal">Запрос</th>

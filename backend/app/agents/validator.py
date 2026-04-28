@@ -16,7 +16,7 @@ Checks:
 
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -79,8 +79,25 @@ class ValidatorAgent:
         """
         Validate a batch of issues. Returns filtered list with adjusted confidence.
         """
+        result_map = await self.validate_indexed(db, site_id, agent_output, agent_name)
+        # Preserve original ordering of approved issues.
+        return [result_map[i] for i in sorted(result_map)]
+
+    async def validate_indexed(
+        self,
+        db: AsyncSession,
+        site_id: UUID,
+        agent_output: AgentOutput,
+        agent_name: str,
+    ) -> dict[int, IssueDetection]:
+        """Validate, returning a `{original_index: kept_issue}` map.
+
+        Callers that need to map kept issues back onto the original DB
+        rows (e.g. IssuePipeline) should prefer this over `validate()`,
+        because matching by title collapses duplicate titles silently.
+        """
         if not agent_output.issues:
-            return []
+            return {}
 
         # Gather context for validator
         season_info = self.engine.to_context_dict(date.today())
@@ -104,7 +121,7 @@ class ValidatorAgent:
             )
         except Exception as exc:
             logger.error("Validator LLM call failed: %s — passing all issues through", exc)
-            return agent_output.issues
+            return {i: issue for i, issue in enumerate(agent_output.issues)}
 
         return self._apply_decisions(agent_output.issues, raw)
 
@@ -174,21 +191,33 @@ class ValidatorAgent:
         self,
         issues: list[IssueDetection],
         raw: dict[str, Any],
-    ) -> list[IssueDetection]:
+    ) -> dict[int, IssueDetection]:
         decisions = raw.get("decisions", [])
         summary = raw.get("summary", "")
         logger.info("Validator summary: %s", summary[:200])
 
-        approved: list[IssueDetection] = []
+        # Primary match: `issue_index`. Fallback: title (only if a
+        # decision lacks the index — duplicates collapse silently in
+        # that path, but we keep it so old tool outputs don't break).
+        decision_by_index: dict[int, dict[str, Any]] = {}
+        decision_by_title: dict[str, dict[str, Any]] = {}
+        for d in decisions:
+            idx = d.get("issue_index")
+            if isinstance(idx, int):
+                decision_by_index[idx] = d
+            else:
+                title = d.get("title")
+                if isinstance(title, str) and title:
+                    decision_by_title.setdefault(title, d)
 
-        decision_map = {d["issue_index"]: d for d in decisions}
+        approved: dict[int, IssueDetection] = {}
 
         for i, issue in enumerate(issues):
-            decision = decision_map.get(i)
+            decision = decision_by_index.get(i) or decision_by_title.get(issue.title)
 
             if not decision:
                 # No decision → pass through
-                approved.append(issue)
+                approved[i] = issue
                 continue
 
             verdict = decision.get("verdict", "approve")
@@ -206,7 +235,7 @@ class ValidatorAgent:
                 )
                 issue = issue.model_copy(update={"confidence": new_conf})
 
-            approved.append(issue)
+            approved[i] = issue
 
         logger.info(
             "Validator: %d in → %d approved (%d rejected)",
@@ -225,7 +254,10 @@ class ValidatorAgent:
             .where(
                 Issue.site_id == site_id,
                 Issue.status == "false_positive",
-                Issue.resolved_at >= date.today() - timedelta(days=90),
+                # `resolved_at` is timestamptz — compare with a tz-aware
+                # datetime so Postgres doesn't silently coerce the date
+                # to local-midnight and skew the 90-day window.
+                Issue.resolved_at >= datetime.now(timezone.utc) - timedelta(days=90),
             )
             .order_by(Issue.resolved_at.desc())
             .limit(10)

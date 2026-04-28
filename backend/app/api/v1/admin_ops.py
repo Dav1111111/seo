@@ -160,14 +160,15 @@ BASELINE_WINDOW_DAYS = 7
 
 
 async def _baseline_metrics(
-    db: AsyncSession, site_id: uuid.UUID, page_url: str | None,
+    db: AsyncSession, site_id: uuid.UUID,
 ) -> dict[str, Any]:
     """Site-wide metrics over a 7-day window shifted back by the
     Webmaster lag, used as the «before» snapshot for outcomes.
 
-    Page-level slicing stays out of scope for Studio v1 — Webmaster
-    doesn't give us URL-level query-performance reliably enough to
-    break attribution by page. Studio v2 will tackle per-page.
+    Page-level slicing is Studio v2 — Webmaster doesn't give us
+    URL-level query-performance reliably enough to break attribution
+    by page yet. The `page_url` argument we used to accept was
+    silently ignored; dropping it removes the foot-gun.
     """
     today = date.today()
     window_end = today - timedelta(days=WEBMASTER_LAG_DAYS)
@@ -231,7 +232,7 @@ async def mark_applied(
             "applied_at": existing.applied_at.isoformat(),
         }
 
-    baseline = await _baseline_metrics(db, site_id, body.page_url)
+    baseline = await _baseline_metrics(db, site_id)
     snap = OutcomeSnapshot(
         site_id=site_id,
         recommendation_id=body.recommendation_id,

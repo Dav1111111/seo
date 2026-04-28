@@ -94,7 +94,7 @@ export default function StudioAnalyticsPage() {
 
   if (siteLoading) {
     return (
-      <div className="p-6 space-y-3">
+      <div className="p-4 sm:p-6 space-y-3">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-64 w-full" />
       </div>
@@ -103,7 +103,7 @@ export default function StudioAnalyticsPage() {
 
   if (!currentSite) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <Card className="border-dashed max-w-2xl">
           <CardContent className="pt-6 space-y-2">
             <div className="font-medium">Сайт не выбран</div>
@@ -131,7 +131,7 @@ export default function StudioAnalyticsPage() {
   );
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
+    <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
       {/* Header */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>

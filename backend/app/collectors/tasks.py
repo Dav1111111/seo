@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 def _run_async(coro):
-    """Run async coroutine from sync Celery task."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    """Run async coroutine from sync Celery task.
+
+    Uses `asyncio.run` so async generators get `aclose`-d and the
+    default executor is shut down before the loop closes — the
+    hand-rolled `new_event_loop`/`close` pattern leaks both.
+    """
+    return asyncio.run(coro)
 
 
 def _format_webmaster_result(out: dict) -> tuple[str, dict, str]:
@@ -230,8 +230,8 @@ def collect_site_webmaster(site_id: str, run_id: str | None = None):
     return _run_async(_run())
 
 
-@celery_app.task(name="crawl_site")
-def crawl_site(site_id: str, run_id: str | None = None):
+@celery_app.task(name="crawl_site", bind=True, max_retries=0)
+def crawl_site(self, site_id: str, run_id: str | None = None):
     """Crawl a site — fetch sitemap + all pages, extract SEO data.
 
     After crawl completes, automatically chains fingerprint_site with 10s countdown.

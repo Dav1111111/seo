@@ -97,13 +97,17 @@ export function OverviewPage() {
     () => api.onboardingState(siteId).catch(() => null),
     { refreshInterval: 0 },
   );
-  const onboardingActive = onbState?.onboarding_step === "active";
+  const onboardingStep: string | undefined = onbState?.onboarding_step;
+  const onboardingActive = onboardingStep === "active";
 
   useEffect(() => {
-    if (onbState && !onboardingActive && siteId) {
+    // Depend on the primitive step value, not the whole object. Otherwise
+    // every SWR refresh hands us a new `onbState` reference and we'd fire
+    // `router.replace` again, racing the navigation.
+    if (onboardingStep && !onboardingActive && siteId) {
       router.replace(`/onboarding/${siteId}`);
     }
-  }, [onbState, onboardingActive, siteId, router]);
+  }, [onboardingStep, onboardingActive, siteId, router]);
 
   const { data: dash, isLoading } = useSWR(
     siteId && onboardingActive ? `dashboard-${siteId}` : null,
@@ -158,20 +162,22 @@ export function OverviewPage() {
 
   if (!currentSite) {
     return (
-      <Card className="border-dashed max-w-2xl">
-        <CardHeader>
-          <CardTitle>Сайт Не Выбран</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            Дашборд появится после выбора сайта. Если список пустой, проверь,
-            что backend отвечает и сайт создан в системе.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
-            Обновить Страницу
-          </Button>
-        </CardContent>
-      </Card>
+      <div className="p-4 sm:p-6">
+        <Card className="border-dashed max-w-2xl">
+          <CardHeader>
+            <CardTitle>Сайт Не Выбран</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              Дашборд появится после выбора сайта. Если список пустой, проверь,
+              что backend отвечает и сайт создан в системе.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
+              Обновить Страницу
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
@@ -179,24 +185,26 @@ export function OverviewPage() {
   // half-rendered dashboard that flashes and then disappears.
   if (!onbState || !onboardingActive) {
     return (
-      <Card className="border-dashed max-w-2xl">
-        <CardHeader>
-          <CardTitle>Подготавливаю Дашборд</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            Проверяю онбординг и загружаю состояние сайта. Это займёт несколько секунд.
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Skeleton className="h-8 w-40" />
-          <Skeleton className="h-24" />
-        </CardContent>
-      </Card>
+      <div className="p-4 sm:p-6">
+        <Card className="border-dashed max-w-2xl">
+          <CardHeader>
+            <CardTitle>Подготавливаю Дашборд</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              Проверяю онбординг и загружаю состояние сайта. Это займёт несколько секунд.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Skeleton className="h-8 w-40" />
+            <Skeleton className="h-24" />
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
   if (isLoading) {
     return (
-      <div className="space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
         <Skeleton className="h-8 w-48" />
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-28" />)}
@@ -212,7 +220,7 @@ export function OverviewPage() {
   const planItems: WeeklyPlanItem[] = plan?.items ?? [];
 
   return (
-    <div className="space-y-6">
+    <div className="p-4 sm:p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
@@ -275,18 +283,22 @@ export function OverviewPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-base leading-relaxed">{diagnostic.root_problem_ru}</p>
-            {diagnostic.recommended_first_actions_ru?.length > 0 && (
-              <div>
-                <div className="text-xs font-semibold uppercase text-muted-foreground mb-1">
-                  Что делать в первую очередь
+            {(() => {
+              const actions: string[] = diagnostic?.recommended_first_actions_ru ?? [];
+              if (actions.length === 0) return null;
+              return (
+                <div>
+                  <div className="text-xs font-semibold uppercase text-muted-foreground mb-1">
+                    Что делать в первую очередь
+                  </div>
+                  <ol className="list-decimal pl-5 text-sm space-y-0.5">
+                    {actions.slice(0, 3).map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ol>
                 </div>
-                <ol className="list-decimal pl-5 text-sm space-y-0.5">
-                  {diagnostic.recommended_first_actions_ru.slice(0, 3).map((s: string, i: number) => (
-                    <li key={i}>{s}</li>
-                  ))}
-                </ol>
-              </div>
-            )}
+              );
+            })()}
           </CardContent>
         </Card>
       ) : !latestReport ? (

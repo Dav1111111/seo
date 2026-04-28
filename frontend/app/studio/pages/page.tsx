@@ -64,7 +64,7 @@ export default function StudioPagesIndex() {
 
   if (siteLoading) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="p-4 sm:p-6 space-y-4">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-64 w-full" />
       </div>
@@ -73,7 +73,7 @@ export default function StudioPagesIndex() {
 
   if (!currentSite) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <Card className="border-dashed max-w-2xl">
           <CardContent className="pt-6 space-y-2">
             <div className="font-medium">Сайт не выбран</div>
@@ -88,7 +88,7 @@ export default function StudioPagesIndex() {
   }
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
+    <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
       {/* Header */}
       <div>
         <Link

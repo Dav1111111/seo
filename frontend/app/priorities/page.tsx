@@ -47,7 +47,13 @@ export default function PrioritiesPage() {
   const activity = useSWR(
     siteId ? `priorities-activity-${siteId}` : null,
     () => api.getActivityByStage(siteId),
-    { refreshInterval: 5_000 },
+    {
+      // Only poll while the priorities stage is active. Otherwise this
+      // page would hammer the activity endpoint forever in a tab the
+      // user left open.
+      refreshInterval: (latest) =>
+        isRunningStatus(latest?.by_stage?.priorities?.status) ? 5_000 : 0,
+    },
   );
   const priorityStage = activity.data?.by_stage?.priorities;
   const prioritiesRunning = isRunningStatus(priorityStage?.status);
@@ -118,7 +124,7 @@ export default function PrioritiesPage() {
   }, [backlogItems]);
 
   return (
-    <div className="space-y-6">
+    <div className="p-4 sm:p-6 space-y-6">
       <div className="flex items-start justify-between flex-wrap gap-4">
         <div>
           <h1 className="text-2xl font-bold">Приоритеты</h1>

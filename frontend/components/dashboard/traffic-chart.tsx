@@ -11,7 +11,7 @@ import {
 
 export function TrafficChart({ siteId }: { siteId: string }) {
   const { data, isLoading } = useSWR(
-    `traffic-${siteId}`,
+    siteId ? ["traffic", siteId] : null,
     () => api.trafficMetrics(siteId, 30),
     { refreshInterval: 300_000 }
   );

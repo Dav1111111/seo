@@ -118,7 +118,12 @@ def verify_key_file(host: str, key: str, *, timeout: float = REQUEST_TIMEOUT_SEC
     except urllib.error.HTTPError as exc:
         return False, f"http_{exc.code}"
     except urllib.error.URLError as exc:
-        return False, f"url_error_{type(exc.reason).__name__}"
+        # Python 3.12 sometimes makes `exc.reason` a plain str (e.g.
+        # "[Errno 8] nodename nor servname provided"), other times it's
+        # an OSError subclass. Defensively grab whichever shape we got.
+        reason_obj = exc.reason
+        reason_name = getattr(reason_obj, "__class__", type(reason_obj)).__name__
+        return False, f"url_error_{reason_name}"
     except Exception as exc:  # noqa: BLE001
         log.warning("indexnow.verify_failed host=%s err=%s", host_clean, exc)
         return False, "verify_exception"
@@ -185,7 +190,23 @@ def ping_urls(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             code = resp.getcode()
-            return PingResult(accepted=True, status_code=code, url_count=len(deduped), error=None)
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            # Real IndexNow endpoints return 200/202 with a JSON body. A
+            # misconfigured proxy may swallow the request and return an
+            # HTML 200 — that's NOT acceptance, treat it as failure so
+            # the owner sees the truth.
+            if code in (200, 202) and content_type.startswith("application/json"):
+                return PingResult(accepted=True, status_code=code, url_count=len(deduped), error=None)
+            log.warning(
+                "indexnow.unexpected_response host=%s code=%s ctype=%r",
+                host_clean, code, content_type,
+            )
+            return PingResult(
+                accepted=False,
+                status_code=code,
+                url_count=len(deduped),
+                error="unexpected_status",
+            )
     except urllib.error.HTTPError as exc:
         # 400 = bad request, 403 = key mismatch, 422 = unprocessable.
         # All of these are "Yandex said no" — surface the code to UI.

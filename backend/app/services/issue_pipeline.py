@@ -102,8 +102,11 @@ class IssuePipeline:
                 .where(
                     Issue.site_id == site_id,
                     Issue.status == "open",
+                    # `created_at` is timestamptz — explicit UTC midnight
+                    # cutoff so a worker running just past 00:00 UTC
+                    # doesn't accidentally include yesterday's runs.
                     Issue.created_at >= datetime.now(timezone.utc).replace(
-                        hour=0, minute=0, second=0
+                        hour=0, minute=0, second=0, microsecond=0
                     ),
                 )
                 .order_by(Issue.created_at.desc())
@@ -129,21 +132,22 @@ class IssuePipeline:
                     summary=f"{len(issues_to_validate)} issues from today's analysis",
                 )
 
-                validated = await self.validator.validate(
+                # Use the index-keyed variant — title-based matching
+                # collapses duplicate titles and silently corrupts the
+                # rejection list when two issues happen to share text.
+                validated_map = await self.validator.validate_indexed(
                     db, site_id, candidate_output, "pipeline"
                 )
                 results["total_cost_usd"] += 0  # validator cost tracked in its own call
 
-                # Update confidence in DB based on validation
-                validated_map = {v.title: v for v in validated}
-                rejected_titles = set()
+                rejected_titles: list[str] = []
 
-                for issue_row in issues_to_validate:
-                    validated_issue = validated_map.get(issue_row.title)
+                for idx, issue_row in enumerate(issues_to_validate):
+                    validated_issue = validated_map.get(idx)
                     if validated_issue is None:
                         # Rejected by validator
                         issue_row.status = "suppressed"
-                        rejected_titles.add(issue_row.title)
+                        rejected_titles.append(issue_row.title)
                         results["issues_suppressed"] += 1
                     else:
                         # Update confidence
@@ -162,9 +166,9 @@ class IssuePipeline:
 
                 results["validation"] = {
                     "input_count": len(issues_to_validate),
-                    "approved_count": len(validated),
-                    "rejected_count": len(issues_to_validate) - len(validated),
-                    "rejected_titles": list(rejected_titles)[:10],
+                    "approved_count": len(validated_map),
+                    "rejected_count": len(issues_to_validate) - len(validated_map),
+                    "rejected_titles": rejected_titles[:10],
                 }
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)

@@ -62,46 +62,53 @@ class BaseAgent(ABC):
         site_id: UUID,
         trigger: str = "scheduled",
     ) -> AgentRunResult:
-        """Run the full agent pipeline."""
+        """Run the full agent pipeline.
+
+        The whole body is wrapped so any exception — even one raised
+        before we open our own try-block (e.g. during `load_data`) —
+        still updates the agent_run row to "failed" and commits, so we
+        don't leave zombie "running" rows behind.
+        """
         t0 = time.monotonic()
-
-        # 1. Load site info
-        site_row = await db.execute(select(Site).where(Site.id == site_id))
-        site = site_row.scalar_one_or_none()
-        if not site:
-            return AgentRunResult(
-                agent_name=self.agent_name,
-                site_id=site_id,
-                issues_found=0,
-                issues_saved=0,
-                summary="Site not found.",
-                cost_usd=0.0,
-                input_tokens=0,
-                output_tokens=0,
-                error="Site not found",
-            )
-
-        from datetime import date
-        context = AgentContext(
-            site_id=site_id,
-            site_domain=site.domain,
-            analysis_date=date.today(),
-            operating_mode=site.operating_mode,
-        )
-
-        # Create an in-progress agent_run record
-        run_record = AgentRun(
-            site_id=site_id,
-            agent_name=self.agent_name,
-            model_used="pending",
-            trigger=trigger,
-            status="running",
-            started_at=datetime.now(timezone.utc),
-        )
-        db.add(run_record)
-        await db.flush()
+        run_record: AgentRun | None = None
 
         try:
+            # 1. Load site info
+            site_row = await db.execute(select(Site).where(Site.id == site_id))
+            site = site_row.scalar_one_or_none()
+            if not site:
+                return AgentRunResult(
+                    agent_name=self.agent_name,
+                    site_id=site_id,
+                    issues_found=0,
+                    issues_saved=0,
+                    summary="Site not found.",
+                    cost_usd=0.0,
+                    input_tokens=0,
+                    output_tokens=0,
+                    error="Site not found",
+                )
+
+            from datetime import date
+            context = AgentContext(
+                site_id=site_id,
+                site_domain=site.domain,
+                analysis_date=date.today(),
+                operating_mode=site.operating_mode,
+            )
+
+            # Create an in-progress agent_run record
+            run_record = AgentRun(
+                site_id=site_id,
+                agent_name=self.agent_name,
+                model_used="pending",
+                trigger=trigger,
+                status="running",
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(run_record)
+            await db.flush()
+
             # 2. Load data
             data = await self.load_data(db, context)
 
@@ -171,12 +178,37 @@ class BaseAgent(ABC):
                 output_tokens=0,
                 error=str(exc),
             )
+            await self._fail_run_record(db, run_record, exc, int((time.monotonic() - t0) * 1000))
+            return result
+
+    async def _fail_run_record(
+        self,
+        db: AsyncSession,
+        run_record: AgentRun | None,
+        exc: BaseException,
+        duration_ms: int,
+    ) -> None:
+        """Mark the run-record as failed and COMMIT so the row never
+        stays "running" if the caller forgets to commit on the failure
+        path. Best-effort: any DB error here is logged and swallowed —
+        we'd rather lose the audit row than mask the original failure.
+        """
+        if run_record is None:
+            # Crash happened before we even managed to add the record —
+            # nothing to update. The original exception still propagates
+            # via the result.error field.
+            return
+        try:
             run_record.status = "failed"
             run_record.error_message = str(exc)[:2000]
             run_record.completed_at = datetime.now(timezone.utc)
-            run_record.duration_ms = int((time.monotonic() - t0) * 1000)
-            await db.flush()
-            return result
+            run_record.duration_ms = duration_ms
+            await db.commit()
+        except Exception as commit_exc:  # noqa: BLE001
+            logger.error(
+                "Failed to commit failed-run record for %s: %s",
+                self.agent_name, commit_exc,
+            )
 
     # ── Helpers ────────────────────────────────────────────────────────────
 

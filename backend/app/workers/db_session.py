@@ -31,6 +31,15 @@ async def task_session() -> AsyncIterator[AsyncSession]:
 
     The engine is disposed (pool drained, connections closed) when the
     context exits — even on exceptions. One engine per task invocation.
+
+    TODO(audit P1#13): every Celery task pays a fresh DNS+TLS handshake
+    here. Caching the engine per (worker process, event loop) would
+    save ~50 handshakes per child lifecycle. Properly loop-aware so
+    asyncpg doesn't blow up on cross-loop awaits, and disposed on
+    Celery's `worker_process_shutdown` signal. Untangling this with
+    the current `asyncio.run`-per-task pattern (every task creates a
+    new loop, so a loop-keyed cache always misses) takes more than
+    a 30-minute window — leaving as-is for now. See backend audit.
     """
     eng = create_async_engine(settings.DATABASE_URL, pool_size=2, max_overflow=0)
     try:

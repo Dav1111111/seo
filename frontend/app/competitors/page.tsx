@@ -4,6 +4,7 @@ import { useState } from "react";
 import useSWR from "swr";
 import { api } from "@/lib/api";
 import { useCurrentSiteId } from "@/lib/site-context";
+import { getErrorMessage } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -24,22 +25,29 @@ export default function CompetitorsPage() {
   const [tab, setTab] = useState<"opps" | "list" | "gaps" | "dive">("opps");
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
-  const activitySWR = useSWR(
-    siteId ? `cp-current-run-${siteId}` : null,
-    () => api.getCurrentRun(siteId),
-    { refreshInterval: 5_000 },
-  );
   // Running = per-stage the newest event is not terminal. Prevents old
   // "progress" rows from pinning the page in a spinning state forever.
-  const hasRunning = (() => {
-    const events = activitySWR.data?.events ?? [];
+  function computeHasRunning(events: Array<{ stage: string; status: string }> | undefined): boolean {
+    if (!events || events.length === 0) return false;
     const TERMINAL = new Set(["done", "failed", "skipped"]);
     const latest = new Map<string, string>();
     for (const e of events) {
       if (!latest.has(e.stage)) latest.set(e.stage, e.status);
     }
     return [...latest.values()].some((s) => !TERMINAL.has(s));
-  })();
+  }
+
+  const activitySWR = useSWR(
+    siteId ? `cp-current-run-${siteId}` : null,
+    () => api.getCurrentRun(siteId),
+    {
+      // Only poll while a stage is non-terminal. Battery-friendly: an
+      // idle competitors page stops hitting the backend every 5s.
+      refreshInterval: (latest) =>
+        computeHasRunning(latest?.events) ? 5_000 : 0,
+    },
+  );
+  const hasRunning = computeHasRunning(activitySWR.data?.events);
 
   // While a task is active, poll data every 8s so the user sees fresh
   // results as soon as Celery finishes. When idle, no polling.
@@ -81,8 +89,8 @@ export default function CompetitorsPage() {
         kind: "ok",
         msg: "Разведка запущена — следи за прогрессом в ленте ниже. Занимает 1–3 минуты, после неё автоматически пойдёт глубокий анализ и пересчёт точек роста.",
       });
-    } catch (e: any) {
-      setBanner({ kind: "err", msg: e?.message ?? String(e) });
+    } catch (e: unknown) {
+      setBanner({ kind: "err", msg: getErrorMessage(e) });
     } finally {
       setDiscovering(false);
     }
@@ -98,8 +106,8 @@ export default function CompetitorsPage() {
         kind: "ok",
         msg: "Глубокий анализ запущен — следи за прогрессом в ленте ниже.",
       });
-    } catch (e: any) {
-      setBanner({ kind: "err", msg: e?.message ?? String(e) });
+    } catch (e: unknown) {
+      setBanner({ kind: "err", msg: getErrorMessage(e) });
     } finally {
       setDiving(false);
     }
@@ -131,13 +139,13 @@ export default function CompetitorsPage() {
       );
       outcomesSWR.mutate();
       setBanner({ kind: "ok", msg: "Отмечено. Через 14 дней платформа посчитает эффект." });
-    } catch (e: any) {
-      setBanner({ kind: "err", msg: e?.message ?? String(e) });
+    } catch (e: unknown) {
+      setBanner({ kind: "err", msg: getErrorMessage(e) });
     }
   }
 
   return (
-    <div className="space-y-6">
+    <div className="p-4 sm:p-6 space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">

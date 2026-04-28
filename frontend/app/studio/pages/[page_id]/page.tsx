@@ -160,7 +160,7 @@ export default function StudioPageWorkspace() {
 
   if (siteLoading) {
     return (
-      <div className="p-6 space-y-3">
+      <div className="p-4 sm:p-6 space-y-3">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-32 w-full" />
       </div>
@@ -169,7 +169,7 @@ export default function StudioPageWorkspace() {
 
   if (!currentSite) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <Card className="border-dashed max-w-2xl">
           <CardContent className="pt-6 space-y-2">
             <div className="font-medium">Сайт не выбран</div>
@@ -185,7 +185,7 @@ export default function StudioPageWorkspace() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-3 max-w-6xl">
+      <div className="p-4 sm:p-6 space-y-3 max-w-6xl">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-24 w-full" />
         <Skeleton className="h-64 w-full" />
@@ -195,7 +195,7 @@ export default function StudioPageWorkspace() {
 
   if (error || !data) {
     return (
-      <div className="p-6 max-w-6xl">
+      <div className="p-4 sm:p-6 max-w-6xl">
         <Card className="border-red-300 bg-red-50">
           <CardContent className="pt-6 text-sm text-red-900">
             Не удалось загрузить страницу:{" "}
@@ -211,7 +211,7 @@ export default function StudioPageWorkspace() {
   const xLinks = data.cross_links ?? {};
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
+    <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
       {/* Header */}
       <div>
         <Link

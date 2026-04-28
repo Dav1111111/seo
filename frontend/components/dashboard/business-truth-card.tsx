@@ -11,7 +11,7 @@ import {
   Brain, CheckCircle2, AlertTriangle, Inbox, RefreshCw,
   Target, Globe, TrendingUp,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, getErrorMessage } from "@/lib/utils";
 
 type Direction = {
   service: string;
@@ -47,8 +47,8 @@ export function BusinessTruthCard({ siteId }: { siteId: string }) {
       await api.rebuildBusinessTruth(siteId);
       setBanner("Пересчёт запущен — обнови через 5–10 секунд.");
       setTimeout(() => mutate(), 8_000);
-    } catch (e: any) {
-      setBanner(e?.message ?? String(e));
+    } catch (e: unknown) {
+      setBanner(getErrorMessage(e));
     } finally {
       setRebuilding(false);
     }

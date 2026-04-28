@@ -121,12 +121,10 @@ def outcomes_followup_daily_task(self) -> dict:
             await db.commit()
         return {"status": "ok", "processed": processed}
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
+    # `asyncio.run` properly closes async generators and shuts down
+    # the default executor before tearing the loop down; the manual
+    # new/close dance we used before leaked both.
+    return asyncio.run(_inner())
 
 
 def _fmt_pct(v: float | None) -> str:

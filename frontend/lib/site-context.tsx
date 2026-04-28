@@ -31,14 +31,30 @@ export function SiteProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.sites().then((list) => {
-      setSites(list);
-      // Restore from localStorage or pick first
-      const saved = localStorage.getItem("gt_site_id");
-      const found = list.find((s: Site) => s.id === saved);
-      setSiteId(found ? found.id : list[0]?.id || "");
-      setLoading(false);
-    }).catch(() => setLoading(false));
+    let cancelled = false;
+    api
+      .sites()
+      .then((list) => {
+        if (cancelled) return;
+        setSites(list);
+        // Restore from localStorage or pick first
+        const saved = localStorage.getItem("gt_site_id");
+        const found = list.find((s: Site) => s.id === saved);
+        setSiteId(found ? found.id : list[0]?.id || "");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Network/auth failed — fall back to whatever we last saw so the
+        // UI keeps something meaningful, otherwise clear out.
+        setSites([]);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleSetSite = (id: string) => {

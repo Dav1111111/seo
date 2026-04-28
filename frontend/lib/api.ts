@@ -8,12 +8,6 @@ async function apiFetch<T>(
   path: string,
   init?: RequestInit & { base?: "api" | "admin" },
 ): Promise<T> {
-  if (path.includes("//")) {
-    throw new Error(
-      "API call skipped: siteId is empty (context not ready yet). " +
-      "Wait for site to load and try again."
-    );
-  }
   const { base = "api", ...rest } = init || {};
   const prefix = base === "admin" ? ADMIN_PROXY : API_BASE;
   const res = await fetch(`${prefix}${path}`, {
@@ -39,19 +33,6 @@ export const api = {
   dashboard: (siteId = SITE_ID) => apiFetch<any>(`/sites/${siteId}/dashboard`),
   trafficMetrics: (siteId = SITE_ID, days = 30) =>
     apiFetch<any>(`/sites/${siteId}/metrics/traffic?days=${days}`),
-  indexingMetrics: (siteId = SITE_ID, days = 30) =>
-    apiFetch<any>(`/sites/${siteId}/metrics/indexing?days=${days}`),
-
-  // Issues
-  issues: (siteId = SITE_ID, params: Record<string, string | number> = {}) => {
-    const qs = new URLSearchParams(params as any).toString();
-    return apiFetch<any>(`/sites/${siteId}/issues${qs ? `?${qs}` : ""}`);
-  },
-  updateIssue: (siteId = SITE_ID, issueId: string, body: Record<string, unknown>) =>
-    apiFetch<any>(`/sites/${siteId}/issues/${issueId}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
 
   // Sites
   sites: () => apiFetch<any[]>("/sites"),
@@ -59,20 +40,8 @@ export const api = {
     apiFetch<any>(`/sites/${siteId}`, { method: "PATCH", body: JSON.stringify(body) }),
 
   // Reviews (Module 3)
-  reviewsList: (siteId: string, params: Record<string, string | number> = {}) => {
-    const qs = new URLSearchParams(params as any).toString();
-    return apiFetch<{ total: number; items: any[] }>(
-      `/reviews/sites/${siteId}/reviews${qs ? `?${qs}` : ""}`,
-    );
-  },
   review: (reviewId: string) =>
     apiFetch<any>(`/reviews/${reviewId}`),
-  reviewsStats: (siteId: string) =>
-    apiFetch<any>(`/reviews/sites/${siteId}/reviews/stats`),
-  triggerSiteReview: (siteId: string, topN = 20) =>
-    apiFetch<{ task_id: string; status: string }>(
-      `/reviews/sites/${siteId}/run?top_n=${topN}`, { method: "POST" },
-    ),
 
   // Reports (Module 5)
   reportsList: (siteId: string, limit = 20) =>
@@ -109,32 +78,6 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // Admin — Draft Profile (Phase F/G)
-  // These go through the Next.js server-side proxy (/admin-proxy/*) which
-  // injects X-Admin-Key from backend env. No key ever touches the browser.
-  draftProfile: (siteId: string) =>
-    apiFetch<{ site_id: string; draft: any; has_draft: boolean }>(
-      `/sites/${siteId}/draft-profile`, { base: "admin" },
-    ),
-  triggerDraftRebuild: (siteId: string) =>
-    apiFetch<{ task_id: string; status: string }>(
-      `/sites/${siteId}/draft-profile/rebuild`, { method: "POST", base: "admin" },
-    ),
-  commitDraft: (
-    siteId: string,
-    body: { confirm: boolean; field_overrides?: Record<string, any> } = { confirm: true },
-  ) =>
-    apiFetch<{ committed: boolean; preview?: boolean; target_config: any }>(
-      `/sites/${siteId}/target-config/commit-draft`,
-      { method: "POST", base: "admin", body: JSON.stringify(body) },
-    ),
-  demandMap: (siteId: string, params: Record<string, string | number> = {}) => {
-    const qs = new URLSearchParams(params as any).toString();
-    return apiFetch<{ clusters_total: number; items: any[] }>(
-      `/sites/${siteId}/demand-map${qs ? `?${qs}` : ""}`, { base: "admin" },
-    );
-  },
-
   // Conversational Onboarding (single chat screen)
   onboardingState: (siteId: string) =>
     apiFetch<any>(`/sites/${siteId}/onboarding`, { base: "admin" }),
@@ -143,12 +86,6 @@ export const api = {
       `/sites/${siteId}/onboarding/understanding/analyze`,
       { method: "POST", base: "admin" },
     ),
-  patchUnderstanding: (siteId: string, body: Record<string, any>) =>
-    apiFetch<any>(`/sites/${siteId}/onboarding/understanding`, {
-      method: "PATCH",
-      base: "admin",
-      body: JSON.stringify(body),
-    }),
   onboardingChatStart: (siteId: string) =>
     apiFetch<{
       site_id: string;

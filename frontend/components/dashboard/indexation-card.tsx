@@ -3,6 +3,7 @@
 import useSWR from "swr";
 import { useState } from "react";
 import { api } from "@/lib/api";
+import { useTimeoutSetter } from "@/lib/hooks/use-timeout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -60,6 +61,7 @@ function asIndexationExtra(extra: Record<string, unknown>): IndexationExtra {
 export function IndexationCard({ siteId }: { siteId: string }) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const setTimeoutSafe = useTimeoutSetter();
 
   const { data, mutate } = useSWR(
     siteId ? ["indexation", siteId] : null,
@@ -80,21 +82,23 @@ export function IndexationCard({ siteId }: { siteId: string }) {
     setError(null);
     try {
       await api.triggerIndexationCheck(siteId);
-      // Poll activity until a fresh indexation terminal lands
-      setTimeout(() => mutate(), 2_000);
-      setTimeout(() => mutate(), 6_000);
-      setTimeout(() => mutate(), 12_000);
+      // Poll activity until a fresh indexation terminal lands. Timers
+      // are cleared on unmount via useTimeoutSetter so we never call
+      // mutate() / setRunning() on a dead component.
+      setTimeoutSafe(() => mutate(), 2_000);
+      setTimeoutSafe(() => mutate(), 6_000);
+      setTimeoutSafe(() => mutate(), 12_000);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "запуск не удался");
     } finally {
-      setTimeout(() => setRunning(false), 2_000);
+      setTimeoutSafe(() => setRunning(false), 2_000);
     }
   }
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-start justify-between gap-4 pb-3">
-        <div>
+      <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 pb-3">
+        <div className="min-w-0">
           <CardTitle className="flex items-center gap-2 text-base">
             <Search className="h-4 w-4" /> Индексация в Яндексе
           </CardTitle>
@@ -102,7 +106,7 @@ export function IndexationCard({ siteId }: { siteId: string }) {
             Прямой запрос <code>site:домен</code> — не зависит от Вебмастера.
           </p>
         </div>
-        <Button size="sm" variant="outline" onClick={runCheck} disabled={running}>
+        <Button size="sm" variant="outline" onClick={runCheck} disabled={running} className="shrink-0">
           {running ? "Проверяю…" : "Проверить сейчас"}
         </Button>
       </CardHeader>
