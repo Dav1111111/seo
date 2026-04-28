@@ -479,7 +479,10 @@ async def list_harmful_visibility(
         select(SearchQuery).where(
             SearchQuery.site_id == site_id,
             SearchQuery.relevance.in_(("spam", "disputed")),
-        ).order_by(SearchQuery.relevance.desc(), desc(SearchQuery.wordstat_volume.nulls_last())),
+        ).order_by(
+            SearchQuery.relevance.desc(),
+            SearchQuery.wordstat_volume.desc().nulls_last(),
+        ),
     )).scalars().all()
     if not rows:
         return HarmfulVisibilityResponse(
