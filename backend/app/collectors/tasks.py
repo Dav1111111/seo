@@ -1302,6 +1302,8 @@ def diagnose_harmful_queries_site_task(
     import anyio
     from datetime import datetime, timedelta, timezone
 
+    from sqlalchemy import desc
+
     from app.core_audit.activity import emit_terminal, log_event
     from app.core_audit.harmful_diagnoser import (
         SERP_DEPTH,
