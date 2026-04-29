@@ -274,7 +274,7 @@ def test_harmful_share_basis_is_classified_not_total() -> None:
     On half-classified sites this lied: spam=5, total=100,
     unclassified=85 ⇒ share said 5%, real share among classified
     was 33%. Pin the new contract: evidence carries `classified`,
-    body says «из проверенных»."""
+    body uses `classified` (15) as the basis, not `total` (100)."""
     # spam=5, own=10, unclassified=85, total=100, classified=15.
     # bad/classified = 5/15 = 33.3%. Old (buggy) bad/total = 5%.
     snap = _snap(own=10, spam=5, disputed=0, unclassified=85)
@@ -285,7 +285,10 @@ def test_harmful_share_basis_is_classified_not_total() -> None:
     assert a.evidence["total"] == 100
     # share_pct must be the meaningful number, not the diluted one.
     assert a.evidence["share_pct"] >= 30.0
-    assert "проверенных" in a.body_ru  # body must say «из проверенных»
+    # Body must use the classified count (15), not the total (100).
+    # If body printed «из 100» that would be the old buggy basis.
+    assert "15" in a.body_ru
+    assert "из 100" not in a.body_ru
 
 
 # ── Missing landings ────────────────────────────────────────────────
