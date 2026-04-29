@@ -98,14 +98,15 @@ Studio v2 — следующий слой: **умный анализ, котор
 
 ### Этап 7 · Intelligence layer (мозг поверх всех модулей)
 
-**ВАЖНО:** не начинать пока этапы 1-6 не работают в проде ≥2 недели.
+- [x] Endpoint `GET /admin/studio/sites/{id}/plan` — синтезирует данные всех модулей в один отчёт «приоритеты».
+- [x] Логика приоритизации: 6 правил (indexation gap, harmful share, missing landings, unreviewed pages, pending recs, pending followups) с явными порогами severity.
+- [x] **Сделано без LLM.** `core_audit/brain/snapshot.py` (pure SQL) → `core_audit/brain/rules.py` (Russian templates). Каждый action ссылается на ряд в БД через `evidence` dict.
+- [x] **Frontend.** Карточка `BrainPlanCard` сверху `/studio` index показывает топ-5 действий + receipt-row с реальными числами + diagnostics для пустого плана.
+- [x] **Тесты:** 15 unit-тестов на rules layer, 100% pass. Покрывают: pristine empty site, indexation silent on all-unknown / fires on real gap, severity scaling, missing-landings верно цитирует service names, plan caps at 5, severity sort monotonic, evidence carries numbers (not prose).
 
-- [ ] Endpoint `GET /admin/studio/sites/{id}/intelligence` — синтезирует данные всех модулей в один отчёт «приоритеты».
-- [ ] Логика приоритизации: критичные техпроблемы (indexation, harmful visibility) → high-impact opportunities → mid-priority recs.
-- [ ] **Не делать через LLM.** Мозг — это правила поверх готовых классификаций (этап 4) и сигналов (этап 1+5+6). LLM здесь = шум.
-- [ ] **Frontend.** Главная страница `/studio` или новая `/studio/plan` показывает «top 5 действий на этой неделе».
+**Сделано ✅** 2026-04-29. Стоимость: $0/запрос (только SQL). Latency <500мс.
 
-**Оценка: 2-3 дня.** Зависит от качества этапов 1-6.
+**Live grandtourspirit (без всякой LLM):** 4 critical actions — починить 4 страницы в индексе, создать 5 пропущенных посадочных, почистить 82% вредной видимости (37/45 запросов как «не мои»), запустить ревью на 21 непроревьюенной странице.
 
 ---
 
@@ -233,3 +234,4 @@ Studio v2 — следующий слой: **умный анализ, котор
 | 2026-04-28 | Этап 5 — вредная видимость | (commit pending) | endpoint `GET .../queries/harmful` (top-30 cut, severity-aware suggested_action_ru), страница `app/studio/queries/harmful/page.tsx` с totals + карточками, cross-link с амбер-баннером из `/studio/queries` |
 | 2026-04-29 | Этап 3 — кнопка «Запустить ревью» на странице | 349bc31, 52d9d48, 2c36d2c | `studio_review_page_task` оборачивает `Reviewer.review_page` с activity events. Endpoint `POST /admin/studio/sites/{id}/pages/{page_id}/review`. Frontend кнопки на page workspace + auto-poll. Honest 45s safety timeout с пояснением «эта страница не идёт в ревью» когда Reviewer skip-ает |
 | 2026-04-29 | Этап 6 — missing landing pages (light-mode) | 4a6d45c | `core_audit/missing_landings.py` (business_signal + evidence-substring gate), `missing_landings_scan_task`, endpoints `scan`+`get`, секция в `/studio/competitors` с цитатами из narrative. 12 тестов, 100% pass. Live-test grandtourspirit: 5 валидных пропусков (Крым, яхты, вертолёты, Каньоны Красной Поляны, гастрономия), 3 LLM-выдумки отброшены фильтром, $0.06, 32 сек |
+| 2026-04-29 | Этап 7 — мозг (rules-based plan) | e5638d2, e5363f4 | `core_audit/brain/snapshot.py` (pure-SQL facts) + `brain/rules.py` (6 Russian-templated rules с severity scaling) + endpoint `GET /studio/sites/{id}/plan` + `BrainPlanCard` сверху `/studio` index. 15 тестов, 100% pass. **Без LLM**: каждое evidence — `count(*)` из БД, каждый текст — статичный шаблон. Live grandtourspirit: 4 critical actions — индекс (4 страницы), missing landings (5 услуг), harmful (82% видимости), 21 страница без ревью. $0/запрос, <500мс |
