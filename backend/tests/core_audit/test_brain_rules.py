@@ -159,15 +159,52 @@ def test_indexation_emits_when_real_gap() -> None:
 
 
 def test_indexation_severity_scales_with_gap() -> None:
-    """3+ missing → critical. 1-2 missing → high. The point is to
-    grab the owner's attention proportionally — not to spam alarms
-    when one page is just slow to index."""
+    """3+ missing → critical. 1-2 missing on a ≥10-page site → high.
+    The point is to grab the owner's attention proportionally — not
+    to spam alarms when one page is just slow to index."""
     high = build_plan(_snap(pages_total=10, pages_in_index=9))
     crit = build_plan(_snap(pages_total=10, pages_in_index=5))
     h_a = _by_id(high.actions, "indexation:not_indexed")
     c_a = _by_id(crit.actions, "indexation:not_indexed")
     assert h_a and h_a.severity == "high"
     assert c_a and c_a.severity == "critical"
+
+
+def test_indexation_silent_on_tiny_site_with_normal_latency() -> None:
+    """Day-one site with 5 pages and 1-2 still un-indexed is normal
+    Yandex latency, not an owner action. Stay quiet under the soft
+    threshold so the brain doesn't cry wolf."""
+    # 5 pages, 4 in index, 1 unindexed = normal latency.
+    plan = build_plan(_snap(pages_total=5, pages_in_index=4))
+    assert _by_id(plan.actions, "indexation:not_indexed") is None
+    # 9 pages, 7 in index, 2 unindexed = still under threshold.
+    plan = build_plan(_snap(pages_total=9, pages_in_index=7))
+    assert _by_id(plan.actions, "indexation:not_indexed") is None
+
+
+def test_indexation_fires_on_tiny_site_with_significant_gap() -> None:
+    """Even on a small site, ≥3 unindexed is a real gap, not latency."""
+    plan = build_plan(_snap(pages_total=5, pages_in_index=2))
+    a = _by_id(plan.actions, "indexation:not_indexed")
+    assert a is not None
+    assert a.severity == "critical"  # 3 missing
+
+
+def test_indexation_subtracts_unknown_from_not_indexed() -> None:
+    """`unknown` (Webmaster hasn't reported yet) is NOT «не в индексе».
+    Earlier rule fired «12 не в индексе» when 8 were just unknown.
+    Math: not_indexed = total - in_index - excluded - unknown.
+
+    pages_total=22, in_index=10, unknown=8 ⇒ confirmed not_indexed=4
+    (NOT 12 as the old buggy formula computed).
+    """
+    snap = _snap(pages_total=22, pages_in_index=10, pages_unknown=8)
+    plan = build_plan(snap)
+    a = _by_id(plan.actions, "indexation:not_indexed")
+    assert a is not None
+    assert a.evidence["not_indexed"] == 4
+    assert a.evidence["unknown"] == 8
+    assert "4" in a.title
 
 
 # ── Harmful visibility ──────────────────────────────────────────────
@@ -183,11 +220,12 @@ def test_harmful_silent_when_no_classifier_run() -> None:
 
 
 def test_harmful_severity_scales() -> None:
-    """26 spam + 11 disputed on grandtourspirit (37 of 45 = 82%) ⇒
-    critical. A small share on a healthy site ⇒ medium.
+    """26 spam + 11 disputed on grandtourspirit (37 of 41 ⇒ ~90% of
+    classified) → critical. A small share on a healthy site → medium.
     Thresholds: ≥20 bad OR ≥40% share = critical, ≥8 OR ≥20% = high,
-    else medium. Picking 2 + 1 on a 50-query site (6%) keeps small
-    below the high cutoff — exactly the «calm site» case we want."""
+    else medium. Picking 2 + 1 on a 50-query site (6% of classified)
+    keeps small below the high cutoff — exactly the «calm site» case
+    we want."""
     big = build_plan(_snap(own=4, spam=26, disputed=11))
     small = build_plan(_snap(own=47, spam=2, disputed=1))
     big_a = _by_id(big.actions, "queries:harmful")
@@ -197,6 +235,41 @@ def test_harmful_severity_scales() -> None:
     assert big_a.evidence["spam"] == 26
     assert big_a.evidence["disputed"] == 11
     assert "37" in big_a.title  # spam + disputed
+
+
+def test_harmful_min_total_downgrades_tiny_samples() -> None:
+    """Earlier rule: 4 spam on a 10-query site = 40% = critical.
+    That's noise, not a problem — small samples have noisy ratios.
+    With min_total=15 guard, severity drops to medium so the action
+    is still surfaced (so the owner CAN act on it) but doesn't
+    dominate the plan."""
+    # 10 queries total: 4 spam, 6 own. Old rule: critical (40% share).
+    # New rule: classified=10 < 15 ⇒ severity downgraded.
+    plan = build_plan(_snap(own=6, spam=4, disputed=0))
+    a = _by_id(plan.actions, "queries:harmful")
+    assert a is not None
+    # Below the min_total guard, even with high share, we never go
+    # critical or high — just medium (or low if very few bad).
+    assert a.severity in ("medium", "low")
+
+
+def test_harmful_share_basis_is_classified_not_total() -> None:
+    """Earlier bug: share = bad / total (including unclassified).
+    On half-classified sites this lied: spam=5, total=100,
+    unclassified=85 ⇒ share said 5%, real share among classified
+    was 33%. Pin the new contract: evidence carries `classified`,
+    body says «из проверенных»."""
+    # spam=5, own=10, unclassified=85, total=100, classified=15.
+    # bad/classified = 5/15 = 33.3%. Old (buggy) bad/total = 5%.
+    snap = _snap(own=10, spam=5, disputed=0, unclassified=85)
+    plan = build_plan(snap)
+    a = _by_id(plan.actions, "queries:harmful")
+    assert a is not None
+    assert a.evidence["classified"] == 15
+    assert a.evidence["total"] == 100
+    # share_pct must be the meaningful number, not the diluted one.
+    assert a.evidence["share_pct"] >= 30.0
+    assert "проверенных" in a.body_ru  # body must say «из проверенных»
 
 
 # ── Missing landings ────────────────────────────────────────────────

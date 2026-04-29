@@ -89,31 +89,45 @@ def _rule_indexation_coverage(snap: BrainSnapshot) -> Action | None:
     """Pages NOT in Yandex index (and not deliberately excluded) are
     a hard ranking blocker — surface as critical when the gap is real.
 
-    Skipped when no Webmaster URL data has arrived yet (everything
-    `unknown`) — that's a coverage problem of the indexation collector,
-    not an owner action.
+    Math: `not_indexed = total - in_index - excluded - unknown`.
+    `unknown` (Webmaster hasn't reported yet) is NOT «не в индексе» —
+    earlier the rule treated it as such and fired false-positive
+    critical when per-URL data was partial. Surface unknown via
+    diagnostics instead.
+
+    Min-size guard: tiny sites where 1-2 pages haven't indexed yet are
+    just normal Yandex latency, not an owner problem. Stay silent under
+    a soft threshold so the brain doesn't cry wolf on day-one sites.
     """
     idx = snap.indexation
     if idx.pages_total == 0:
         return None
     # If everything is `unknown`, the per-URL Webmaster check just
-    # hasn't run — silent.
+    # hasn't run — silent (diagnostics layer surfaces this).
     if idx.pages_unknown == idx.pages_total:
         return None
-    not_indexed = idx.pages_total - idx.pages_in_index - idx.pages_excluded
-    if not_indexed <= 0:
+    confirmed_not_indexed = max(
+        0,
+        idx.pages_total - idx.pages_in_index - idx.pages_excluded - idx.pages_unknown,
+    )
+    if confirmed_not_indexed <= 0:
         return None
-    page_word = _ru_plural(not_indexed, ("страница", "страницы", "страниц"))
+    # Quiet-bar: < 10-page site with ≤ 2 unindexed is normal indexing
+    # latency, not a fixable issue. We'd be alarmist to flag it.
+    if idx.pages_total < 10 and confirmed_not_indexed <= 2:
+        return None
+
+    page_word = _ru_plural(confirmed_not_indexed, ("страница", "страницы", "страниц"))
     body = (
-        f"{not_indexed} {page_word} не подтверждены в индексе Яндекса. "
+        f"{confirmed_not_indexed} {page_word} не подтверждены в индексе Яндекса. "
         f"Их нельзя найти через поиск, даже если в sitemap. "
         f"Открой индексацию, посмотри причины и нажми «Проверить URL»."
     )
     return Action(
         id="indexation:not_indexed",
-        severity="critical" if not_indexed >= 3 else "high",
+        severity="critical" if confirmed_not_indexed >= 3 else "high",
         title=(
-            f"Верни в индекс {not_indexed} {page_word}"
+            f"Верни в индекс {confirmed_not_indexed} {page_word}"
         ),
         body_ru=body,
         link_to="/studio/indexation",
@@ -121,8 +135,9 @@ def _rule_indexation_coverage(snap: BrainSnapshot) -> Action | None:
         evidence={
             "pages_total": idx.pages_total,
             "in_index": idx.pages_in_index,
-            "not_indexed": not_indexed,
+            "not_indexed": confirmed_not_indexed,
             "excluded": idx.pages_excluded,
+            "unknown": idx.pages_unknown,
         },
     )
 
@@ -130,6 +145,19 @@ def _rule_indexation_coverage(snap: BrainSnapshot) -> Action | None:
 def _rule_harmful_visibility(snap: BrainSnapshot) -> Action | None:
     """Spam + disputed queries we already classified ourselves as
     «not ours» but still rank for. Severity scales with count.
+
+    Two corrections vs initial release:
+
+      1. **Share basis = classified queries, not all queries.** Earlier
+         we divided by `total`, which inflates «share of visibility»
+         on partially-classified sites: spam=5 / total=100 = 5% even if
+         within the classified subset spam was 33%. Body text now says
+         «из проверенных» so the number is honest.
+
+      2. **`min_total >= 15` guard.** On a 10-query site, 4 spam = 40%
+         = critical was alarmist — small samples have noisy ratios.
+         Below that threshold we still surface the action (so the
+         owner can ack it) but tone severity down to medium / low.
 
     We don't know per-query position here (that lives in daily_metrics,
     out of scope for the brain — the harmful module already shows it).
@@ -139,19 +167,24 @@ def _rule_harmful_visibility(snap: BrainSnapshot) -> Action | None:
     bad = q.spam + q.disputed
     if bad == 0:
         return None
-    if q.total == 0:
+    classified = q.total - q.unclassified
+    if classified <= 0:
         return None
-    share_pct = bad / q.total * 100.0
+    share_pct = bad / classified * 100.0
     word = _ru_plural(bad, ("вредный запрос", "вредных запроса", "вредных запросов"))
     body = (
-        f"{bad} из {q.total} запросов помечены как «не мои» "
+        f"{bad} из {classified} проверенных запросов помечены как «не мои» "
         f"(спам {q.spam} + спорные {q.disputed}). "
-        f"Это {share_pct:.0f}% видимости — Яндекс ассоциирует тебя с "
-        f"чужой темой. Открой отчёт, чтобы увидеть, какие страницы "
-        f"тянут эти запросы и что в них переписать."
+        f"Это {share_pct:.0f}% от классифицированных — Яндекс "
+        f"ассоциирует тебя с чужой темой. Открой отчёт, чтобы увидеть, "
+        f"какие страницы тянут эти запросы и что в них переписать."
     )
     sev: Severity
-    if bad >= 20 or share_pct >= 40.0:
+    # Tiny-sample guard: ratios on a 5-query site are noise. Surface
+    # the action but downgrade severity so it doesn't dominate the plan.
+    if classified < 15:
+        sev = "medium" if bad >= 5 else "low"
+    elif bad >= 20 or share_pct >= 40.0:
         sev = "critical"
     elif bad >= 8 or share_pct >= 20.0:
         sev = "high"
@@ -167,6 +200,7 @@ def _rule_harmful_visibility(snap: BrainSnapshot) -> Action | None:
         evidence={
             "spam": q.spam,
             "disputed": q.disputed,
+            "classified": classified,
             "total": q.total,
             "share_pct": round(share_pct, 1),
         },

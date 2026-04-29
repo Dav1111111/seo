@@ -1910,13 +1910,21 @@ def missing_landings_scan_task(self, site_id: str, run_id: str | None = None):
                 )
                 return {"status": "failed", "error": str(exc)}
 
-            # Persist into target_config.missing_landings WITHOUT touching
-            # the competitor module's growth_opportunities slot.
+            # Persist into target_config.missing_landings WITHOUT
+            # touching the competitor module's growth_opportunities
+            # slot. The LLM call above took ~30 s — during that
+            # window other tasks (business_truth, deep_dive) may have
+            # committed updates to target_config. We MUST re-SELECT
+            # the site under the advisory lock instead of mutating the
+            # stale ORM instance loaded before the LLM call. Otherwise
+            # we'd stomp those concurrent commits.
             await lock_site_target_config(db, site_id)
-            await db.refresh(site)
-            cfg = dict(site.target_config or {})
-            cfg["missing_landings"] = result
-            site.target_config = cfg
+            fresh_site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one()
+            new_cfg = dict(fresh_site.target_config or {})
+            new_cfg["missing_landings"] = result
+            fresh_site.target_config = new_cfg
             await db.commit()
 
             n_items = len(result["items"])

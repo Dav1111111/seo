@@ -288,9 +288,16 @@ async def list_queries(
 # ── Trigger endpoints ─────────────────────────────────────────────────
 
 # Idempotency window: don't re-queue the same module's task more than
-# once per 60 seconds per site. Owner double-clicking should not burn
+# once per N seconds per site. Owner double-clicking should not burn
 # the daily Wordstat / API quota twice.
+#
+# Default is 60 s — fits fast collector tasks (Webmaster, sitemap).
+# LLM-driven tasks need a longer window because the task itself runs
+# 30-120 s — a 60 s guard would let a re-click at t=70 spawn a second
+# concurrent LLM call AND let it stomp the first task's commit (the
+# stale-snapshot race that hurt missing_landings before B1 fix).
 TRIGGER_DEDUP_WINDOW_SEC = 60
+TRIGGER_DEDUP_WINDOW_LLM_SEC = 600  # 10 min — covers retries + cushion
 
 
 class TriggerResponse(BaseModel):
@@ -301,13 +308,22 @@ class TriggerResponse(BaseModel):
 
 
 async def _recent_started_event(
-    db: AsyncSession, site_id: uuid.UUID, stage: str,
+    db: AsyncSession,
+    site_id: uuid.UUID,
+    stage: str,
+    *,
+    window_seconds: int = TRIGGER_DEDUP_WINDOW_SEC,
 ) -> AnalysisEvent | None:
     """Find a `<stage>:started` event for this site within the dedup
     window. If present, second trigger reuses its run_id instead of
     queueing a duplicate task — same pattern as admin_ops.trigger_full_pipeline.
+
+    Pass `window_seconds=TRIGGER_DEDUP_WINDOW_LLM_SEC` for stages whose
+    underlying task makes a long LLM call — the default 60 s window
+    is shorter than the task itself, so re-clicks during execution
+    would slip through.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=TRIGGER_DEDUP_WINDOW_SEC)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
     result = await db.execute(
         select(AnalysisEvent)
         .where(
@@ -583,7 +599,10 @@ async def trigger_harmful_diagnose(
     """
     await _site_or_404(db, site_id)
 
-    recent = await _recent_started_event(db, site_id, "harmful_diagnose")
+    recent = await _recent_started_event(
+        db, site_id, "harmful_diagnose",
+        window_seconds=TRIGGER_DEDUP_WINDOW_LLM_SEC,
+    )
     if recent is not None:
         return TriggerResponse(
             status="deduped",
@@ -680,7 +699,10 @@ async def trigger_classify_queries(
     """
     await _site_or_404(db, site_id)
 
-    recent = await _recent_started_event(db, site_id, "classify_queries")
+    recent = await _recent_started_event(
+        db, site_id, "classify_queries",
+        window_seconds=TRIGGER_DEDUP_WINDOW_LLM_SEC,
+    )
     if recent is not None:
         return TriggerResponse(
             status="deduped",
@@ -1540,7 +1562,10 @@ async def trigger_page_review(
     if page is None:
         raise HTTPException(status_code=404, detail="page not found")
 
-    recent = await _recent_started_event(db, site_id, "page_review")
+    recent = await _recent_started_event(
+        db, site_id, "page_review",
+        window_seconds=TRIGGER_DEDUP_WINDOW_LLM_SEC,
+    )
     if recent is not None:
         return TriggerResponse(
             status="deduped",
@@ -2254,7 +2279,10 @@ async def trigger_missing_landings_scan(
             ),
         )
 
-    recent = await _recent_started_event(db, site_id, "missing_landings")
+    recent = await _recent_started_event(
+        db, site_id, "missing_landings",
+        window_seconds=TRIGGER_DEDUP_WINDOW_LLM_SEC,
+    )
     if recent is not None:
         return TriggerResponse(
             status="deduped",

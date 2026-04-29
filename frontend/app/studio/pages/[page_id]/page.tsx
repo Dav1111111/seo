@@ -120,6 +120,13 @@ export default function StudioPageWorkspace() {
   useEffect(() => {
     reviewPendingRef.current = reviewPending;
   }, [reviewPending]);
+  // Token captured per click. The 45-s safety timer compares this on
+  // wake — if the user re-clicked «Перезапустить» within the window
+  // the first timer would otherwise fire on the SECOND click's run
+  // and show «не записалось» as if the second run failed (it didn't,
+  // it's still running). Each click bumps the token; only the latest
+  // token's timer ever clears state.
+  const reviewRunTokenRef = useRef(0);
   const setSafeTimeout = useTimeoutSetter();
 
   const { data, error, isLoading, mutate } = useSWR(
@@ -154,6 +161,9 @@ export default function StudioPageWorkspace() {
     if (!siteId || !pageId || reviewPending) return;
     setReviewPending(true);
     setErrMsg(null);
+    // Bump the token so any earlier timer that wakes up after this
+    // click sees a stale value and bails out.
+    const myToken = ++reviewRunTokenRef.current;
     try {
       const res = await api.studioTriggerPageReview(siteId, pageId);
       if (res.deduped) {
@@ -172,8 +182,15 @@ export default function StudioPageWorkspace() {
     // (например, не «strengthen»-кандидат: слишком узкий контент или
     // дубль другой). Сбрасываем pending и поясняем — поллить
     // бесконечно нечестно.
+    //
+    // Token check: only act if THIS click's timer is still the latest.
+    // Otherwise a re-click within 45s would let the first timer mark
+    // the second run as failed.
     setSafeTimeout(() => {
-      if (reviewPendingRef.current) {
+      if (
+        reviewPendingRef.current
+        && reviewRunTokenRef.current === myToken
+      ) {
         setReviewPending(false);
         // mutate, чтобы подтянуть свежий data.review (вдруг таки записан)
         mutate();

@@ -177,7 +177,9 @@ export default function StudioCompetitorsPage() {
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
-      setSafeTimeout(() => setBusy(null), 3000);
+      setSafeTimeout(() => {
+        setBusy((cur) => (cur === "discover" ? null : cur));
+      }, 3000);
     }
   }
 
@@ -194,7 +196,9 @@ export default function StudioCompetitorsPage() {
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
-      setSafeTimeout(() => setBusy(null), 3000);
+      setSafeTimeout(() => {
+        setBusy((cur) => (cur === "deep-dive" ? null : cur));
+      }, 3000);
     }
   }
 
@@ -218,9 +222,14 @@ export default function StudioCompetitorsPage() {
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
-      // Hold busy a bit longer than other actions — single LLM call is
-      // ~30 s, so 60 s safety net so polling stays alive end-to-end.
-      setSafeTimeout(() => setBusy(null), 60_000);
+      // Hold busy a bit longer than other actions — single LLM call
+      // is ~30 s, 60 s safety net keeps polling alive end-to-end.
+      // Functional `setBusy(prev => …)` so a trailing timer from this
+      // click can never stomp another in-flight trigger (e.g. user
+      // started «Глубокий анализ» before our safety fired).
+      setSafeTimeout(() => {
+        setBusy((cur) => (cur === "missing-landings" ? null : cur));
+      }, 60_000);
     }
   }
 
