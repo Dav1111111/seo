@@ -74,15 +74,21 @@ export default function StudioIndexationPage() {
   const siteId = currentSite?.id || "";
 
   const [pending, setPending] = useState(false);
+  const [refreshUrlsPending, setRefreshUrlsPending] = useState(false);
   const [banner, setBanner] = useState<{
     kind: "ok" | "deduped" | "err";
     text: string;
   } | null>(null);
   const setSafeTimeout = useTimeoutSetter();
 
-  const [urlFilter, setUrlFilter] = useState<
-    "all" | "missing_in_search" | "only_in_search" | "broken_http"
-  >("all");
+  type UrlFilter =
+    | "all"
+    | "missing_in_search"
+    | "only_in_search"
+    | "broken_http"
+    | "yandex_excluded"
+    | "yandex_unknown";
+  const [urlFilter, setUrlFilter] = useState<UrlFilter>("all");
 
   const { data, isLoading, mutate } = useSWR(
     siteId ? studioKey("indexation", siteId) : null,
@@ -100,10 +106,36 @@ export default function StudioIndexationPage() {
     siteId ? studioKey("indexation_sources", siteId) : null,
     () => api.studioGetIndexationSources(siteId),
   );
-  const { data: urls } = useSWR(
+  const { data: urls, mutate: mutateUrls } = useSWR(
     siteId ? studioKey("indexation_urls", siteId, urlFilter) : null,
     () => api.studioGetIndexationUrls(siteId, urlFilter, 200),
   );
+
+  async function onRefreshUrls() {
+    if (!siteId || refreshUrlsPending) return;
+    setRefreshUrlsPending(true);
+    setBanner(null);
+    try {
+      const res = await api.studioTriggerUrlIndexationRefresh(siteId);
+      if (res.deduped) {
+        setBanner({
+          kind: "deduped",
+          text: `Обновление статусов уже идёт (run_id ${res.run_id.slice(0, 8)}…). Подожди.`,
+        });
+      } else {
+        setBanner({
+          kind: "ok",
+          text: `Тяну per-URL индексацию из Webmaster · run_id ${res.run_id.slice(0, 8)}…. Это закроет «7 vs 15» — Webmaster знает изнутри Yandex что именно проиндексировано. ~10-30 секунд.`,
+        });
+        // Re-fetch URL table after a delay so new statuses show up.
+        setSafeTimeout(() => mutateUrls(), 30_000);
+      }
+    } catch (e: unknown) {
+      setBanner({ kind: "err", text: getErrorMessage(e) });
+    } finally {
+      setSafeTimeout(() => setRefreshUrlsPending(false), 3000);
+    }
+  }
 
   async function onCheck() {
     if (!siteId || pending) return;
@@ -184,7 +216,24 @@ export default function StudioIndexationPage() {
             Если мало — что чинить.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="outline"
+            onClick={onRefreshUrls}
+            disabled={refreshUrlsPending}
+            size="sm"
+            title="Тянет per-URL статус из Webmaster API. Закрывает «7 vs 15»: Webmaster знает изнутри Yandex что точно проиндексировано, что исключено и почему."
+          >
+            <RefreshCw
+              className={cn(
+                "h-4 w-4 mr-2",
+                refreshUrlsPending && "animate-spin",
+              )}
+            />
+            {refreshUrlsPending
+              ? "Запускаю…"
+              : "Webmaster: статус каждого URL"}
+          </Button>
           <Button onClick={onCheck} disabled={pending || isRunning} size="sm">
             <RefreshCw
               className={cn(
@@ -513,16 +562,40 @@ function UrlSignalTable({
       last_crawled_at: string | null;
       found_in_search_api: boolean;
       title: string | null;
+      in_yandex_index: boolean | null;
+      yandex_excluded_reason: string | null;
+      yandex_index_checked_at: string | null;
     }>;
     only_in_sitemap: number;
     only_in_search: number;
     fully_aligned: number;
   };
-  filter: "all" | "missing_in_search" | "only_in_search" | "broken_http";
+  filter:
+    | "all"
+    | "missing_in_search"
+    | "only_in_search"
+    | "broken_http"
+    | "yandex_excluded"
+    | "yandex_unknown";
   onFilterChange: (
-    f: "all" | "missing_in_search" | "only_in_search" | "broken_http",
+    f:
+      | "all"
+      | "missing_in_search"
+      | "only_in_search"
+      | "broken_http"
+      | "yandex_excluded"
+      | "yandex_unknown",
   ) => void;
 }) {
+  // Pre-count Yandex Webmaster verdicts so the filter chips show
+  // the magnitude of each problem.
+  const wmExcluded = urls.items.filter(
+    (it) => it.in_yandex_index === false,
+  ).length;
+  const wmUnknown = urls.items.filter(
+    (it) => it.in_yandex_index === null && it.in_sitemap,
+  ).length;
+
   const FILTERS: Array<{
     value: typeof filter;
     label: string;
@@ -530,9 +603,19 @@ function UrlSignalTable({
   }> = [
     { value: "all", label: "все", hint: "полный список" },
     {
+      value: "yandex_excluded",
+      label: `Yandex исключил (${wmExcluded})`,
+      hint: "Webmaster прямо говорит «эта страница не в индексе» — есть причина",
+    },
+    {
+      value: "yandex_unknown",
+      label: `статус не проверен (${wmUnknown})`,
+      hint: "Webmaster ещё не вернул статус — нажми «Webmaster: статус каждого URL»",
+    },
+    {
       value: "missing_in_search",
       label: `в sitemap, но не в Search API (${urls.only_in_sitemap})`,
-      hint: "наши страницы которые Яндекс не показал",
+      hint: "наши страницы которые Яндекс не показал в выдаче site:domain",
     },
     {
       value: "only_in_search",
@@ -588,6 +671,9 @@ function UrlSignalTable({
                   <th className="text-center px-2 py-2 font-normal w-16" title="В sitemap.xml">
                     sitemap
                   </th>
+                  <th className="text-center px-2 py-2 font-normal w-20" title="Webmaster: статус индексации этого URL">
+                    Yandex
+                  </th>
                   <th className="text-center px-2 py-2 font-normal w-16" title="В Search API site:domain">
                     search
                   </th>
@@ -612,6 +698,21 @@ function UrlSignalTable({
   );
 }
 
+// Yandex Webmaster removal-reason → owner-friendly Russian label.
+// Source: https://yandex.ru/dev/webmaster/doc/dg/reference/host-search-urls-excluded.html
+const YANDEX_REASON_RU: Record<string, string> = {
+  NOT_FOUND: "404 — страница не отвечает",
+  BAD_HTTP_STATUS: "HTTP-ошибка",
+  META_NO_INDEX: "noindex в meta",
+  ROBOTS_TXT_HOST: "запрещено в robots.txt",
+  NOT_CANONICAL: "не canonical (есть другая основная)",
+  EXCLUDED_FROM_SEARCH: "исключено правилом",
+  DUPLICATE_PAGE: "дубль другой страницы",
+  REDIRECT: "редирект",
+  ERROR: "ошибка обработки",
+  UNKNOWN: "причина не указана",
+};
+
 function UrlRow({
   row,
 }: {
@@ -625,11 +726,21 @@ function UrlRow({
     last_crawled_at: string | null;
     found_in_search_api: boolean;
     title: string | null;
+    in_yandex_index: boolean | null;
+    yandex_excluded_reason: string | null;
+    yandex_index_checked_at: string | null;
   };
 }) {
   const synthetic = !row.page_id;
+  const yandexExcluded = row.in_yandex_index === false;
   return (
-    <tr className={cn("border-b last:border-b-0", synthetic && "bg-amber-50/30")}>
+    <tr
+      className={cn(
+        "border-b last:border-b-0",
+        synthetic && "bg-amber-50/30",
+        yandexExcluded && "bg-rose-50/40",
+      )}
+    >
       <td className="px-4 py-2">
         <div className="flex flex-col min-w-0">
           {row.title && (
@@ -649,6 +760,13 @@ function UrlRow({
               Яндекс показал, но crawler не видит — добавь в sitemap или удали из индекса
             </span>
           )}
+          {yandexExcluded && row.yandex_excluded_reason && (
+            <span className="text-[10px] text-rose-700 mt-0.5">
+              Yandex исключил:{" "}
+              {YANDEX_REASON_RU[row.yandex_excluded_reason] ??
+                row.yandex_excluded_reason.toLowerCase()}
+            </span>
+          )}
         </div>
       </td>
       <td className="px-2 py-2 text-center">
@@ -656,6 +774,22 @@ function UrlRow({
           <CheckCircle2 className="h-4 w-4 text-emerald-600 inline" />
         ) : (
           <span className="text-muted-foreground/40">—</span>
+        )}
+      </td>
+      <td
+        className="px-2 py-2 text-center text-xs"
+        title={
+          row.yandex_index_checked_at
+            ? `Проверено ${new Date(row.yandex_index_checked_at).toLocaleString("ru-RU")}`
+            : "Webmaster ещё не проверял этот URL"
+        }
+      >
+        {row.in_yandex_index === true ? (
+          <CheckCircle2 className="h-4 w-4 text-emerald-600 inline" />
+        ) : row.in_yandex_index === false ? (
+          <span className="text-rose-700 font-medium">нет</span>
+        ) : (
+          <span className="text-muted-foreground/40">?</span>
         )}
       </td>
       <td className="px-2 py-2 text-center">

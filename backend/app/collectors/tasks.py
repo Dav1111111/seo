@@ -1568,3 +1568,154 @@ def diagnose_harmful_queries_site_task(
             return {"status": terminal, **stats}
 
     return _run_async(_run())
+
+
+@celery_app.task(name="webmaster_url_indexation_site", bind=True, max_retries=1)
+def webmaster_url_indexation_site_task(
+    self, site_id: str, run_id: str | None = None,
+):
+    """Studio v2 etap 1+2 deep — pull per-URL index status from
+    Yandex Webmaster and write back to Page rows.
+
+    Two endpoints:
+      /search-urls/in-search/samples  — URLs Yandex considers indexed
+      /search-urls/excluded/samples   — URLs excluded with reason
+
+    For each Page row we set:
+      in_yandex_index = True / False / None (none for unmatched stays None)
+      yandex_excluded_reason = removal-reason from API for excluded
+      yandex_index_checked_at = now
+
+    Pages absent from BOTH lists keep `in_yandex_index = None`
+    (Yandex sample endpoint caps at 5000 — for bigger sites the
+    sampling is partial, and we don't want to claim false-«not-indexed»).
+    """
+    from datetime import datetime, timezone
+    from app.collectors.webmaster import WebmasterCollector
+    from app.config import settings as _settings
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.models.page import Page
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "url_indexation", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": "Site not found"}
+
+            host_id = (
+                site.yandex_webmaster_host_id
+                or _settings.YANDEX_WEBMASTER_HOST_ID
+            )
+            oauth = site.yandex_oauth_token or _settings.YANDEX_OAUTH_TOKEN
+            user_id = _settings.YANDEX_WEBMASTER_USER_ID
+            if not host_id or not oauth or not user_id:
+                await emit_terminal(
+                    db, site_id, "url_indexation", "failed",
+                    "Webmaster не подключён (нет host_id / oauth / user_id). "
+                    "Проверь /studio/connections.",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": "Webmaster not configured"}
+
+            await log_event(
+                db, site_id, "url_indexation", "started",
+                "Тяну per-URL индексацию из Webmaster: список "
+                "проиндексированных + исключённых с причинами.",
+                run_id=run_id,
+            )
+
+            collector = WebmasterCollector(
+                oauth_token=oauth, user_id=user_id, host_id=host_id,
+            )
+            try:
+                indexed = await collector.fetch_indexed_urls()
+                excluded = await collector.fetch_excluded_urls()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "webmaster_url_indexation.fetch_failed err=%s", exc,
+                )
+                await emit_terminal(
+                    db, site_id, "url_indexation", "failed",
+                    f"Webmaster API ответил ошибкой: {str(exc)[:200]}.",
+                    run_id=run_id,
+                )
+                await collector.close()
+                return {"status": "failed", "error": str(exc)}
+            finally:
+                await collector.close()
+
+            # URL normalisation — Webmaster sometimes adds trailing
+            # slashes, sometimes not. Match on lowercased no-trailing-slash.
+            def _norm(u: str) -> str:
+                return (u or "").strip().rstrip("/").lower()
+
+            indexed_urls = {_norm(it.get("url", "")) for it in indexed if it.get("url")}
+            excluded_by_url: dict[str, str] = {}
+            for it in excluded:
+                u = _norm(it.get("url", ""))
+                if not u:
+                    continue
+                reason = (
+                    str(it.get("removal-reason") or "")
+                    .strip()
+                    .upper()[:40]
+                )
+                excluded_by_url[u] = reason or "UNKNOWN"
+
+            pages = (await db.execute(
+                select(Page).where(Page.site_id == site.id),
+            )).scalars().all()
+
+            now = datetime.now(timezone.utc)
+            n_indexed = 0
+            n_excluded = 0
+            n_unknown = 0
+
+            for p in pages:
+                key = _norm(p.url)
+                if key in indexed_urls:
+                    p.in_yandex_index = True
+                    p.yandex_excluded_reason = None
+                    n_indexed += 1
+                elif key in excluded_by_url:
+                    p.in_yandex_index = False
+                    p.yandex_excluded_reason = excluded_by_url[key]
+                    n_excluded += 1
+                else:
+                    # Don't claim «not indexed» if Yandex sample didn't
+                    # include this URL — could be sampling cap.
+                    p.in_yandex_index = None
+                    p.yandex_excluded_reason = None
+                    n_unknown += 1
+                p.yandex_index_checked_at = now
+
+            await db.commit()
+
+            stats = {
+                "yandex_indexed_total": len(indexed_urls),
+                "yandex_excluded_total": len(excluded_by_url),
+                "matched_indexed": n_indexed,
+                "matched_excluded": n_excluded,
+                "no_match": n_unknown,
+                "pages_total": len(pages),
+            }
+            message = (
+                f"Webmaster ответил: {len(indexed_urls)} URL в индексе, "
+                f"{len(excluded_by_url)} исключено. "
+                f"В нашей БД совпало: {n_indexed} индексировано, "
+                f"{n_excluded} исключено, {n_unknown} вне выборки Webmaster."
+            )
+            await emit_terminal(
+                db, site_id, "url_indexation", "done", message,
+                extra=stats, run_id=run_id,
+            )
+            return {"status": "done", **stats}
+
+    return _run_async(_run())

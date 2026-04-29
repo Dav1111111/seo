@@ -698,7 +698,9 @@ export const api = {
       | "all"
       | "missing_in_search"
       | "only_in_search"
-      | "broken_http" = "all",
+      | "broken_http"
+      | "yandex_excluded"
+      | "yandex_unknown" = "all",
     limit = 200,
   ) =>
     apiFetch<{
@@ -714,6 +716,9 @@ export const api = {
         last_crawled_at: string | null;
         found_in_search_api: boolean;
         title: string | null;
+        in_yandex_index: boolean | null;
+        yandex_excluded_reason: string | null;
+        yandex_index_checked_at: string | null;
       }>;
       only_in_sitemap: number;
       only_in_search: number;
@@ -721,6 +726,17 @@ export const api = {
     }>(
       `/studio/sites/${siteId}/indexation/urls?only=${only}&limit=${limit}`,
       { base: "admin" },
+    ),
+
+  studioTriggerUrlIndexationRefresh: (siteId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/indexation/refresh-urls`,
+      { method: "POST", base: "admin" },
     ),
 
   studioTriggerIndexationCheck: (siteId: string) =>

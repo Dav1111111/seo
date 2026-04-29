@@ -32,3 +32,11 @@ class Page(Base, TimestampMixin):
     images_count: Mapped[int | None] = mapped_column(Integer)
     has_schema: Mapped[bool] = mapped_column(Boolean, default=False)
     last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Studio v2 — per-URL Yandex index status from Webmaster API.
+    # NULL = unknown (never checked); True = indexed; False = excluded.
+    in_yandex_index: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    yandex_excluded_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    yandex_index_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )

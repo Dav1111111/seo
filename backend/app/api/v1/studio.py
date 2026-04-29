@@ -1038,6 +1038,10 @@ class UrlIndexationRow(BaseModel):
     last_crawled_at: datetime | None
     found_in_search_api: bool      # appeared in latest site:domain probe
     title: str | None
+    # Studio v2 — per-URL Yandex Webmaster status (None = unknown)
+    in_yandex_index: bool | None = None
+    yandex_excluded_reason: str | None = None
+    yandex_index_checked_at: datetime | None = None
 
 
 class UrlsResponse(BaseModel):
@@ -1064,7 +1068,7 @@ async def list_indexation_urls(
     limit: int = Query(URLS_DEFAULT_LIMIT, ge=1, le=URLS_MAX_LIMIT),
     only: str = Query(
         "all",
-        pattern="^(all|missing_in_search|only_in_search|broken_http)$",
+        pattern="^(all|missing_in_search|only_in_search|broken_http|yandex_excluded|yandex_unknown)$",
     ),
     db: AsyncSession = Depends(get_db),
 ) -> UrlsResponse:
@@ -1130,6 +1134,9 @@ async def list_indexation_urls(
             last_crawled_at=p.last_crawled_at,
             found_in_search_api=in_search,
             title=p.title,
+            in_yandex_index=p.in_yandex_index,
+            yandex_excluded_reason=p.yandex_excluded_reason,
+            yandex_index_checked_at=p.yandex_index_checked_at,
         ))
         if p.in_sitemap and not in_search:
             only_in_sitemap += 1
@@ -1168,6 +1175,13 @@ async def list_indexation_urls(
             it for it in items
             if it.http_status is not None and it.http_status >= 400
         ]
+    elif only == "yandex_excluded":
+        items = [it for it in items if it.in_yandex_index is False]
+    elif only == "yandex_unknown":
+        items = [
+            it for it in items
+            if it.in_yandex_index is None and it.in_sitemap
+        ]
 
     # Sort: search-api hits first (Yandex showed them today), then
     # by URL alphabetical for stability.
@@ -1181,6 +1195,42 @@ async def list_indexation_urls(
         only_in_search=only_in_search,
         fully_aligned=fully_aligned,
     )
+
+
+@router.post(
+    "/sites/{site_id}/indexation/refresh-urls",
+    response_model=TriggerResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_url_indexation_refresh(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TriggerResponse:
+    """Studio v2 etap 1+2 deep — pull per-URL index status from
+    Webmaster API. Updates Page.in_yandex_index +
+    Page.yandex_excluded_reason for every page on the site.
+
+    Different from /indexation/check (which probes Yandex Search API
+    `site:domain`): this hits Webmaster's authoritative per-URL list
+    so we can finally answer «is THIS page in the index, and if not,
+    why?» — closing the «7 vs 15» gap the owner noticed.
+    """
+    await _site_or_404(db, site_id)
+
+    recent = await _recent_started_event(db, site_id, "url_indexation")
+    if recent is not None:
+        return TriggerResponse(
+            status="deduped",
+            task_id=None,
+            run_id=str(recent.run_id) if recent.run_id else "",
+            deduped=True,
+        )
+
+    from app.collectors.tasks import webmaster_url_indexation_site_task
+
+    run_id = str(uuid.uuid4())
+    task = webmaster_url_indexation_site_task.delay(str(site_id), run_id=run_id)
+    return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
 
 
 @router.post(

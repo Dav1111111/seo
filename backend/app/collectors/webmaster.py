@@ -123,6 +123,62 @@ class WebmasterCollector(BaseCollector):
         data = await self.get(f"{self._host_prefix}/sitemaps/")
         return data.get("sitemaps", [])
 
+    # ── Per-URL index status (Studio v2 etap 1+2 deep) ─────────────────
+    #
+    # Two endpoints, both return paginated samples:
+    #
+    #   /search-urls/in-search/samples         indexed URLs
+    #   /search-urls/excluded/samples           excluded URLs (with reason)
+    #
+    # Each item has `url`, `last-access`, plus reason for excluded.
+    # Endpoint exposes max 100 per request — we paginate via offset.
+
+    async def fetch_indexed_urls(
+        self, *, max_pages: int = 50, page_size: int = 100,
+    ) -> list[dict]:
+        """All URLs Yandex considers indexed for this host.
+
+        Returns list of {"url": str, "last-access": str-iso}. Stops when
+        the API returns less than `page_size` (end of list) or after
+        `max_pages` to bound runtime on big sites (50 × 100 = 5000 URLs).
+        """
+        all_items: list[dict] = []
+        for offset in range(0, max_pages * page_size, page_size):
+            data = await self.get(
+                f"{self._host_prefix}/search-urls/in-search/samples",
+                params={"offset": str(offset), "limit": str(page_size)},
+            )
+            samples = data.get("samples") or []
+            if not samples:
+                break
+            all_items.extend(samples)
+            if len(samples) < page_size:
+                break
+        return all_items
+
+    async def fetch_excluded_urls(
+        self, *, max_pages: int = 50, page_size: int = 100,
+    ) -> list[dict]:
+        """All URLs Yandex excluded from index, with `removal-reason`.
+
+        Reason values verbatim from the API: NOT_FOUND, BAD_HTTP_STATUS,
+        META_NO_INDEX, ROBOTS_TXT_HOST, NOT_CANONICAL, EXCLUDED_FROM_SEARCH,
+        DUPLICATE_PAGE, etc.
+        """
+        all_items: list[dict] = []
+        for offset in range(0, max_pages * page_size, page_size):
+            data = await self.get(
+                f"{self._host_prefix}/search-urls/excluded/samples",
+                params={"offset": str(offset), "limit": str(page_size)},
+            )
+            samples = data.get("samples") or []
+            if not samples:
+                break
+            all_items.extend(samples)
+            if len(samples) < page_size:
+                break
+        return all_items
+
     # ── Persist to DB ──────────────────────────────────────────────────
 
     async def collect_and_store(
