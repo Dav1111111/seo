@@ -934,7 +934,26 @@ async def get_indexation_sources(
         select(sa_func.count()).where(Page.site_id == site.id),
     )).scalar_one()
 
-    # 3. Webmaster — latest daily_metrics row with metric_type='indexing'.
+    # 3. Webmaster — prefer the per-URL data from
+    # `webmaster_url_indexation_site_task` (count of Pages with
+    # `in_yandex_index=True`) when present. Fall back to the
+    # aggregated `metric_type='indexing'` daily_metrics row when
+    # the per-URL pull hasn't run yet. The per-URL signal is the
+    # owner's true answer to «how many pages are indexed», whereas
+    # the aggregated daily_metrics value is just a number from
+    # Yandex's history feed (often stale by 5-10 days).
+    wm_per_url_count = (await db.execute(
+        select(sa_func.count())
+        .where(
+            Page.site_id == site.id,
+            Page.in_yandex_index.is_(True),
+        ),
+    )).scalar_one()
+    wm_per_url_latest = (await db.execute(
+        select(sa_func.max(Page.yandex_index_checked_at))
+        .where(Page.site_id == site.id),
+    )).scalar_one_or_none()
+
     wm_row = (await db.execute(
         select(DailyMetric)
         .where(
@@ -989,18 +1008,26 @@ async def get_indexation_sources(
         },
         "webmaster": {
             "count": (
-                int(wm_row.pages_indexed or 0) if wm_row else None
+                int(wm_per_url_count)
+                if wm_per_url_latest is not None
+                else (int(wm_row.pages_indexed or 0) if wm_row else None)
             ),
             "last_updated_at": (
-                wm_row.date.isoformat() if wm_row else None
+                wm_per_url_latest.isoformat()
+                if wm_per_url_latest is not None
+                else (wm_row.date.isoformat() if wm_row else None)
             ),
             "status": (
-                "ok" if wm_row else "no_data"
+                "ok"
+                if wm_per_url_latest is not None or wm_row
+                else "no_data"
             ),
             "note": (
-                "Сколько страниц Яндекс держит в индексе по данным "
-                "Вебмастера. Лагает 5–10 дней. Если этот источник "
-                "пуст — проверь подключение Webmaster в /studio/connections."
+                "Сколько страниц Яндекс реально держит в индексе. "
+                "Источник: per-URL данные из Webmaster API (точные, без "
+                "лага), либо агрегированная история (лаг 5–10 дней) "
+                "если per-URL ещё не подтянули. Кнопка «Webmaster: статус "
+                "каждого URL» обновляет точные данные."
             ),
         },
         "search_api": {
