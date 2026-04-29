@@ -83,6 +83,10 @@ export default function StudioIndexationPage() {
   } | null>(null);
   const setSafeTimeout = useTimeoutSetter();
 
+  const [urlFilter, setUrlFilter] = useState<
+    "all" | "missing_in_search" | "only_in_search" | "broken_http"
+  >("all");
+
   const { data, isLoading, mutate } = useSWR(
     siteId ? studioKey("indexation", siteId) : null,
     () => api.studioGetIndexation(siteId),
@@ -92,6 +96,16 @@ export default function StudioIndexationPage() {
       refreshInterval: (latest) =>
         latest && (latest as { is_running: boolean }).is_running ? 4000 : 0,
     },
+  );
+
+  // Studio v2 etap 1+2 — 4-source reconciliation + URL table.
+  const { data: sources } = useSWR(
+    siteId ? studioKey("indexation_sources", siteId) : null,
+    () => api.studioGetIndexationSources(siteId),
+  );
+  const { data: urls } = useSWR(
+    siteId ? studioKey("indexation_urls", siteId, urlFilter) : null,
+    () => api.studioGetIndexationUrls(siteId, urlFilter, 200),
   );
 
   async function onCheck() {
@@ -205,6 +219,11 @@ export default function StudioIndexationPage() {
           <Info className="h-4 w-4 mt-0.5 flex-shrink-0" />
           <span>{banner.text}</span>
         </div>
+      )}
+
+      {/* 4-source reconciliation strip (Studio v2 etap 1+2) */}
+      {sources && (
+        <SourceReconciliation sources={sources.sources} />
       )}
 
       {/* Loading skeleton on first load */}
@@ -376,7 +395,294 @@ export default function StudioIndexationPage() {
             )}
           </>
         )}
+
+      {/* Per-URL signal table (Studio v2 etap 1+2) */}
+      {urls && (
+        <UrlSignalTable
+          urls={urls}
+          filter={urlFilter}
+          onFilterChange={setUrlFilter}
+        />
+      )}
     </div>
+  );
+}
+
+// ── 4-source reconciliation card ────────────────────────────────────
+
+function SourceReconciliation({
+  sources,
+}: {
+  sources: Record<
+    "sitemap" | "crawler" | "webmaster" | "search_api",
+    {
+      count: number | null;
+      last_updated_at: string | null;
+      status: string;
+      note: string;
+    }
+  >;
+}) {
+  const order: Array<keyof typeof sources> = [
+    "sitemap",
+    "crawler",
+    "webmaster",
+    "search_api",
+  ];
+  const SOURCE_LABEL: Record<string, string> = {
+    sitemap: "sitemap.xml",
+    crawler: "наш crawler",
+    webmaster: "Webmaster",
+    search_api: "Search API",
+  };
+
+  // Hint about cross-source disagreement.
+  const counts = order.map((k) => sources[k].count).filter(
+    (n): n is number => typeof n === "number",
+  );
+  let disagreement: string | null = null;
+  if (counts.length >= 2) {
+    const max = Math.max(...counts);
+    const min = Math.min(...counts);
+    if (max > 0 && (max - min) / max >= 0.3) {
+      disagreement = (
+        `Источники расходятся (${min}–${max}). Это нормально (у каждого свой ` +
+        "лаг и свой угол зрения), но если разница больше 50% — стоит разобраться."
+      );
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="pt-5 space-y-3">
+        <div className="flex items-baseline justify-between gap-3 flex-wrap">
+          <h2 className="font-medium">Сверка источников</h2>
+          <span className="text-xs text-muted-foreground">
+            каждый говорит своё число — сравниваем
+          </span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {order.map((key) => {
+            const src = sources[key];
+            return (
+              <div
+                key={key}
+                className="rounded-md border bg-card px-3 py-2"
+                title={src.note}
+              >
+                <div className="text-2xl font-semibold tabular-nums">
+                  {src.count == null ? "—" : src.count.toLocaleString("ru-RU")}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {SOURCE_LABEL[key as string]}
+                </div>
+                <div className="text-[10px] text-muted-foreground/70 mt-1">
+                  {src.status === "no_data" || src.status === "never_checked"
+                    ? "нет данных"
+                    : src.last_updated_at
+                      ? new Date(src.last_updated_at).toLocaleDateString("ru-RU")
+                      : "—"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {disagreement && (
+          <div className="rounded-md border border-amber-200 bg-amber-50/50 px-3 py-2 text-xs text-amber-900">
+            {disagreement}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Per-URL signal table ────────────────────────────────────────────
+
+function UrlSignalTable({
+  urls,
+  filter,
+  onFilterChange,
+}: {
+  urls: {
+    total: number;
+    items: Array<{
+      page_id: string;
+      url: string;
+      path: string;
+      in_sitemap: boolean;
+      in_index: boolean;
+      http_status: number | null;
+      last_crawled_at: string | null;
+      found_in_search_api: boolean;
+      title: string | null;
+    }>;
+    only_in_sitemap: number;
+    only_in_search: number;
+    fully_aligned: number;
+  };
+  filter: "all" | "missing_in_search" | "only_in_search" | "broken_http";
+  onFilterChange: (
+    f: "all" | "missing_in_search" | "only_in_search" | "broken_http",
+  ) => void;
+}) {
+  const FILTERS: Array<{
+    value: typeof filter;
+    label: string;
+    hint: string;
+  }> = [
+    { value: "all", label: "все", hint: "полный список" },
+    {
+      value: "missing_in_search",
+      label: `в sitemap, но не в Search API (${urls.only_in_sitemap})`,
+      hint: "наши страницы которые Яндекс не показал",
+    },
+    {
+      value: "only_in_search",
+      label: `только в Search API (${urls.only_in_search})`,
+      hint: "Яндекс показал URL, которых у нас в crawler нет",
+    },
+    {
+      value: "broken_http",
+      label: "битые (HTTP ≥ 400)",
+      hint: "страницы которые отвечают ошибкой",
+    },
+  ];
+
+  return (
+    <Card>
+      <CardContent className="pt-5 space-y-3">
+        <div className="flex items-baseline justify-between gap-3 flex-wrap">
+          <h2 className="font-medium">Все страницы по сигналам</h2>
+          <span className="text-xs text-muted-foreground">
+            показано {urls.items.length} из {urls.total}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1 flex-wrap text-sm">
+          <span className="text-muted-foreground mr-1">Фильтр:</span>
+          {FILTERS.map((f) => (
+            <button
+              key={f.value}
+              onClick={() => onFilterChange(f.value)}
+              title={f.hint}
+              className={cn(
+                "rounded-md px-3 py-1 text-xs transition-colors",
+                filter === f.value
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground border",
+              )}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+
+        {urls.items.length === 0 ? (
+          <div className="text-sm text-muted-foreground italic">
+            По выбранному фильтру ничего нет.
+          </div>
+        ) : (
+          <div className="overflow-x-auto -mx-4">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground border-y">
+                <tr>
+                  <th className="text-left px-4 py-2 font-normal">URL</th>
+                  <th className="text-center px-2 py-2 font-normal w-16" title="В sitemap.xml">
+                    sitemap
+                  </th>
+                  <th className="text-center px-2 py-2 font-normal w-16" title="В Search API site:domain">
+                    search
+                  </th>
+                  <th className="text-center px-2 py-2 font-normal w-16" title="HTTP-статус">
+                    HTTP
+                  </th>
+                  <th className="text-right px-4 py-2 font-normal w-24">
+                    crawl
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {urls.items.slice(0, 100).map((it) => (
+                  <UrlRow key={it.page_id || it.url} row={it} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function UrlRow({
+  row,
+}: {
+  row: {
+    page_id: string;
+    url: string;
+    path: string;
+    in_sitemap: boolean;
+    in_index: boolean;
+    http_status: number | null;
+    last_crawled_at: string | null;
+    found_in_search_api: boolean;
+    title: string | null;
+  };
+}) {
+  const synthetic = !row.page_id;
+  return (
+    <tr className={cn("border-b last:border-b-0", synthetic && "bg-amber-50/30")}>
+      <td className="px-4 py-2">
+        <div className="flex flex-col min-w-0">
+          {row.title && (
+            <span className="font-medium truncate">{row.title}</span>
+          )}
+          <a
+            href={row.url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-muted-foreground hover:text-foreground truncate inline-flex items-center gap-1"
+          >
+            {row.path || row.url}
+            <ExternalLink className="h-3 w-3 flex-shrink-0" />
+          </a>
+          {synthetic && (
+            <span className="text-[10px] text-amber-700 mt-0.5">
+              Яндекс показал, но crawler не видит — добавь в sitemap или удали из индекса
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="px-2 py-2 text-center">
+        {row.in_sitemap ? (
+          <CheckCircle2 className="h-4 w-4 text-emerald-600 inline" />
+        ) : (
+          <span className="text-muted-foreground/40">—</span>
+        )}
+      </td>
+      <td className="px-2 py-2 text-center">
+        {row.found_in_search_api ? (
+          <CheckCircle2 className="h-4 w-4 text-emerald-600 inline" />
+        ) : (
+          <span className="text-muted-foreground/40">—</span>
+        )}
+      </td>
+      <td className="px-2 py-2 text-center text-xs tabular-nums">
+        {row.http_status == null ? (
+          <span className="text-muted-foreground/40">—</span>
+        ) : row.http_status >= 400 ? (
+          <span className="text-rose-700 font-medium">{row.http_status}</span>
+        ) : (
+          <span className="text-muted-foreground">{row.http_status}</span>
+        )}
+      </td>
+      <td className="px-4 py-2 text-right text-xs text-muted-foreground tabular-nums">
+        {row.last_crawled_at
+          ? new Date(row.last_crawled_at).toLocaleDateString("ru-RU")
+          : "—"}
+      </td>
+    </tr>
   );
 }
 

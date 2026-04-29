@@ -646,6 +646,53 @@ export const api = {
       error: string | null;
     }>(`/studio/sites/${siteId}/indexation`, { base: "admin" }),
 
+  // Studio v2 etap 1+2 — 4-source reconciliation.
+  studioGetIndexationSources: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      domain: string;
+      sources: Record<
+        "sitemap" | "crawler" | "webmaster" | "search_api",
+        {
+          count: number | null;
+          last_updated_at: string | null;
+          status: string;
+          note: string;
+        }
+      >;
+    }>(`/studio/sites/${siteId}/indexation/sources`, { base: "admin" }),
+
+  studioGetIndexationUrls: (
+    siteId: string,
+    only:
+      | "all"
+      | "missing_in_search"
+      | "only_in_search"
+      | "broken_http" = "all",
+    limit = 200,
+  ) =>
+    apiFetch<{
+      site_id: string;
+      total: number;
+      items: Array<{
+        page_id: string;
+        url: string;
+        path: string;
+        in_sitemap: boolean;
+        in_index: boolean;
+        http_status: number | null;
+        last_crawled_at: string | null;
+        found_in_search_api: boolean;
+        title: string | null;
+      }>;
+      only_in_sitemap: number;
+      only_in_search: number;
+      fully_aligned: number;
+    }>(
+      `/studio/sites/${siteId}/indexation/urls?only=${only}&limit=${limit}`,
+      { base: "admin" },
+    ),
+
   studioTriggerIndexationCheck: (siteId: string) =>
     apiFetch<{
       status: "queued" | "deduped";

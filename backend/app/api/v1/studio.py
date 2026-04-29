@@ -825,6 +825,318 @@ async def get_indexation(
     )
 
 
+# ── Indexation: 4-source reconciliation (Studio v2 etap 1+2) ─────────
+#
+# `/studio/indexation` already shows the Search API result. That's
+# one source of truth out of four:
+#
+#   1. sitemap.xml          — what we declare exists
+#   2. crawler              — what our SiteCrawler actually saw
+#   3. Webmaster API        — what Yandex says is indexed
+#   4. Yandex Search API    — what `site:domain` returns right now
+#
+# When these four diverge — and they often do — the owner needs to
+# see WHO disagrees with WHOM, not just one number. This endpoint
+# returns all four side-by-side so the UI can render a comparison.
+
+
+class IndexationSourcesResponse(BaseModel):
+    site_id: str
+    domain: str
+    sources: dict[str, dict[str, Any]]
+    # {source_name: {count, last_updated_at, status, note}}
+    # source_name in: sitemap, crawler, webmaster, search_api
+
+
+@router.get(
+    "/sites/{site_id}/indexation/sources",
+    response_model=IndexationSourcesResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_indexation_sources(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> IndexationSourcesResponse:
+    """Cross-source indexation reconciliation.
+
+    Returns the four numbers that should agree (and usually don't):
+    sitemap-declared, crawler-discovered, Webmaster-indexed, Search-API
+    site:domain. UI renders them side-by-side so the owner sees which
+    source disagrees with which.
+
+    Read-only — no probes triggered. The Webmaster + Search API
+    numbers come from data already collected by their respective
+    Celery tasks. If those haven't run, the source returns null with
+    a status hint.
+    """
+    site = await _site_or_404(db, site_id)
+
+    # 1. Sitemap — count of Page rows where in_sitemap=True.
+    sitemap_count = (await db.execute(
+        select(sa_func.count())
+        .where(Page.site_id == site.id, Page.in_sitemap.is_(True)),
+    )).scalar_one()
+
+    # Crawler «when last» — max(last_crawled_at) on Page rows.
+    last_crawl_at = (await db.execute(
+        select(sa_func.max(Page.last_crawled_at))
+        .where(Page.site_id == site.id),
+    )).scalar_one_or_none()
+
+    # 2. Crawler — total Page rows for site.
+    crawler_count = (await db.execute(
+        select(sa_func.count()).where(Page.site_id == site.id),
+    )).scalar_one()
+
+    # 3. Webmaster — latest daily_metrics row with metric_type='indexing'.
+    wm_row = (await db.execute(
+        select(DailyMetric)
+        .where(
+            DailyMetric.site_id == site.id,
+            DailyMetric.metric_type == "indexing",
+        )
+        .order_by(desc(DailyMetric.date))
+        .limit(1),
+    )).scalar_one_or_none()
+
+    # 4. Search API — latest analysis_events row with stage='indexation'
+    #    that has a terminal status (not 'started').
+    search_event = (await db.execute(
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == site.id,
+            AnalysisEvent.stage == "indexation",
+            AnalysisEvent.status.in_(("done", "skipped", "failed")),
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(1),
+    )).scalar_one_or_none()
+    search_count: int | None = None
+    if search_event and isinstance(search_event.extra, dict):
+        raw = search_event.extra.get("pages_found")
+        if isinstance(raw, int):
+            search_count = raw
+
+    sources: dict[str, dict[str, Any]] = {
+        "sitemap": {
+            "count": int(sitemap_count or 0),
+            "last_updated_at": (
+                last_crawl_at.isoformat() if last_crawl_at else None
+            ),
+            "status": "ok" if sitemap_count else "empty",
+            "note": (
+                "Страницы где `in_sitemap=true` после последнего обхода. "
+                "Источник: краулер парсит sitemap.xml при обходе."
+            ),
+        },
+        "crawler": {
+            "count": int(crawler_count or 0),
+            "last_updated_at": (
+                last_crawl_at.isoformat() if last_crawl_at else None
+            ),
+            "status": "ok" if crawler_count else "never_crawled",
+            "note": (
+                "Страницы которые наш SiteCrawler реально загрузил. "
+                "Если меньше чем sitemap — у нас ошибки HTTP, если больше — "
+                "сайт публикует страницы вне sitemap."
+            ),
+        },
+        "webmaster": {
+            "count": (
+                int(wm_row.pages_indexed or 0) if wm_row else None
+            ),
+            "last_updated_at": (
+                wm_row.date.isoformat() if wm_row else None
+            ),
+            "status": (
+                "ok" if wm_row else "no_data"
+            ),
+            "note": (
+                "Сколько страниц Яндекс держит в индексе по данным "
+                "Вебмастера. Лагает 5–10 дней. Если этот источник "
+                "пуст — проверь подключение Webmaster в /studio/connections."
+            ),
+        },
+        "search_api": {
+            "count": search_count,
+            "last_updated_at": (
+                search_event.ts.isoformat() if search_event else None
+            ),
+            "status": (
+                search_event.status if search_event else "never_checked"
+            ),
+            "note": (
+                "Что Яндекс показывает по запросу site:domain прямо сейчас. "
+                "Кнопка «Перепроверить» сверху обновляет это число."
+            ),
+        },
+    }
+
+    return IndexationSourcesResponse(
+        site_id=str(site_id),
+        domain=site.domain,
+        sources=sources,
+    )
+
+
+# ── Per-URL indexation table ─────────────────────────────────────────
+
+
+class UrlIndexationRow(BaseModel):
+    page_id: str
+    url: str
+    path: str
+    in_sitemap: bool
+    in_index: bool                 # crawler-declared
+    http_status: int | None
+    last_crawled_at: datetime | None
+    found_in_search_api: bool      # appeared in latest site:domain probe
+    title: str | None
+
+
+class UrlsResponse(BaseModel):
+    site_id: str
+    total: int
+    items: list[UrlIndexationRow]
+    # Slim summary for the UI banner:
+    only_in_sitemap: int           # in_sitemap=True, NOT in latest search-api
+    only_in_search: int            # in latest search-api, NOT in our Page table
+    fully_aligned: int             # everywhere
+
+
+URLS_DEFAULT_LIMIT = 200
+URLS_MAX_LIMIT = 1000
+
+
+@router.get(
+    "/sites/{site_id}/indexation/urls",
+    response_model=UrlsResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def list_indexation_urls(
+    site_id: uuid.UUID,
+    limit: int = Query(URLS_DEFAULT_LIMIT, ge=1, le=URLS_MAX_LIMIT),
+    only: str = Query(
+        "all",
+        pattern="^(all|missing_in_search|only_in_search|broken_http)$",
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> UrlsResponse:
+    """Per-URL signals for the «развёрнутая таблица» on /studio/indexation.
+
+    Joins Page rows with the latest Search API probe so each URL has a
+    `found_in_search_api` flag. Filter modes:
+
+      all                — full list
+      missing_in_search  — in our Page table but Search API didn't show it
+      only_in_search     — Search API showed a URL we don't have crawled
+      broken_http        — http_status >= 400
+
+    Page-level data is the trustworthy source for «what exists on the
+    site» — Search API is best-effort by Yandex. The mismatch is
+    interesting either way.
+    """
+    site = await _site_or_404(db, site_id)
+
+    # Latest indexation event with a `pages` array (URL list).
+    search_event = (await db.execute(
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == site.id,
+            AnalysisEvent.stage == "indexation",
+            AnalysisEvent.status == "done",
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(1),
+    )).scalar_one_or_none()
+
+    search_urls: set[str] = set()
+    if search_event and isinstance(search_event.extra, dict):
+        raw_pages = search_event.extra.get("pages") or []
+        for p in raw_pages:
+            if isinstance(p, dict):
+                u = p.get("url") or ""
+                if isinstance(u, str) and u:
+                    search_urls.add(u.strip())
+
+    # All Page rows for the site.
+    pages = (await db.execute(
+        select(Page).where(Page.site_id == site.id),
+    )).scalars().all()
+
+    page_urls = {(p.url or "").strip() for p in pages if p.url}
+
+    items: list[UrlIndexationRow] = []
+    only_in_sitemap = 0
+    only_in_search = 0
+    fully_aligned = 0
+
+    for p in pages:
+        url = (p.url or "").strip()
+        in_search = url in search_urls if url else False
+        items.append(UrlIndexationRow(
+            page_id=str(p.id),
+            url=p.url,
+            path=p.path,
+            in_sitemap=bool(p.in_sitemap),
+            in_index=bool(p.in_index),
+            http_status=p.http_status,
+            last_crawled_at=p.last_crawled_at,
+            found_in_search_api=in_search,
+            title=p.title,
+        ))
+        if p.in_sitemap and not in_search:
+            only_in_sitemap += 1
+        if in_search and p.in_sitemap:
+            fully_aligned += 1
+
+    # «only_in_search» — search-api showed URLs we don't have on Page.
+    # Surface those as synthetic rows at the top of the list (no
+    # page_id — owner sees Yandex knows about them but we don't).
+    extra_search_urls = [u for u in search_urls if u not in page_urls]
+    for u in extra_search_urls:
+        only_in_search += 1
+        items.append(UrlIndexationRow(
+            page_id="",  # synthetic — no Page row
+            url=u,
+            path="",
+            in_sitemap=False,
+            in_index=False,
+            http_status=None,
+            last_crawled_at=None,
+            found_in_search_api=True,
+            title=None,
+        ))
+
+    # Filtering happens after the merge so synthetic «only_in_search»
+    # rows participate.
+    if only == "missing_in_search":
+        items = [
+            it for it in items
+            if it.in_sitemap and not it.found_in_search_api
+        ]
+    elif only == "only_in_search":
+        items = [it for it in items if it.found_in_search_api and not it.in_sitemap]
+    elif only == "broken_http":
+        items = [
+            it for it in items
+            if it.http_status is not None and it.http_status >= 400
+        ]
+
+    # Sort: search-api hits first (Yandex showed them today), then
+    # by URL alphabetical for stability.
+    items.sort(key=lambda it: (not it.found_in_search_api, it.url.lower()))
+
+    return UrlsResponse(
+        site_id=str(site_id),
+        total=len(items),
+        items=items[:limit],
+        only_in_sitemap=only_in_sitemap,
+        only_in_search=only_in_search,
+        fully_aligned=fully_aligned,
+    )
+
+
 @router.post(
     "/sites/{site_id}/indexation/check",
     response_model=TriggerResponse,
