@@ -1274,3 +1274,251 @@ def classify_queries_site_task(self, site_id: str, run_id: str | None = None):
             return {"status": terminal, **stats}
 
     return _run_async(_run())
+
+
+@celery_app.task(name="diagnose_harmful_queries_site", bind=True, max_retries=1)
+def diagnose_harmful_queries_site_task(
+    self, site_id: str, run_id: str | None = None,
+):
+    """Studio v2 etap 5+ — diagnose WHY each harmful query ranks
+    and recommend page edits.
+
+    Pipeline per site:
+      1. Pull queries WHERE relevance ∈ (spam, disputed) AND we have
+         a position ≤ 30 (the filter that powers /queries/harmful).
+      2. For each, probe Yandex SERP for the query → find OUR URL in
+         top results. Cache in JSONB on the row.
+      3. Look up the matched URL in `pages` to get the actual content
+         that ranks.
+      4. Call Haiku with profile + query + page content → structured
+         cause + concrete edits.
+      5. Persist on SearchQuery.harmful_diagnosis (overwrite — content
+         may have changed since last diagnosis).
+
+    Skips queries where `harmful_diagnosis` is already set so re-runs
+    are cheap. Resetting requires the override path (UI button can
+    «перезапросить диагноз», not yet implemented).
+    """
+    import anyio
+    from datetime import datetime, timezone
+
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.core_audit.harmful_diagnoser import (
+        SERP_DEPTH,
+        diagnose_one,
+        find_matched_url,
+    )
+    from app.models.daily_metric import DailyMetric
+    from app.models.page import Page
+    from app.models.search_query import SearchQuery
+
+    HARMFUL_POSITION_THRESHOLD = 30
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "harmful_diagnose", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": "Site not found"}
+
+            cfg = site.target_config or {}
+            primary = (cfg.get("primary_product") or "").strip()
+            geo = [
+                str(g).strip()
+                for g in (cfg.get("geo_primary") or [])
+                if g and str(g).strip()
+            ]
+            narrative = str(cfg.get("narrative_ru") or "").strip()
+
+            # Find harmful candidates: spam/disputed AND we have a recent position.
+            metrics_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date()
+            metric_rows = (await db.execute(
+                select(DailyMetric)
+                .where(
+                    DailyMetric.site_id == site.id,
+                    DailyMetric.metric_type == "query_performance",
+                    DailyMetric.date >= metrics_cutoff,
+                )
+                .order_by(desc(DailyMetric.date))
+                .limit(50000)
+            )).scalars().all()
+            latest_pos_by_qid: dict[UUID, float] = {}
+            for m in metric_rows:
+                if m.dimension_id is None:
+                    continue
+                if m.dimension_id not in latest_pos_by_qid:
+                    if m.avg_position is not None:
+                        latest_pos_by_qid[m.dimension_id] = float(m.avg_position)
+
+            queries = (await db.execute(
+                select(SearchQuery).where(
+                    SearchQuery.site_id == site.id,
+                    SearchQuery.relevance.in_(("spam", "disputed")),
+                )
+            )).scalars().all()
+
+            candidates = [
+                q for q in queries
+                if (
+                    latest_pos_by_qid.get(q.id) is not None
+                    and latest_pos_by_qid[q.id] <= HARMFUL_POSITION_THRESHOLD
+                    and q.harmful_diagnosis is None
+                )
+            ]
+
+            if not candidates:
+                await emit_terminal(
+                    db, site_id, "harmful_diagnose", "skipped",
+                    (
+                        "Нет вредных запросов без диагноза. "
+                        "Все уже разобраны или классификатор не нашёл "
+                        "проблемных запросов."
+                    ),
+                    extra={"reason": "nothing_to_diagnose"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "nothing_to_diagnose"}
+
+            await log_event(
+                db, site_id, "harmful_diagnose", "started",
+                f"Разбираю {len(candidates)} вредных "
+                f"{'запрос' if len(candidates) == 1 else 'запросов'}: "
+                f"для каждого SERP → находим нашу страницу → LLM "
+                f"объясняет причину и даёт правки. ~10 сек на запрос.",
+                extra={"total": len(candidates)},
+                run_id=run_id,
+            )
+
+            diagnosed = 0
+            no_match = 0
+            no_page_content = 0
+            llm_cost = 0.0
+
+            for q in candidates:
+                matched = await anyio.to_thread.run_sync(
+                    find_matched_url, q.query_text, site.domain,
+                )
+                if matched is None:
+                    no_match += 1
+                    q.harmful_diagnosis = {
+                        "matched_url": None,
+                        "matched_position": None,
+                        "cause_ru": (
+                            "Не удалось найти страницу через Search API — "
+                            "позиция могла измениться или Yandex не показал "
+                            "наш домен в момент запроса. Попробуй позже или "
+                            "проверь руками."
+                        ),
+                        "fixes": {},
+                        "model": None,
+                        "diagnosed_at": datetime.now(timezone.utc).isoformat(),
+                        "skipped": "no_match",
+                    }
+                    q.harmful_diagnosed_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    continue
+
+                # Look up the URL in our Page table.
+                page = (await db.execute(
+                    select(Page).where(
+                        Page.site_id == site.id,
+                        Page.url == matched.url,
+                    )
+                )).scalar_one_or_none()
+
+                if page is None:
+                    no_page_content += 1
+                    q.harmful_diagnosis = {
+                        "matched_url": matched.url,
+                        "matched_position": matched.position,
+                        "cause_ru": (
+                            f"Yandex показывает URL {matched.url} в выдаче "
+                            f"по этому запросу, но в нашей базе сайта этой "
+                            f"страницы нет — crawler её не видел. Это "
+                            f"частая причина «вредной видимости»: страница "
+                            f"существует, мы её не индексируем сами, "
+                            f"контент мог быть устаревшим. Снэпет Яндекса: "
+                            f"«{matched.headline[:200]}»."
+                        ),
+                        "fixes": {
+                            "content_change_ru": (
+                                "Сначала запусти crawl чтобы получить "
+                                "содержимое страницы. Затем перезапусти "
+                                "диагностику."
+                            ),
+                        },
+                        "model": None,
+                        "diagnosed_at": datetime.now(timezone.utc).isoformat(),
+                        "skipped": "no_page_in_db",
+                    }
+                    q.harmful_diagnosed_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    continue
+
+                # Full LLM diagnosis.
+                try:
+                    diag = await anyio.to_thread.run_sync(
+                        lambda: diagnose_one(
+                            query=q.query_text,
+                            relevance=q.relevance,
+                            relevance_reason=q.relevance_reason_ru,
+                            business_narrative=narrative,
+                            business_primary=primary,
+                            business_geo=geo,
+                            matched=matched,
+                            page_title=page.title,
+                            page_h1=page.h1,
+                            page_meta=page.meta_description,
+                            page_content=page.content_text,
+                        )
+                    )
+                    llm_cost += float(diag.get("cost_usd") or 0.0)
+                    q.harmful_diagnosis = diag
+                    q.harmful_diagnosed_at = datetime.now(timezone.utc)
+                    diagnosed += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "harmful_diagnose.llm_failed query=%r err=%s",
+                        q.query_text, exc,
+                    )
+
+                await db.commit()
+
+            stats = {
+                "total_candidates": len(candidates),
+                "diagnosed": diagnosed,
+                "no_match_in_serp": no_match,
+                "no_page_in_db": no_page_content,
+                "llm_cost_usd": round(llm_cost, 5),
+            }
+
+            if diagnosed == 0:
+                message = (
+                    f"Ничего не получилось разобрать: "
+                    f"{no_match} запросов без матча в SERP, "
+                    f"{no_page_content} URL не в нашем crawler. "
+                    f"Запусти crawl и перепроверку индексации, потом перезапусти."
+                )
+                terminal = "failed"
+            else:
+                message = (
+                    f"Разобрано {diagnosed} вредных {'запрос' if diagnosed == 1 else 'запросов'}: "
+                    f"причина + правки на странице. "
+                    f"Стоимость LLM: ${llm_cost:.4f}. "
+                    f"Открой /studio/queries/harmful чтобы увидеть детали."
+                )
+                terminal = "done"
+
+            await emit_terminal(
+                db, site_id, "harmful_diagnose", terminal, message,
+                extra=stats, run_id=run_id,
+            )
+            return {"status": terminal, **stats}
+
+    return _run_async(_run())

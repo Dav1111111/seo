@@ -586,8 +586,38 @@ export const api = {
         last_impressions_14d: number | null;
         wordstat_volume: number | null;
         suggested_action_ru: string;
+        // Day 6: detailed LLM diagnosis (matched URL + cause + fixes).
+        harmful_diagnosis: {
+          matched_url: string | null;
+          matched_position: number | null;
+          cause_ru: string;
+          fixes: {
+            title_change?: string | null;
+            h1_change?: string | null;
+            meta_description_change?: string | null;
+            content_change_ru?: string | null;
+            schema_recommendation?: string | null;
+            noindex_recommended?: boolean;
+          };
+          model: string | null;
+          diagnosed_at: string;
+          skipped?: "no_match" | "no_page_in_db";
+        } | null;
+        harmful_diagnosed_at: string | null;
       }>;
     }>(`/studio/sites/${siteId}/queries/harmful`, { base: "admin" }),
+
+  // Day 6: trigger LLM diagnosis on all undiagnosed harmful queries.
+  studioTriggerHarmfulDiagnose: (siteId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/queries/harmful/diagnose`,
+      { method: "POST", base: "admin" },
+    ),
 
   studioDiscoverQueries: (siteId: string) =>
     apiFetch<{

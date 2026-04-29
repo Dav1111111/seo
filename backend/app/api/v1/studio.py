@@ -414,6 +414,10 @@ class HarmfulQueryItem(BaseModel):
     last_impressions_14d: int | None
     wordstat_volume: int | None
     suggested_action_ru: str
+    # Studio v2 etap 5+: detailed LLM diagnosis. Null until owner
+    # runs «Разобрать причины» — that triggers the Celery task.
+    harmful_diagnosis: dict | None = None
+    harmful_diagnosed_at: datetime | None = None
 
 
 class HarmfulVisibilityResponse(BaseModel):
@@ -543,6 +547,8 @@ async def list_harmful_visibility(
             last_impressions_14d=impressions_14d_by_qid.get(q.id),
             wordstat_volume=q.wordstat_volume,
             suggested_action_ru=_suggested_action(q.relevance, position),
+            harmful_diagnosis=q.harmful_diagnosis,
+            harmful_diagnosed_at=q.harmful_diagnosed_at,
         ))
 
     counts["total"] = counts["spam"] + counts["disputed"]
@@ -551,6 +557,42 @@ async def list_harmful_visibility(
         counts=counts,
         items=items,
     )
+
+
+@router.post(
+    "/sites/{site_id}/queries/harmful/diagnose",
+    response_model=TriggerResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_harmful_diagnose(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TriggerResponse:
+    """Studio v2 etap 5+ — for each spam/disputed query in top-30,
+    find OUR ranking page (Yandex SERP probe) → load its content
+    from `pages` → ask LLM for cause + concrete edits. Persist on
+    SearchQuery.harmful_diagnosis.
+
+    Idempotent: rows with diagnosis already cached are skipped. To
+    re-diagnose after page edits, the diagnosis JSONB needs to be
+    cleared (manual SQL or future re-trigger button).
+    """
+    await _site_or_404(db, site_id)
+
+    recent = await _recent_started_event(db, site_id, "harmful_diagnose")
+    if recent is not None:
+        return TriggerResponse(
+            status="deduped",
+            task_id=None,
+            run_id=str(recent.run_id) if recent.run_id else "",
+            deduped=True,
+        )
+
+    from app.collectors.tasks import diagnose_harmful_queries_site_task
+
+    run_id = str(uuid.uuid4())
+    task = diagnose_harmful_queries_site_task.delay(str(site_id), run_id=run_id)
+    return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
 
 
 class RelevanceOverrideBody(BaseModel):

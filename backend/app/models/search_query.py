@@ -33,3 +33,10 @@ class SearchQuery(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True,
     )
     relevance_reason_ru: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Studio v2 — harmful query diagnosis (LLM cause + fix recommendations).
+    # JSONB shape documented in alembic d5e6f7a8b9c0.
+    harmful_diagnosis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    harmful_diagnosed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
