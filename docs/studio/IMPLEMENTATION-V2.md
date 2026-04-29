@@ -84,13 +84,15 @@ Studio v2 — следующий слой: **умный анализ, котор
 
 ### Этап 6 · Missing landing pages
 
-- [ ] **Light-режим (LLM-сравнение).** Промпт: вот `business_truth.directions[]`, вот список URL сайта. Найди коммерческие сущности которые упоминаются как услуги, но не имеют отдельной страницы. Хранить в `growth_opportunities` с `category="missing_landing"`.
-- [ ] **Heavy-режим (Playwright crawler).** Если light-режим даёт мусор — добавить headless-браузер, ловить попапы по DOM-сигналам (`role="dialog"`, `data-modal`, классы `popup-`). **Не делаем сразу** — только если light не работает.
-- [ ] **Frontend.** Карточки в `/studio/competitors` секция «Что делать» уже отображает `growth_opportunities` — новая категория туда же.
+- [x] **Light-режим (LLM-сравнение).** `core_audit/missing_landings.py` строит business_signal из `understanding.narrative_ru` + `observed_facts` + `target_config`, отдаёт LLM (tool_use, JSON-schema) вместе со списком реальных URL. Хранится в **отдельном** slot `target_config.missing_landings` — НЕ перетирает competitor `growth_opportunities`.
+- [x] **Anti-hallucination фильтр.** Каждый `evidence_quote` проверяется на substring-вхождение в business_signal (нормализация: lowercase + NFKC + удаление пунктуации). Если цитата фабрикация — item отбрасывается. Это главная гарантия модуля.
+- [x] **Celery task** `missing_landings_scan_task` + activity events `stage="missing_landings"`. Идемпотентность через `_recent_started_event` (60s).
+- [x] **Endpoints** `POST /admin/studio/sites/{id}/missing-landings/scan` + `GET .../missing-landings`.
+- [x] **Frontend.** Новая секция «Услуги без посадочных страниц» в `/studio/competitors`, рядом с «Что делать». Три явных состояния: never run / clean / has gaps. Карточки показывают цитату из narrative (доказательство, что система не выдумала), suggested_url_path и closest_existing_url.
+- [x] **Тесты:** 12 unit-тестов на business_signal, evidence-substring gate, full-run с мок-LLM (kept vs dropped, total fabrication, item cap).
+- [ ] **Heavy-режим (Playwright crawler).** Не нужен — light-режим на grandtourspirit нашёл 5 валидных пропусков (Крым, яхты, вертолёты, Каньоны Красной Поляны, гастрономия), 3 выдумки отброшены фильтром. Остаётся в backlog на случай если на другом сайте light не сработает.
 
-**Оценка: 1-2 дня (light-режим). Heavy-режим: +3-4 дня если понадобится.**
-
-**Стоимость LLM:** ~10 центов на сайт.
+**Сделано ✅** 2026-04-29. Live-test grandtourspirit: 22 страницы, 32 секунды, $0.06, 5 accepted / 3 rejected.
 
 ---
 
@@ -229,3 +231,5 @@ Studio v2 — следующий слой: **умный анализ, котор
 | 2026-04-28 | Этап 4 День 3 — LLM классификатор + Celery + endpoint | 29ad401 | `app/core_audit/relevance_llm.py` (Haiku via tool_use, structured output). `classify_queries_site_task` в `app/collectors/tasks.py` — rules first, LLM batches of 30, never overwrites set_by='user'. Endpoint `POST .../queries/classify`. Live-test: 45 запросов на grandtourspirit за 33 сек, $0.048, 0 failures. Распределение: 8 own / 6 adjacent / 9 disputed / 22 spam |
 | 2026-04-28 | Этап 4 День 4 — UI релевантности | 5ab44cc | `QueryRow` + `relevance_counts` в ответе list_queries. PATCH `/queries/{qid}/relevance` для override. Frontend: бейджи per-row, фильтр-чипы, кнопка «Классифицировать», popover override, 👤 marker для user-set, spam с line-through |
 | 2026-04-28 | Этап 5 — вредная видимость | (commit pending) | endpoint `GET .../queries/harmful` (top-30 cut, severity-aware suggested_action_ru), страница `app/studio/queries/harmful/page.tsx` с totals + карточками, cross-link с амбер-баннером из `/studio/queries` |
+| 2026-04-29 | Этап 3 — кнопка «Запустить ревью» на странице | 349bc31, 52d9d48, 2c36d2c | `studio_review_page_task` оборачивает `Reviewer.review_page` с activity events. Endpoint `POST /admin/studio/sites/{id}/pages/{page_id}/review`. Frontend кнопки на page workspace + auto-poll. Honest 45s safety timeout с пояснением «эта страница не идёт в ревью» когда Reviewer skip-ает |
+| 2026-04-29 | Этап 6 — missing landing pages (light-mode) | 4a6d45c | `core_audit/missing_landings.py` (business_signal + evidence-substring gate), `missing_landings_scan_task`, endpoints `scan`+`get`, секция в `/studio/competitors` с цитатами из narrative. 12 тестов, 100% pass. Live-test grandtourspirit: 5 валидных пропусков (Крым, яхты, вертолёты, Каньоны Красной Поляны, гастрономия), 3 LLM-выдумки отброшены фильтром, $0.06, 32 сек |
