@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -300,9 +301,48 @@ def diagnose_one(
     }
 
 
+# ── Fallback page matcher (when SERP probe finds nothing) ───────────
+
+
+# Russian + Latin word characters; everything else is a separator.
+_TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
+
+
+def _tokens(text: str) -> set[str]:
+    """Lowercase token set, length ≥ 3 to avoid stop-word noise."""
+    if not text:
+        return set()
+    return {
+        m.group(0).lower()
+        for m in _TOKEN_RE.finditer(text)
+        if len(m.group(0)) >= 3
+    }
+
+
+def score_page_for_query(query: str, page) -> int:
+    """Token-overlap score of a Page against a query.
+
+    Looks at title + h1 + meta_description + first 800 chars of content.
+    No tf-idf — for a 7-query batch the simplest approach wins.
+    Score is the number of query tokens present anywhere on the page.
+    """
+    q_toks = _tokens(query)
+    if not q_toks:
+        return 0
+    page_text = " ".join([
+        page.title or "",
+        page.h1 or "",
+        page.meta_description or "",
+        (page.content_text or "")[:800],
+    ])
+    p_toks = _tokens(page_text)
+    return len(q_toks & p_toks)
+
+
 __all__ = [
     "MatchedPageInfo",
     "find_matched_url",
     "diagnose_one",
+    "score_page_for_query",
     "SERP_DEPTH",
 ]

@@ -1307,8 +1307,10 @@ def diagnose_harmful_queries_site_task(
     from app.core_audit.activity import emit_terminal, log_event
     from app.core_audit.harmful_diagnoser import (
         SERP_DEPTH,
+        MatchedPageInfo,
         diagnose_one,
         find_matched_url,
+        score_page_for_query,
     )
     from app.models.daily_metric import DailyMetric
     from app.models.page import Page
@@ -1402,20 +1404,63 @@ def diagnose_harmful_queries_site_task(
             no_page_content = 0
             llm_cost = 0.0
 
+            # Pre-load all pages for the site once — used by the
+            # token-overlap fallback when Search API can't pin a URL.
+            all_pages = (await db.execute(
+                select(Page).where(Page.site_id == site.id)
+            )).scalars().all()
+
             for q in candidates:
                 matched = await anyio.to_thread.run_sync(
                     find_matched_url, q.query_text, site.domain,
                 )
+                page = None
+                heuristic_match = False
+
+                if matched is not None:
+                    # SERP found us — look up the exact URL in Page table.
+                    page = (await db.execute(
+                        select(Page).where(
+                            Page.site_id == site.id,
+                            Page.url == matched.url,
+                        )
+                    )).scalar_one_or_none()
+                else:
+                    # Search API didn't pin us. Fall back to scoring all
+                    # pages by token overlap with the query — better than
+                    # nothing. Webmaster says we DO rank for this query
+                    # over the period, just not in the SERP probe today.
+                    best_page = None
+                    best_score = 0
+                    for p in all_pages:
+                        s = score_page_for_query(q.query_text, p)
+                        if s > best_score:
+                            best_score = s
+                            best_page = p
+                    if best_page is not None and best_score > 0:
+                        page = best_page
+                        heuristic_match = True
+                        # Synthetic match info — position 0 marks
+                        # «не из SERP, эвристика по контенту».
+                        matched = MatchedPageInfo(
+                            url=best_page.url,
+                            position=0,
+                            title=best_page.title or "",
+                            headline="",
+                        )
+
                 if matched is None:
                     no_match += 1
                     q.harmful_diagnosis = {
                         "matched_url": None,
                         "matched_position": None,
                         "cause_ru": (
-                            "Не удалось найти страницу через Search API — "
-                            "позиция могла измениться или Yandex не показал "
-                            "наш домен в момент запроса. Попробуй позже или "
-                            "проверь руками."
+                            "Не удалось найти страницу: ни Search API не "
+                            "показал нас в топ-30 прямо сейчас, ни наш "
+                            "crawler не имеет страницы с пересечением слов "
+                            "запроса. Возможно, страница из индекса Яндекса "
+                            "отсутствует у нас в БД — запусти crawl и "
+                            "перепроверку индексации, потом перезапусти разбор."
                         ),
                         "fixes": {},
                         "model": None,
@@ -1425,14 +1470,6 @@ def diagnose_harmful_queries_site_task(
                     q.harmful_diagnosed_at = datetime.now(timezone.utc)
                     await db.commit()
                     continue
-
-                # Look up the URL in our Page table.
-                page = (await db.execute(
-                    select(Page).where(
-                        Page.site_id == site.id,
-                        Page.url == matched.url,
-                    )
-                )).scalar_one_or_none()
 
                 if page is None:
                     no_page_content += 1
@@ -1474,13 +1511,20 @@ def diagnose_harmful_queries_site_task(
                             business_primary=primary,
                             business_geo=geo,
                             matched=matched,
-                            page_title=page.title,
+                            page_title=page.title,  # type: ignore[union-attr]
                             page_h1=page.h1,
                             page_meta=page.meta_description,
                             page_content=page.content_text,
                         )
                     )
                     llm_cost += float(diag.get("cost_usd") or 0.0)
+                    if heuristic_match:
+                        # Honest UI hint that the URL was inferred,
+                        # not pinned by Search API.
+                        diag["match_method"] = "content_overlap"
+                        diag["matched_position"] = None
+                    else:
+                        diag["match_method"] = "search_api"
                     q.harmful_diagnosis = diag
                     q.harmful_diagnosed_at = datetime.now(timezone.utc)
                     diagnosed += 1
