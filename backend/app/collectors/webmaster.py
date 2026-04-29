@@ -164,13 +164,30 @@ class WebmasterCollector(BaseCollector):
         Reason values verbatim from the API: NOT_FOUND, BAD_HTTP_STATUS,
         META_NO_INDEX, ROBOTS_TXT_HOST, NOT_CANONICAL, EXCLUDED_FROM_SEARCH,
         DUPLICATE_PAGE, etc.
+
+        Soft-fail on 404 / RESOURCE_NOT_FOUND: this endpoint is sometimes
+        unavailable per-host (verified live on grandtourspirit.ru —
+        Yandex returns 404 here while `in-search/samples` works fine).
+        Returns [] in that case so callers can keep the indexed list
+        and just don't get reasons.
         """
         all_items: list[dict] = []
         for offset in range(0, max_pages * page_size, page_size):
-            data = await self.get(
-                f"{self._host_prefix}/search-urls/excluded/samples",
-                params={"offset": str(offset), "limit": str(page_size)},
-            )
+            try:
+                data = await self.get(
+                    f"{self._host_prefix}/search-urls/excluded/samples",
+                    params={"offset": str(offset), "limit": str(page_size)},
+                )
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if "404" in msg or "RESOURCE_NOT_FOUND" in msg:
+                    logger.info(
+                        "webmaster.excluded_samples_404 host=%s — endpoint "
+                        "unavailable for this host, returning empty",
+                        self.host_id,
+                    )
+                    return []
+                raise
             samples = data.get("samples") or []
             if not samples:
                 break
