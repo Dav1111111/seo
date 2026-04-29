@@ -2446,4 +2446,92 @@ async def get_brain_plan(
     )
 
 
+# ── Studio v2 etap 7 (Phase B) · Brain chat ──────────────────────────
+
+
+class BrainChatMessage(BaseModel):
+    role: str           # "user" | "assistant"
+    content: str
+
+
+class BrainChatRequest(BaseModel):
+    message: str
+    history: list[BrainChatMessage] = []
+
+
+class BrainChatResponse(BaseModel):
+    reply: str
+    cost_usd: float
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+@router.post(
+    "/sites/{site_id}/plan/{action_id}/chat",
+    response_model=BrainChatResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def brain_action_chat(
+    site_id: uuid.UUID,
+    action_id: str,
+    body: BrainChatRequest,
+    db: AsyncSession = Depends(get_db),
+) -> BrainChatResponse:
+    """Chat about ONE specific action from the brain plan.
+
+    Stateless: client sends the conversation history each turn, server
+    appends the new message and sends one Haiku call. The system prompt
+    is cache-marked so cost stabilises around $0.003/turn.
+    """
+    site = await _site_or_404(db, site_id)
+    msg = (body.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="message is empty")
+
+    from app.core_audit.brain import build_plan, build_snapshot
+    from app.core_audit.brain.chat import (
+        MAX_HISTORY_MESSAGES,
+        chat_about_action,
+    )
+
+    snap = await build_snapshot(db, site)
+    plan = build_plan(snap, max_actions=10)
+    action = next((a for a in plan.actions if a.id == action_id), None)
+    if action is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"action '{action_id}' is not currently in the plan — "
+                "it may have been resolved or the data has changed. "
+                "Re-fetch /plan to see the current actions."
+            ),
+        )
+
+    sanitised: list[dict[str, str]] = []
+    for m in (body.history or [])[-MAX_HISTORY_MESSAGES:]:
+        role = m.role if m.role in ("user", "assistant") else "user"
+        content = (m.content or "").strip()
+        if content:
+            sanitised.append({"role": role, "content": content})
+
+    import anyio
+    result = await anyio.to_thread.run_sync(
+        lambda: chat_about_action(
+            action=action,
+            snap=snap,
+            history=sanitised,
+            new_message=msg,
+        ),
+    )
+
+    return BrainChatResponse(
+        reply=result["reply"],
+        cost_usd=result["cost_usd"],
+        model=result.get("model") or None,
+        input_tokens=result.get("input_tokens"),
+        output_tokens=result.get("output_tokens"),
+    )
+
+
 __all__ = ["router"]

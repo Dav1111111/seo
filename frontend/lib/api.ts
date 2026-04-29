@@ -980,6 +980,31 @@ export const api = {
       }>;
     }>(`/studio/sites/${siteId}/plan`, { base: "admin" }),
 
+  // V2 etap 7 Phase B — chat about a specific brain plan action.
+  // Stateless: client sends full history each turn.
+  studioBrainActionChat: (
+    siteId: string,
+    actionId: string,
+    message: string,
+    history: Array<{ role: "user" | "assistant"; content: string }>,
+  ) =>
+    apiFetch<{
+      reply: string;
+      cost_usd: number;
+      model: string | null;
+      input_tokens: number | null;
+      output_tokens: number | null;
+    }>(
+      // action ids contain a colon (e.g. "queries:harmful") — let
+      // the URL constructor handle encoding so the colon round-trips.
+      `/studio/sites/${siteId}/plan/${encodeURIComponent(actionId)}/chat`,
+      {
+        method: "POST",
+        base: "admin",
+        body: JSON.stringify({ message, history }),
+      },
+    ),
+
   studioGetMissingLandings: (siteId: string) =>
     apiFetch<{
       site_id: string;

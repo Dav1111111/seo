@@ -27,6 +27,7 @@ import {
   Quote,
   Link2,
   AlertCircle,
+  MessageCircle,
 } from "lucide-react";
 
 import { api } from "@/lib/api";
@@ -36,6 +37,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn, getErrorMessage } from "@/lib/utils";
+
+import { BrainActionChat } from "./brain-action-chat";
 
 const SEV_STYLE: Record<string, string> = {
   critical: "border-red-300 bg-red-50",
@@ -159,7 +162,7 @@ export function BrainPlanCard() {
         ) : (
           <div className="space-y-3">
             {data.actions.map((a) => (
-              <ActionCard key={a.id} action={a} />
+              <ActionCard key={a.id} action={a} siteId={siteId} />
             ))}
           </div>
         )}
@@ -188,8 +191,18 @@ type Action = Awaited<
   ReturnType<typeof api.studioGetBrainPlan>
 >["actions"][number];
 
-function ActionCard({ action: a }: { action: Action }) {
+function ActionCard({
+  action: a,
+  siteId,
+}: {
+  action: Action;
+  siteId: string;
+}) {
   const [showReceipt, setShowReceipt] = useState(false);
+  // Phase B: chat about this specific action. Independent state per
+  // card — opening one doesn't close another. New conversation each
+  // time it's opened (we deliberately don't persist).
+  const [chatOpen, setChatOpen] = useState(false);
   const hasExamples = (a.examples?.length || 0) > 0;
   return (
     <div
@@ -249,6 +262,19 @@ function ActionCard({ action: a }: { action: Action }) {
             </Link>
             <button
               type="button"
+              onClick={() => setChatOpen((s) => !s)}
+              className={cn(
+                "inline-flex items-center gap-1 text-xs cursor-pointer",
+                chatOpen
+                  ? "text-primary"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <MessageCircle className="h-3.5 w-3.5" />
+              {chatOpen ? "Закрыть чат" : "Спросить"}
+            </button>
+            <button
+              type="button"
               onClick={() => setShowReceipt((s) => !s)}
               className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
             >
@@ -262,6 +288,14 @@ function ActionCard({ action: a }: { action: Action }) {
           </div>
 
           {showReceipt && <Receipt evidence={a.evidence} />}
+
+          {chatOpen && siteId && (
+            <BrainActionChat
+              siteId={siteId}
+              actionId={a.id}
+              onClose={() => setChatOpen(false)}
+            />
+          )}
         </div>
       </div>
     </div>
