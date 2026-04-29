@@ -164,6 +164,10 @@ async def list_queries(
             total=0,
             items=[],
             coverage={"total": 0, "with_volume": 0, "without_volume": 0, "stale": 0},
+            relevance_counts={
+                "own": 0, "adjacent": 0, "disputed": 0, "spam": 0,
+                "unclassified": 0,
+            },
         )
 
     # One round-trip to grab the latest position per query, scoped to

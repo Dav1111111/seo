@@ -169,18 +169,27 @@ def test_classify_unexpected_value_coerced_to_disputed() -> None:
     """The model can hallucinate values outside the enum (despite the
     JSON schema). Anything unknown must land in `disputed` so we never
     silently optimistically assign `own`."""
+    # Two failure modes:
+    #   (a) bad value with EMPTY reason → coerce to disputed AND give
+    #       a fallback reason
+    #   (b) bad value with NON-empty reason → coerce to disputed but
+    #       KEEP the reason (it's still informative — the LLM thought
+    #       it was relevant in some way)
     fake = {
         "results": [
-            {"idx": 0, "relevance": "weird-value", "reason_ru": "x"},
-            {"idx": 1, "relevance": "OWN", "reason_ru": "y"},  # case-coerced
+            {"idx": 0, "relevance": "weird-value", "reason_ru": ""},
+            {"idx": 1, "relevance": "weird-value", "reason_ru": "model said this is X"},
+            {"idx": 2, "relevance": "OWN", "reason_ru": "y"},  # case-coerced
         ],
     }
     with _mock_call(fake):
-        result = classify_by_llm(["q1", "q2"], _profile(), "narrative")
+        result = classify_by_llm(["q1", "q2", "q3"], _profile(), "narrative")
     assert result.verdicts[0].relevance == "disputed"
     assert "неожиданный" in result.verdicts[0].reason_ru
+    assert result.verdicts[1].relevance == "disputed"
+    assert result.verdicts[1].reason_ru == "model said this is X"
     # uppercase enum coerced via .lower()
-    assert result.verdicts[1].relevance == "own"
+    assert result.verdicts[2].relevance == "own"
 
 
 def test_classify_unclassified_value_coerced_to_disputed() -> None:
