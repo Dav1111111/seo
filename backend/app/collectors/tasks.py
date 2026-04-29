@@ -1300,7 +1300,7 @@ def diagnose_harmful_queries_site_task(
     «перезапросить диагноз», not yet implemented).
     """
     import anyio
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     from app.core_audit.activity import emit_terminal, log_event
     from app.core_audit.harmful_diagnoser import (
