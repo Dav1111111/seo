@@ -184,22 +184,28 @@ def test_history_appears_in_message_with_role_tags() -> None:
 
 def test_history_truncates_to_max_window() -> None:
     """Long convos shouldn't blow input. We keep last
-    MAX_HISTORY_MESSAGES turns."""
+    MAX_HISTORY_MESSAGES turns. Use exact `msg-N$`-style markers so
+    the assertion isn't fooled by `msg-1` matching `msg-10`."""
     a = _action()
+    # Use a unique tag so substring matching is unambiguous.
     long_history = [
-        {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"}
+        {
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": f"<turn-{i:03d}>",
+        }
         for i in range(MAX_HISTORY_MESSAGES + 5)
     ]
     msg = build_user_message(
         action=a, snap=_snap(), history=long_history,
         new_message="x",
     )
-    # The earliest messages drop out.
-    assert "msg-0" not in msg
-    assert "msg-1" not in msg
+    # The earliest messages drop out (indices 0..4 with 5-overflow).
+    assert "<turn-000>" not in msg
+    assert "<turn-001>" not in msg
+    assert "<turn-004>" not in msg
     # The last MAX_HISTORY_MESSAGES are kept.
     last_idx = MAX_HISTORY_MESSAGES + 4
-    assert f"msg-{last_idx}" in msg
+    assert f"<turn-{last_idx:03d}>" in msg
 
 
 # ── chat_about_action — wrapper integration ─────────────────────────
