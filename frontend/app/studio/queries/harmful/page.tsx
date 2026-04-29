@@ -23,7 +23,7 @@
  * переписать title», не «посмотреть метрики».
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 
@@ -92,15 +92,33 @@ export default function HarmfulVisibilityPage() {
   } | null>(null);
   const setSafeTimeout = useTimeoutSetter();
 
+  // Mirror `diagnosePending` into a ref so SWR's refreshInterval
+  // callback (which closes over the initial render scope) still sees
+  // the latest value. Without this the polling never restarts.
+  const diagnosePendingRef = useRef(false);
+  useEffect(() => {
+    diagnosePendingRef.current = diagnosePending;
+  }, [diagnosePending]);
+
   const { data, error, isLoading, mutate } = useSWR(
     siteId ? studioKey("queries_harmful", siteId) : null,
     () => api.studioHarmfulVisibility(siteId),
     {
-      // Auto-refresh while a diagnose run is hot — local `busy` state
-      // is the cleanest signal we have.
-      refreshInterval: () => (diagnosePending ? 5000 : 0),
+      // Read from ref so the closure always sees the latest state.
+      // 5-sec poll while the Celery task is running, stop otherwise.
+      refreshInterval: () => (diagnosePendingRef.current ? 5000 : 0),
     },
   );
+
+  // Stop polling when all candidates have a diagnosis — server-side
+  // signal that the run completed, more reliable than a 5-min timeout.
+  useEffect(() => {
+    if (!diagnosePending || !data) return;
+    const undiagnosedNow = data.items.filter((it) => !it.harmful_diagnosis).length;
+    if (undiagnosedNow === 0) {
+      setDiagnosePending(false);
+    }
+  }, [data, diagnosePending]);
 
   async function onDiagnose() {
     if (!siteId || diagnosePending) return;

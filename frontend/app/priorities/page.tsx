@@ -10,15 +10,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { PriorityCard, PriorityItem } from "@/components/priorities/priority-card";
+import { getErrorMessage } from "@/lib/utils";
 import { RefreshCw, ListChecks, Inbox } from "lucide-react";
 
 const CATEGORIES = ["title", "description", "h1", "content", "eeat", "commercial", "internal_links", "structured_data", "ux"];
 const PRIORITIES = ["critical", "high", "medium", "low"];
 
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
+// getErrorMessage moved to lib/utils.
 
 function isRunningStatus(status: string | undefined): boolean {
   return status === "started" || status === "progress";

@@ -39,12 +39,9 @@ import {
   Info,
   ExternalLink,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, getErrorMessage } from "@/lib/utils";
 
-function getErrorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
+// getErrorMessage now in lib/utils.
 
 const SEVERITY_STYLE: Record<
   "critical" | "high" | "medium" | "low",
@@ -555,7 +552,7 @@ function UrlSignalTable({
         <div className="flex items-baseline justify-between gap-3 flex-wrap">
           <h2 className="font-medium">Все страницы по сигналам</h2>
           <span className="text-xs text-muted-foreground">
-            показано {urls.items.length} из {urls.total}
+            показано {Math.min(urls.items.length, 100)} из {urls.total}{urls.items.length > 100 ? " (отрисовываем первые 100)" : ""}
           </span>
         </div>
 

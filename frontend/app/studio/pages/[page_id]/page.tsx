@@ -61,14 +61,11 @@ import {
   History as HistoryIcon,
   Info,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, getErrorMessage } from "@/lib/utils";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function getErrorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
+// getErrorMessage now in lib/utils.
 
 const PRIORITY_STYLE: Record<string, string> = {
   critical: "border-red-300 bg-red-50 text-red-900",

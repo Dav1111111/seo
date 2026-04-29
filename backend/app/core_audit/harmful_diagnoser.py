@@ -85,9 +85,15 @@ def find_matched_url(
         )
         return None
 
+    # `lstrip("www.")` was a bug — it treats the arg as a CHAR SET, so
+    # «wexample.ru» becomes «example.ru» (real false-match potential
+    # against `example.ru` profiles). Use `removeprefix` for true
+    # prefix removal.
     norm_domain = our_domain.lower().strip().lstrip(".")
+    norm_domain = norm_domain.removeprefix("www.")
     for doc in docs:
-        d = (doc.domain or "").lower().strip().lstrip("www.")
+        d = (doc.domain or "").lower().strip()
+        d = d.removeprefix("www.")
         if d == norm_domain or d.endswith("." + norm_domain) or norm_domain.endswith("." + d):
             return MatchedPageInfo(
                 url=doc.url,

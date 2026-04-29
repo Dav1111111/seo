@@ -87,12 +87,14 @@ export default function StudioProfilePage() {
     text: string;
   } | null>(null);
 
+  // Re-seed local draft from server only when it would not clobber
+  // unsaved work. Background SWR revalidations (focus / reconnect)
+  // would otherwise wipe what the user is typing.
   useEffect(() => {
-    if (data?.profile) {
-      setDraft(data.profile);
-      setDirty(false);
-    }
-  }, [data]);
+    if (!data?.profile) return;
+    if (dirty) return;  // user has uncommitted edits — don't touch
+    setDraft(data.profile);
+  }, [data, dirty]);
 
   function patch<K extends keyof Profile>(k: K, v: Profile[K]) {
     setDraft((d) => ({ ...d, [k]: v }));
@@ -420,8 +422,12 @@ function ChipField({
             </span>
           )}
           {items.map((it, i) => (
+            // Key by value (items are case-insensitive deduped on
+            // commit), not by index — removing position 0 with index
+            // keys causes React to reuse DOM and the aria-label
+            // briefly references the wrong chip.
             <Badge
-              key={i}
+              key={it}
               variant="outline"
               className="gap-1 pr-1 text-xs"
             >

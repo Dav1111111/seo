@@ -38,7 +38,7 @@ import {
   AlertTriangle,
   ChevronRight,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, getErrorMessage } from "@/lib/utils";
 
 /**
  * Studio · Запросы (PR-S2)
@@ -242,10 +242,7 @@ function formatPosition(p: number | null | undefined): string {
   return p.toFixed(1);
 }
 
-function getErrorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
+// getErrorMessage moved to lib/utils — see import at top of file.
 
 export default function StudioQueriesPage() {
   const { currentSite, loading: siteLoading } = useSite();
@@ -350,23 +347,50 @@ export default function StudioQueriesPage() {
 
   async function onOverrideRelevance(
     queryId: string,
-    next: "own" | "adjacent" | "disputed" | "spam",
+    nextRelevance: "own" | "adjacent" | "disputed" | "spam",
   ) {
     if (!siteId || overrideBusy[queryId]) return;
     setOverrideBusy((b) => ({ ...b, [queryId]: true }));
     setBanner(null);
+
+    // Optimistic flip: badge becomes the new class immediately, then
+    // PATCH fires. On success we revalidate; on failure we rollback.
+    await mutate(
+      (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          items: current.items.map((row) =>
+            row.query_id === queryId
+              ? {
+                  ...row,
+                  relevance: nextRelevance,
+                  relevance_set_by: "user" as const,
+                  relevance_reason_ru:
+                    "Помечено вручную владельцем — классификатор не перезатрёт.",
+                }
+              : row,
+          ),
+        };
+      },
+      { revalidate: false },
+    );
+
     try {
-      await api.studioOverrideRelevance(siteId, queryId, next);
-      // Optimistic refresh — the row just changed locally, refetch
-      // so the badge reflects user-set state plus the «вручную» tag.
+      await api.studioOverrideRelevance(siteId, queryId, nextRelevance);
+      // Re-fetch after a tick — relevance_counts on the server side
+      // is the canonical truth for the filter strip.
       await mutate();
     } catch (e: unknown) {
       setBanner({ kind: "err", text: getErrorMessage(e) });
+      // Rollback by re-fetching server state (the optimistic patch
+      // is gone after revalidation).
+      await mutate();
     } finally {
       setOverrideBusy((b) => {
-        const next = { ...b };
-        delete next[queryId];
-        return next;
+        const out = { ...b };
+        delete out[queryId];
+        return out;
       });
     }
   }
