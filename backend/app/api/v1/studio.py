@@ -2366,13 +2366,21 @@ async def get_missing_landings(
 # ── Studio v2 etap 7 · Brain — «what to do this week» plan ──────────
 
 
+class BrainActionExample(BaseModel):
+    label: str           # query text, URL, service name…
+    kind: str            # "url" | "spam" | "disputed" | "high"|"medium"|"low"
+    hint: str | None = None  # optional reason / quote from the data
+
+
 class BrainActionOut(BaseModel):
     id: str
     severity: str
     title: str
     body_ru: str
+    what_to_do_ru: str
     link_to: str
     link_label: str
+    examples: list[BrainActionExample] = []
     evidence: dict[str, Any]
 
 
@@ -2418,8 +2426,17 @@ async def get_brain_plan(
                 severity=a.severity,
                 title=a.title,
                 body_ru=a.body_ru,
+                what_to_do_ru=a.what_to_do_ru,
                 link_to=a.link_to,
                 link_label=a.link_label,
+                examples=[
+                    BrainActionExample(
+                        label=str(ex.get("label") or ""),
+                        kind=str(ex.get("kind") or ""),
+                        hint=(ex.get("hint") or None),
+                    )
+                    for ex in (a.examples or [])
+                ],
                 evidence=dict(a.evidence),
             )
             for a in plan.actions

@@ -35,16 +35,25 @@ Severity = Literal["critical", "high", "medium", "low"]
 class Action:
     """One owner-facing item in the plan.
 
-    `evidence` carries the raw counts the rule used to fire — the UI
-    can show them verbatim so the owner sees on what basis the system
-    pushed this. No prose summary, no LLM-rewritten reasoning.
+    Three fields owner sees:
+      title    — what's wrong, in one sentence
+      body_ru  — 2-3 sentences explaining «и что» в живом тоне.
+                 Templated — no LLM, no prose generation.
+      what_to_do_ru — 1 sentence imperative: «открой X, нажми Y».
+      examples — concrete rows from the database (URLs, queries,
+                 service names) that this action is about. UI shows
+                 them under the body so the count gets a face.
+
+    `evidence` is the raw count receipt — for the «основание» row.
     """
     id: str               # stable id (kind:detail) so UI can dedupe
     severity: Severity
-    title: str            # short imperative ru: «Создай 4 страницы…»
-    body_ru: str          # 1-2 sentences of context, templated
+    title: str            # short headline ru: «У тебя 82% видимости…»
+    body_ru: str          # 2-3 conversational sentences explaining why
+    what_to_do_ru: str    # 1 imperative sentence — next concrete step
     link_to: str          # frontend url to the module where to act
     link_label: str       # CTA text for the link button
+    examples: list[dict[str, str]] = field(default_factory=list)
     evidence: dict[str, int | str | float | None] = field(default_factory=dict)
 
 
@@ -118,20 +127,37 @@ def _rule_indexation_coverage(snap: BrainSnapshot) -> Action | None:
         return None
 
     page_word = _ru_plural(confirmed_not_indexed, ("страница", "страницы", "страниц"))
+    title = (
+        f"Яндекс не видит {confirmed_not_indexed} "
+        f"{_ru_plural(confirmed_not_indexed, ('твою страницу', 'твоих страницы', 'твоих страниц'))}"
+    )
     body = (
-        f"{confirmed_not_indexed} {page_word} не подтверждены в индексе Яндекса. "
-        f"Их нельзя найти через поиск, даже если в sitemap. "
-        f"Открой индексацию, посмотри причины и нажми «Проверить URL»."
+        f"На сайте {idx.pages_total} "
+        f"{_ru_plural(idx.pages_total, ('страница', 'страницы', 'страниц'))}, "
+        f"из них {idx.pages_in_index} в поиске Яндекса. "
+        f"А {confirmed_not_indexed} {page_word} — нет: их нельзя найти "
+        f"в поиске вообще, даже если они есть в sitemap. "
+        f"Это значит, что трафик на них приходит только если кто-то "
+        f"знает прямую ссылку."
+    )
+    examples = [
+        {"label": url, "kind": "url"}
+        for url in (idx.sample_not_indexed_urls or [])[:3]
+    ]
+    what_to_do = (
+        "Открой раздел «Индексация» — там видно, по каждой странице "
+        "почему её нет в индексе. Самые частые причины: запрет в "
+        "robots.txt, noindex в коде, или Яндекс пока не дошёл."
     )
     return Action(
         id="indexation:not_indexed",
         severity="critical" if confirmed_not_indexed >= 3 else "high",
-        title=(
-            f"Верни в индекс {confirmed_not_indexed} {page_word}"
-        ),
+        title=title,
         body_ru=body,
+        what_to_do_ru=what_to_do,
         link_to="/studio/indexation",
         link_label="К индексации",
+        examples=examples,
         evidence={
             "pages_total": idx.pages_total,
             "in_index": idx.pages_in_index,
@@ -171,17 +197,47 @@ def _rule_harmful_visibility(snap: BrainSnapshot) -> Action | None:
     if classified <= 0:
         return None
     share_pct = bad / classified * 100.0
-    word = _ru_plural(bad, ("вредный запрос", "вредных запроса", "вредных запросов"))
-    body = (
-        f"{bad} из {classified} проверенных запросов помечены как «не мои» "
-        f"(спам {q.spam} + спорные {q.disputed}). "
-        f"Это {share_pct:.0f}% от классифицированных — Яндекс "
-        f"ассоциирует тебя с чужой темой. Открой отчёт, чтобы увидеть, "
-        f"какие страницы тянут эти запросы и что в них переписать."
+
+    # Build conversational title/body. Goal: owner immediately gets
+    # «по большинству запросов меня находят не по моей теме».
+    if share_pct >= 70:
+        title = "Яндекс не понимает, кто ты"
+        why_short = "Большинство запросов, по которым тебя находят, — не про твою тему."
+    elif share_pct >= 40:
+        title = "Большая часть видимости — не твоя"
+        why_short = "Слишком много запросов, по которым тебя находят, — про чужую тему."
+    else:
+        title = f"{bad} {_ru_plural(bad, ('вредный запрос', 'вредных запроса', 'вредных запросов'))} в выдаче"
+        why_short = "Часть запросов, по которым тебя находят, — не про твою тему."
+
+    body_parts = [
+        f"Из {classified} {_ru_plural(classified, ('запроса', 'запросов', 'запросов'))}, "
+        f"по которым люди находят твой сайт, {bad} — про не твою тему "
+        f"(спам {q.spam} + спорные {q.disputed}, {share_pct:.0f}%). "
+        f"{why_short}",
+        "Это значит, что Яндекс не уверен, кто ты, и реже показывает "
+        "тебя по нужным запросам.",
+    ]
+    if q.sample_own:
+        own_examples = ", ".join(f"«{w}»" for w in q.sample_own[:3])
+        body_parts.append(f"Твоя тема (как мы её видим): {own_examples}.")
+
+    examples = [
+        {
+            "label": h.get("query_text") or "",
+            "kind": h.get("relevance") or "",  # spam | disputed
+            "hint": h.get("reason_ru") or "",
+        }
+        for h in (q.sample_harmful or [])[:3]
+    ]
+
+    what_to_do = (
+        "Открой «Вредная видимость». Там видно, какая страница тянет "
+        "каждый из этих запросов и какие слова из её текста нужно "
+        "убрать, чтобы перестать ранжироваться по чужой теме."
     )
+
     sev: Severity
-    # Tiny-sample guard: ratios on a 5-query site are noise. Surface
-    # the action but downgrade severity so it doesn't dominate the plan.
     if classified < 15:
         sev = "medium" if bad >= 5 else "low"
     elif bad >= 20 or share_pct >= 40.0:
@@ -193,10 +249,12 @@ def _rule_harmful_visibility(snap: BrainSnapshot) -> Action | None:
     return Action(
         id="queries:harmful",
         severity=sev,
-        title=f"Почисти {bad} {word} в выдаче",
-        body_ru=body,
+        title=title,
+        body_ru=" ".join(body_parts),
+        what_to_do_ru=what_to_do,
         link_to="/studio/queries/harmful",
-        link_label="К отчёту",
+        link_label="К вредной видимости",
+        examples=examples,
         evidence={
             "spam": q.spam,
             "disputed": q.disputed,
@@ -214,24 +272,46 @@ def _rule_missing_landings(snap: BrainSnapshot) -> Action | None:
     m = snap.missing_landings
     if m.total == 0:
         return None
-    # Quote up to 3 service names for the body. They came verbatim
-    # from the LLM but were validated against narrative — safe to show.
-    names = [str(it.get("service_name") or "").strip() for it in m.items]
-    names = [n for n in names if n][:3]
-    sample = ", ".join(f"«{n}»" for n in names)
+
     word = _ru_plural(m.total, ("услуга", "услуги", "услуг"))
-    pwd = _ru_plural(m.high_priority, ("важная", "важные", "важных"))
+    title = (
+        f"{m.total} {_ru_plural(m.total, ('твоей услуги', 'твоих услуги', 'твоих услуг'))} "
+        f"живёт без своей страницы"
+    )
     body_parts = [
-        f"{m.total} {word} упомянуты в описании бизнеса, но "
-        f"отдельной страницы под них нет."
+        f"Ты говоришь, что у тебя есть {m.total} {word}, "
+        f"но на сайте под них нет отдельной страницы — они упоминаются "
+        f"только в общем тексте или в попапе.",
+        "Яндекс и Гугл попапы не индексируют — значит, по этим услугам "
+        "тебя в поиске почти не находят.",
     ]
     if m.high_priority:
         body_parts.append(
-            f"Из них {m.high_priority} {pwd} приоритета "
-            f"(нужно делать первыми)."
+            f"Из {m.total} {_ru_plural(m.total, ('услуги', 'услуг', 'услуг'))} "
+            f"{m.high_priority} нужно делать первыми — там и спрос есть, "
+            f"и описание у тебя уже готово."
         )
-    if sample:
-        body_parts.append(f"Например: {sample}.")
+
+    # Examples — actual service names from missing_landings module.
+    # They've already passed the substring-evidence filter, so we
+    # quote them verbatim without any LLM rewriting.
+    examples = []
+    for it in m.items[:3]:
+        name = (it.get("service_name") or "").strip()
+        if not name:
+            continue
+        examples.append({
+            "label": name,
+            "kind": (it.get("priority") or "medium"),
+            "hint": (it.get("evidence_quote") or "").strip(),
+        })
+
+    what_to_do = (
+        "Открой «Конкуренты» → секция «Услуги без посадочных страниц». "
+        "Там по каждой услуге видно цитату из твоего описания + "
+        "предлагаемый URL для новой страницы."
+    )
+
     sev: Severity
     if m.high_priority >= 3:
         sev = "critical"
@@ -242,10 +322,12 @@ def _rule_missing_landings(snap: BrainSnapshot) -> Action | None:
     return Action(
         id="missing_landings:create",
         severity=sev,
-        title=f"Создай {m.total} {word} без страницы",
+        title=title,
         body_ru=" ".join(body_parts),
+        what_to_do_ru=what_to_do,
         link_to="/studio/competitors",
-        link_label="Открыть список",
+        link_label="К списку услуг",
+        examples=examples,
         evidence={
             "total": m.total,
             "high": m.high_priority,
@@ -268,19 +350,34 @@ def _rule_pages_without_review(snap: BrainSnapshot) -> Action | None:
     word = _ru_plural(
         r.pages_without_review, ("страница", "страницы", "страниц"),
     )
+    title = (
+        f"{r.pages_without_review} {word} мы ещё не разбирали"
+    )
     body = (
-        f"{r.pages_without_review} {word} никогда не проходили ревью. "
-        f"LLM не сравнивал их с профилем бизнеса — рекомендаций по ним "
-        f"не появится, пока не запустишь ревью. Бесплатно, если контент "
-        f"не менялся."
+        f"На {r.pages_without_review} {word} мы ни разу не запускали "
+        f"ревью — это когда система читает страницу и сравнивает её "
+        f"с профилем твоего бизнеса (заголовок, текст, мета-описание, "
+        f"микроразметка). "
+        f"Без ревью у нас нет конкретных рекомендаций по этим страницам."
+    )
+    examples = [
+        {"label": url, "kind": "url"}
+        for url in (r.sample_unreviewed_urls or [])[:3]
+    ]
+    what_to_do = (
+        "Открой «Страницы», нажми на любую из непроверенных и "
+        "«Запустить ревью». Если контент не менялся с прошлого раза — "
+        "ревью не повторится бесплатно (защита от перерасхода)."
     )
     return Action(
         id="review:unreviewed",
         severity="medium",
-        title=f"Запусти ревью {r.pages_without_review} {word}",
+        title=title,
         body_ru=body,
+        what_to_do_ru=what_to_do,
         link_to="/studio/pages",
-        link_label="К списку страниц",
+        link_label="К страницам",
+        examples=examples,
         evidence={
             "pages_with_review": r.pages_with_review,
             "pages_without_review": r.pages_without_review,
@@ -296,25 +393,35 @@ def _rule_pending_recs(snap: BrainSnapshot) -> Action | None:
         return None
     word = _ru_plural(r.recs_pending, ("рекомендация", "рекомендации", "рекомендаций"))
     high_n = r.recs_high_priority_pending
+    title = f"{r.recs_pending} {word} ждут твоего решения"
     if high_n > 0:
         sev: Severity = "high"
         body = (
-            f"{r.recs_pending} {word} ждут решения, из них "
-            f"{high_n} с высоким приоритетом. "
-            f"Применил — отметь, отметка ставит замер «до» и через "
-            f"14 дней покажет дельту."
+            f"Система уже проанализировала страницы и предложила "
+            f"{r.recs_pending} {word} — что-то поправить в title, h1, "
+            f"тексте или микроразметке. Из них {high_n} с высоким "
+            f"приоритетом. Если применишь — отметь, и через 14 дней "
+            f"мы автоматически замерим, дала ли правка эффект."
         )
     else:
         sev = "medium"
         body = (
-            f"{r.recs_pending} {word} ждут решения. "
-            f"Открой страницы, отметь applied / deferred / dismissed."
+            f"Система предложила {r.recs_pending} {word} — что-то "
+            f"поправить в title, h1, тексте или микроразметке. "
+            f"Открой страницы, отметь применил / отложил / не подходит."
         )
+    what_to_do = (
+        "Открой «Страницы», заходи в каждую с рекомендациями и решай "
+        "по каждому пункту: «применил», «отложить», «не подходит». "
+        "Кнопка «применил» автоматически фиксирует метрики «до» — "
+        "через 14 дней увидишь дельту."
+    )
     return Action(
         id="review:pending_recs",
         severity=sev,
-        title=f"Разбери {r.recs_pending} {word}",
+        title=title,
         body_ru=body,
+        what_to_do_ru=what_to_do,
         link_to="/studio/pages",
         link_label="К страницам с рекомендациями",
         evidence={
@@ -332,15 +439,25 @@ def _rule_followup_due(snap: BrainSnapshot) -> Action | None:
     if o.pending_followup <= 0:
         return None
     word = _ru_plural(o.pending_followup, ("замер", "замера", "замеров"))
+    title = f"Скоро узнаем результат твоих {o.pending_followup} {word}"
+    body = (
+        f"Ты применил {o.pending_followup} {_ru_plural(o.pending_followup, ('правку', 'правки', 'правок'))} "
+        f"и нажал «применил & замерить эффект». "
+        f"Замеры до/после делаются автоматически через 14 дней "
+        f"после применения — здесь ничего делать не надо, просто "
+        f"подожди и потом загляни в «До / После»."
+    )
+    what_to_do = (
+        "Ничего делать не нужно. Через 14 дней после каждой правки "
+        "метрики (показы, клики, позиции) подтянутся сами и в модуле "
+        "«До / После» появится дельта."
+    )
     return Action(
         id="outcomes:followup",
         severity="low",
-        title=f"Замер до/после: {o.pending_followup} {word}",
-        body_ru=(
-            f"{o.pending_followup} {word} ждут замера через 14 дней "
-            f"после внедрения. Это автоматом — модуль «До / После» "
-            f"подтянет метрики, как только пройдёт срок."
-        ),
+        title=title,
+        body_ru=body,
+        what_to_do_ru=what_to_do,
         link_to="/studio/outcomes",
         link_label="К замерам",
         evidence={
@@ -354,33 +471,39 @@ def _rule_followup_due(snap: BrainSnapshot) -> Action | None:
 
 
 def _build_diagnostics(snap: BrainSnapshot) -> list[str]:
-    """Honest «what we don't know yet» list. CONCEPT §5: explain
-    absences. If the owner sees an empty plan, these explain why."""
+    """Honest «чего я ещё не знаю» list. CONCEPT §5: explain absences.
+    Tone: first-person owner-facing — «я ещё не сверил», not «module
+    X didn't run». No jargon."""
     out: list[str] = []
     if snap.queries.unclassified == snap.queries.total and snap.queries.total > 0:
         out.append(
-            "Запросы пока не классифицированы — запусти модуль «Релевантность» "
-            "в Студии запросов."
+            "Я ещё не разложил запросы по полкам (где «твой», где «не твой»). "
+            "Зайди в Запросы и нажми «Классифицировать» — после этого "
+            "я смогу сказать тебе про вредную видимость."
         )
     if snap.queries.total == 0:
         out.append(
-            "Запросов в БД нет — собери их в Webmaster через Pipeline."
+            "У меня пока нет ни одного запроса по сайту. Чтобы они "
+            "появились — собери данные из Webmaster в Pipeline."
         )
     if snap.indexation.pages_unknown == snap.indexation.pages_total \
             and snap.indexation.pages_total > 0:
         out.append(
-            "Per-URL индексация ещё не сверена — открой Индексацию и "
-            "нажми «Webmaster: статус каждого URL»."
+            "Я ещё не сверял каждый URL с индексом Яндекса. "
+            "Открой Индексацию и нажми «Webmaster: статус каждого URL» "
+            "— тогда я скажу тебе, какие страницы выпали."
         )
     if not snap.missing_landings.items:
         out.append(
-            "Сканирование «Услуги без страниц» ещё не запускалось — "
-            "открой Конкуренты и запусти его."
+            "Я ещё не проверял, все ли твои услуги имеют отдельную "
+            "страницу. Открой Конкуренты и запусти «Услуги без страниц» "
+            "— одна минута, ~10 центов LLM."
         )
     if snap.queries.with_volume == 0 and snap.queries.total > 0:
         out.append(
-            "Wordstat-объёмы не собраны — без них приоритеты по запросам "
-            "идут наугад. Запусти сбор в /studio/queries."
+            "У меня нет данных о том, как часто люди ищут эти запросы "
+            "(Wordstat-объёмов). Без этого я не могу сказать, какой "
+            "запрос важнее. Запусти сбор Wordstat в /studio/queries."
         )
     return out
 

@@ -53,6 +53,11 @@ def _snap(
     applied_total: int = 0,
     applied_last_14d: int = 0,
     pending_followup: int = 0,
+    sample_not_indexed_urls: list[str] | None = None,
+    sample_excluded: list[dict[str, str]] | None = None,
+    sample_harmful: list[dict[str, str | None]] | None = None,
+    sample_own: list[str] | None = None,
+    sample_unreviewed_urls: list[str] | None = None,
 ) -> BrainSnapshot:
     items = missing_items or []
     counts = {"high": 0, "medium": 0, "low": 0}
@@ -71,6 +76,8 @@ def _snap(
             pages_excluded=pages_excluded,
             pages_unknown=pages_unknown,
             coverage_pct=(pages_in_index / pages_total * 100.0) if pages_total else None,
+            sample_not_indexed_urls=sample_not_indexed_urls or [],
+            sample_excluded=sample_excluded or [],
         ),
         queries=QueriesFacts(
             total=queries_total,
@@ -78,12 +85,15 @@ def _snap(
             spam=spam, unclassified=unclassified,
             with_volume=queries_with_volume,
             classified_at=None,
+            sample_harmful=sample_harmful or [],
+            sample_own=sample_own or [],
         ),
         review=ReviewFacts(
             pages_with_review=pages_with_review,
             pages_without_review=max(0, pages_total - pages_with_review),
             recs_pending=recs_pending,
             recs_high_priority_pending=recs_high_priority_pending,
+            sample_unreviewed_urls=sample_unreviewed_urls or [],
         ),
         missing_landings=MissingLandingsFacts(
             total=len(items),
@@ -156,6 +166,10 @@ def test_indexation_emits_when_real_gap() -> None:
     assert a.evidence["in_index"] == 18
     assert "4" in a.title
     assert a.link_to == "/studio/indexation"
+    # Phase A: action carries what_to_do_ru as a separate field, not
+    # buried in body. Body explains «и что», what_to_do — «куда тыкать».
+    assert a.what_to_do_ru
+    assert "Открой" in a.what_to_do_ru or "открой" in a.what_to_do_ru
 
 
 def test_indexation_severity_scales_with_gap() -> None:
@@ -234,7 +248,9 @@ def test_harmful_severity_scales() -> None:
     assert small_a and small_a.severity == "medium"
     assert big_a.evidence["spam"] == 26
     assert big_a.evidence["disputed"] == 11
-    assert "37" in big_a.title  # spam + disputed
+    # Phase A: title is conversational («Яндекс не понимает кто ты»),
+    # the count «37» moves into the body. Pin counts in body instead.
+    assert "37" in big_a.body_ru
 
 
 def test_harmful_min_total_downgrades_tiny_samples() -> None:
@@ -276,22 +292,34 @@ def test_harmful_share_basis_is_classified_not_total() -> None:
 
 
 def test_missing_landings_quotes_real_service_names() -> None:
-    """The body must include actual service names from the items.
-    This is the «no LLM rewriting» guarantee — we copy verbatim from
-    the validated payload."""
+    """Phase A: actual service names move OUT of body_ru into the
+    `examples` array — UI renders them as a separate list. Body keeps
+    counts only. This is the «no LLM rewriting» guarantee: we copy
+    verbatim from the validated payload, structure is owner-friendly."""
     items = [
-        {"service_name": "Крым", "priority": "high"},
-        {"service_name": "Яхты", "priority": "high"},
-        {"service_name": "Вертолёты", "priority": "high"},
+        {"service_name": "Крым", "priority": "high",
+         "evidence_quote": "набор на экспедиции в Крым"},
+        {"service_name": "Яхты", "priority": "high",
+         "evidence_quote": "флот яхт от 30 до 50 футов"},
+        {"service_name": "Вертолёты", "priority": "high",
+         "evidence_quote": "вертолётные туры над Кавказом"},
     ]
     snap = _snap(missing_items=items)
     plan = build_plan(snap)
     a = _by_id(plan.actions, "missing_landings:create")
     assert a is not None
-    assert "«Крым»" in a.body_ru
-    assert "«Яхты»" in a.body_ru
+    # Counts present in body, names in examples (no LLM, just data).
     assert a.evidence["high"] == 3
     assert a.severity == "critical"
+    labels = [ex["label"] for ex in a.examples]
+    assert "Крым" in labels
+    assert "Яхты" in labels
+    assert "Вертолёты" in labels
+    # Each example carries its priority as `kind` and the validated
+    # quote as `hint` — UI renders «label + hint as quoted excerpt».
+    crimea = next(ex for ex in a.examples if ex["label"] == "Крым")
+    assert crimea["kind"] == "high"
+    assert "Крым" in (crimea.get("hint") or "")
 
 
 def test_missing_landings_medium_when_only_low_priority() -> None:
@@ -366,6 +394,88 @@ def test_plan_sorted_by_severity_first() -> None:
     rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     for i in range(1, len(severities)):
         assert rank[severities[i]] >= rank[severities[i - 1]]
+
+
+def test_phase_a_every_action_has_what_to_do_and_link() -> None:
+    """Phase A: Every action MUST split «и что» (body_ru) from
+    «куда тыкать» (what_to_do_ru). Earlier we mashed both into one
+    paragraph and the owner had to dig for the imperative.
+
+    Pin: every emitted action has non-empty `what_to_do_ru` and a
+    sane link_to/link_label."""
+    snap = _snap(
+        pages_total=22, pages_in_index=18,           # indexation fires
+        own=4, spam=26, disputed=11,                 # harmful fires
+        pages_with_review=1,                         # review fires
+        recs_pending=5, recs_high_priority_pending=2,
+        missing_items=[                              # missing_landings fires
+            {"service_name": "X", "priority": "high"},
+        ],
+        pending_followup=2,                          # followup fires
+    )
+    plan = build_plan(snap, max_actions=10)
+    assert plan.actions  # something fired
+    for a in plan.actions:
+        assert a.what_to_do_ru, f"action {a.id} has no what_to_do_ru"
+        assert a.link_to.startswith("/studio/"), a.id
+        assert a.link_label, a.id
+        # Phase A contract: title is short, body is the real prose.
+        # Body is at least a couple of sentences, not a one-word title.
+        assert len(a.body_ru) > len(a.title), a.id
+
+
+def test_phase_a_harmful_examples_carry_real_query_text() -> None:
+    """Harmful action's `examples` array must surface actual query
+    text from `sample_harmful` so the owner sees «джинсы багги»,
+    not just a count. Without examples the «37 вредных» feels
+    abstract and the owner can't validate the claim."""
+    sample = [
+        {"query_text": "джинсы багги", "relevance": "spam",
+         "reason_ru": "это про одежду, не про машины"},
+        {"query_text": "багги мото", "relevance": "spam",
+         "reason_ru": "это про мотоциклы"},
+        {"query_text": "прокат сочи", "relevance": "disputed",
+         "reason_ru": "ты не прокат"},
+    ]
+    snap = _snap(
+        own=10, spam=20, disputed=10,
+        sample_harmful=sample,
+        sample_own=["багги абхазия", "экспедиции на багги"],
+    )
+    plan = build_plan(snap)
+    a = _by_id(plan.actions, "queries:harmful")
+    assert a is not None
+    labels = [ex["label"] for ex in a.examples]
+    assert "джинсы багги" in labels
+    assert "прокат сочи" in labels
+    # `kind` lets UI render different badges for spam vs disputed.
+    kinds = {ex["label"]: ex["kind"] for ex in a.examples}
+    assert kinds["джинсы багги"] == "spam"
+    assert kinds["прокат сочи"] == "disputed"
+    # owner-recognised counter-examples («что МОЁ») weave into body.
+    assert "багги абхазия" in a.body_ru
+
+
+def test_phase_a_indexation_examples_are_real_urls() -> None:
+    """Indexation action's `examples` carry the actual URL strings
+    we found via SQL, so the owner sees «вот эти 3 страницы
+    конкретно» rather than just a number."""
+    urls = [
+        "https://example.ru/page-a",
+        "https://example.ru/page-b",
+        "https://example.ru/page-c",
+    ]
+    snap = _snap(
+        pages_total=22, pages_in_index=18,
+        sample_not_indexed_urls=urls,
+    )
+    plan = build_plan(snap)
+    a = _by_id(plan.actions, "indexation:not_indexed")
+    assert a is not None
+    labels = [ex["label"] for ex in a.examples]
+    assert all(u in labels for u in urls)
+    # All URL examples carry kind="url" so UI renders them clickable.
+    assert all(ex["kind"] == "url" for ex in a.examples)
 
 
 def test_evidence_carries_real_counts_not_prose() -> None:

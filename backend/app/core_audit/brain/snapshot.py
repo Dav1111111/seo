@@ -35,6 +35,10 @@ class IndexationFacts:
     pages_excluded: int
     pages_unknown: int
     coverage_pct: float | None  # in_index / pages_total * 100, or None if 0 pages
+    # Living examples for the rules layer to quote in body text.
+    # «not_indexed» here means confirmed via Webmaster, not unknown.
+    sample_not_indexed_urls: list[str] = None  # type: ignore[assignment]
+    sample_excluded: list[dict[str, str]] = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -47,6 +51,11 @@ class QueriesFacts:
     unclassified: int
     with_volume: int
     classified_at: datetime | None  # latest relevance_set_at
+    # Examples for the rule body — top-3 spam queries owner can
+    # immediately recognise as «не моё», so the «37 вредных» count
+    # gets a face. Each item: {query_text, relevance, reason_ru}.
+    sample_harmful: list[dict[str, str | None]] = None  # type: ignore[assignment]
+    sample_own: list[str] = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -55,6 +64,7 @@ class ReviewFacts:
     pages_without_review: int
     recs_pending: int
     recs_high_priority_pending: int
+    sample_unreviewed_urls: list[str] = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -117,6 +127,30 @@ async def _indexation(db: AsyncSession, site_id: UUID) -> IndexationFacts:
         )
     )).scalar_one()
 
+    # Up to 3 confirmed-not-indexed URLs to show the owner. We exclude
+    # `unknown` rows here on purpose — unknown means «we haven't asked
+    # Webmaster yet», and the rule deliberately doesn't surface those
+    # as «не в индексе» (would be alarmist).
+    sample_not_indexed_rows = (await db.execute(
+        select(Page.url).where(
+            Page.site_id == site_id,
+            Page.in_yandex_index.is_(False),
+            Page.yandex_excluded_reason.is_(None),
+        ).limit(3)
+    )).all()
+    sample_not_indexed = [r[0] for r in sample_not_indexed_rows if r[0]]
+
+    sample_excluded_rows = (await db.execute(
+        select(Page.url, Page.yandex_excluded_reason).where(
+            Page.site_id == site_id,
+            Page.yandex_excluded_reason.is_not(None),
+        ).limit(3)
+    )).all()
+    sample_excluded = [
+        {"url": r[0], "reason": r[1] or ""}
+        for r in sample_excluded_rows if r[0]
+    ]
+
     coverage = (indexed / total * 100.0) if total else None
     return IndexationFacts(
         pages_total=total,
@@ -124,6 +158,8 @@ async def _indexation(db: AsyncSession, site_id: UUID) -> IndexationFacts:
         pages_excluded=excluded,
         pages_unknown=unknown,
         coverage_pct=coverage,
+        sample_not_indexed_urls=sample_not_indexed,
+        sample_excluded=sample_excluded,
     )
 
 
@@ -153,6 +189,42 @@ async def _queries(db: AsyncSession, site_id: UUID) -> QueriesFacts:
         )
     )).scalar_one_or_none()
 
+    # Up to 3 «harmful» examples (spam first, then disputed). Owner
+    # immediately recognises them as «не моё» — that's the proof the
+    # «37 вредных запросов» count is real, not a number we pulled
+    # out of the air. Sort spam → disputed so the worst case shows up
+    # first.
+    sample_harmful_rows = (await db.execute(
+        select(
+            SearchQuery.query_text,
+            SearchQuery.relevance,
+            SearchQuery.relevance_reason_ru,
+        ).where(
+            SearchQuery.site_id == site_id,
+            SearchQuery.relevance.in_(["spam", "disputed"]),
+        ).order_by(
+            # spam before disputed; within each, longest query last
+            # so we don't always show the same one.
+            SearchQuery.relevance.desc(),
+            SearchQuery.query_text,
+        ).limit(3)
+    )).all()
+    sample_harmful = [
+        {
+            "query_text": r[0] or "",
+            "relevance": r[1] or "",
+            "reason_ru": r[2] or "",
+        }
+        for r in sample_harmful_rows
+    ]
+    sample_own_rows = (await db.execute(
+        select(SearchQuery.query_text).where(
+            SearchQuery.site_id == site_id,
+            SearchQuery.relevance == "own",
+        ).limit(3)
+    )).all()
+    sample_own = [r[0] for r in sample_own_rows if r[0]]
+
     return QueriesFacts(
         total=total,
         own=counts["own"],
@@ -162,6 +234,8 @@ async def _queries(db: AsyncSession, site_id: UUID) -> QueriesFacts:
         unclassified=counts["unclassified"],
         with_volume=with_volume,
         classified_at=classified_at,
+        sample_harmful=sample_harmful,
+        sample_own=sample_own,
     )
 
 
@@ -191,11 +265,24 @@ async def _review(db: AsyncSession, site_id: UUID) -> ReviewFacts:
         )
     )).scalar_one()
 
+    # Up to 3 unreviewed page URLs as living examples. Left-anti-join
+    # against PageReview keeps it efficient on big sites.
+    sample_unreviewed_rows = (await db.execute(
+        select(Page.url).where(
+            Page.site_id == site_id,
+            ~select(PageReview.page_id).where(
+                PageReview.page_id == Page.id,
+            ).exists(),
+        ).limit(3)
+    )).all()
+    sample_unreviewed = [r[0] for r in sample_unreviewed_rows if r[0]]
+
     return ReviewFacts(
         pages_with_review=with_review,
         pages_without_review=without_review,
         recs_pending=recs_pending,
         recs_high_priority_pending=recs_high,
+        sample_unreviewed_urls=sample_unreviewed,
     )
 
 

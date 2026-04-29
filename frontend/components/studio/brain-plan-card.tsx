@@ -3,32 +3,39 @@
 /**
  * Studio v2 etap 7 — brain plan card on /studio.
  *
- * Renders the synthesised «do this first» plan from the backend. The
- * plan is built from pure SQL counts + Russian rule templates — no
- * LLM in the pipeline, every line of body text is a static template
- * with real numbers substituted in. Show evidence dict in plain
- * Russian as a receipt so the owner sees on what basis the system
- * pushed each item.
+ * Phase A — owner-friendly version. Each action shows:
+ *   - title:   «У тебя N страниц нет в индексе» (не «Верни в индекс N»)
+ *   - body_ru: 2-3 предложения на нормальном языке, что и почему
+ *   - examples: реальные строки из БД (URLs / queries / service names)
+ *   - what_to_do_ru: один императив «открой X, нажми Y»
+ *   - link to module
+ *   - evidence «receipt» (collapsible) — для тех, кто хочет цифры
  *
- * Site context comes from `useSite()` like every other Studio page.
+ * No LLM in render. Every word in title/body/examples comes either
+ * from the rule template or directly from the database row.
  */
 
+import { useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
-  AlertTriangle,
   Brain,
   ChevronRight,
+  ChevronDown,
   Clock,
   Info,
+  Quote,
+  Link2,
+  AlertCircle,
 } from "lucide-react";
 
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
+import { cn, getErrorMessage } from "@/lib/utils";
 
 const SEV_STYLE: Record<string, string> = {
   critical: "border-red-300 bg-red-50",
@@ -116,7 +123,7 @@ export function BrainPlanCard() {
     return (
       <Card className="border-red-300 bg-red-50/50">
         <CardContent className="pt-6 text-sm text-red-900">
-          Не удалось собрать план: {String(error)}
+          Не удалось собрать план: {error ? getErrorMessage(error) : "нет данных"}
         </CardContent>
       </Card>
     );
@@ -131,11 +138,11 @@ export function BrainPlanCard() {
           <div>
             <h2 className="font-medium text-lg flex items-center gap-2">
               <Brain className="h-5 w-5 text-primary" />
-              План на эту неделю
+              Что я бы сделал на твоём месте
             </h2>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Без LLM. Каждая строка — счёт из БД, шаблон, ссылка на
-              модуль.
+              По одной задаче — что не так, почему это важно и куда
+              нажать. Без воды.
             </p>
           </div>
           <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
@@ -147,45 +154,14 @@ export function BrainPlanCard() {
         {noActions ? (
           <div className="rounded-md border border-emerald-200 bg-emerald-50/50 px-3 py-2 text-sm text-emerald-900">
             Срочных действий не вижу. Если у тебя есть свежие правки —
-            запусти ревью + классификацию запросов, мозг их подхватит.
+            запусти ревью + классификацию запросов, я их подхвачу.
           </div>
         ) : (
-          <ul className="space-y-2">
+          <div className="space-y-3">
             {data.actions.map((a) => (
-              <li key={a.id}>
-                <Link
-                  href={a.link_to}
-                  className={cn(
-                    "block rounded-lg border p-3 transition-colors",
-                    SEV_STYLE[a.severity] || SEV_STYLE.medium,
-                    "hover:border-primary/60",
-                  )}
-                >
-                  <div className="flex items-start gap-3">
-                    <span
-                      className={cn(
-                        "h-2.5 w-2.5 rounded-full mt-1.5 flex-shrink-0",
-                        SEV_DOT[a.severity] || SEV_DOT.medium,
-                      )}
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-baseline gap-2 flex-wrap">
-                        <span className="font-medium">{a.title}</span>
-                        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                          {SEV_LABEL[a.severity] || a.severity}
-                        </span>
-                      </div>
-                      <p className="text-sm leading-snug mt-1">
-                        {a.body_ru}
-                      </p>
-                      <Receipt evidence={a.evidence} />
-                    </div>
-                    <ChevronRight className="h-4 w-4 text-muted-foreground flex-shrink-0 mt-1" />
-                  </div>
-                </Link>
-              </li>
+              <ActionCard key={a.id} action={a} />
             ))}
-          </ul>
+          </div>
         )}
 
         {data.diagnostics.length > 0 && (
@@ -206,15 +182,180 @@ export function BrainPlanCard() {
   );
 }
 
+// ── Action card (Phase A: conversational tone + drilldown) ──────────
+
+type Action = Awaited<
+  ReturnType<typeof api.studioGetBrainPlan>
+>["actions"][number];
+
+function ActionCard({ action: a }: { action: Action }) {
+  const [showReceipt, setShowReceipt] = useState(false);
+  const hasExamples = (a.examples?.length || 0) > 0;
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-4 space-y-3",
+        SEV_STYLE[a.severity] || SEV_STYLE.medium,
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <span
+          className={cn(
+            "h-2.5 w-2.5 rounded-full mt-1.5 flex-shrink-0",
+            SEV_DOT[a.severity] || SEV_DOT.medium,
+          )}
+          aria-hidden="true"
+        />
+        <div className="flex-1 min-w-0 space-y-2">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <h3 className="font-medium text-base leading-snug">
+              {a.title}
+            </h3>
+            <span className="text-[10px] uppercase tracking-wide text-muted-foreground/80">
+              {SEV_LABEL[a.severity] || a.severity}
+            </span>
+          </div>
+          <p className="text-sm leading-relaxed text-foreground/90 whitespace-pre-line">
+            {a.body_ru}
+          </p>
+
+          {hasExamples && (
+            <div className="rounded-md border border-foreground/10 bg-background/60 px-3 py-2 space-y-1.5">
+              <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                Например:
+              </div>
+              <ul className="space-y-1">
+                {a.examples.map((ex, i) => (
+                  <ExampleRow key={i} example={ex} />
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+            <div className="text-[11px] uppercase tracking-wide text-primary/80 mb-0.5">
+              Что делать
+            </div>
+            <p className="leading-snug">{a.what_to_do_ru}</p>
+          </div>
+
+          <div className="flex items-center gap-3 flex-wrap pt-1">
+            <Link
+              href={a.link_to}
+              className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline cursor-pointer"
+            >
+              {a.link_label}
+              <ChevronRight className="h-4 w-4" />
+            </Link>
+            <button
+              type="button"
+              onClick={() => setShowReceipt((s) => !s)}
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+            >
+              {showReceipt ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
+              {showReceipt ? "Скрыть основание" : "Показать основание"}
+            </button>
+          </div>
+
+          {showReceipt && <Receipt evidence={a.evidence} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExampleRow({
+  example,
+}: {
+  example: Action["examples"][number];
+}) {
+  // For URL examples — show as a clickable link (opens in new tab so
+  // owner doesn't lose the plan view).
+  if (example.kind === "url") {
+    return (
+      <li className="flex items-start gap-2 text-sm">
+        <Link2 className="h-3.5 w-3.5 mt-1 flex-shrink-0 text-muted-foreground" />
+        <a
+          href={example.label}
+          target="_blank"
+          rel="noreferrer"
+          className="text-foreground hover:text-primary break-all cursor-pointer"
+        >
+          {example.label}
+        </a>
+      </li>
+    );
+  }
+  // Spam / disputed query — show with reason if any.
+  if (example.kind === "spam" || example.kind === "disputed") {
+    const tagText =
+      example.kind === "spam" ? "не моя тема" : "сомнительно";
+    const tagStyle =
+      example.kind === "spam"
+        ? "border-rose-300 bg-rose-50 text-rose-800"
+        : "border-amber-300 bg-amber-50 text-amber-800";
+    return (
+      <li className="flex items-start gap-2 text-sm">
+        <AlertCircle className="h-3.5 w-3.5 mt-1 flex-shrink-0 text-muted-foreground" />
+        <div className="flex-1 min-w-0">
+          <span className="font-medium">«{example.label}»</span>
+          <span
+            className={cn(
+              "ml-2 text-[10px] uppercase tracking-wide rounded-full border px-1.5 py-0.5",
+              tagStyle,
+            )}
+          >
+            {tagText}
+          </span>
+          {example.hint ? (
+            <div className="text-xs text-muted-foreground mt-0.5">
+              {example.hint}
+            </div>
+          ) : null}
+        </div>
+      </li>
+    );
+  }
+  // Missing-landings priority badge: high|medium|low — service name + quote
+  return (
+    <li className="flex items-start gap-2 text-sm">
+      <Quote className="h-3.5 w-3.5 mt-1 flex-shrink-0 text-muted-foreground" />
+      <div className="flex-1 min-w-0">
+        <span className="font-medium">{example.label}</span>
+        {example.kind === "high" && (
+          <span className="ml-2 text-[10px] uppercase tracking-wide rounded-full border border-red-300 bg-red-50 text-red-800 px-1.5 py-0.5">
+            важно
+          </span>
+        )}
+        {example.hint ? (
+          <div className="text-xs text-muted-foreground mt-0.5 italic">
+            «{example.hint}»
+          </div>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
 function Receipt({ evidence }: { evidence: Record<string, unknown> }) {
   const entries = Object.entries(evidence).filter(
-    ([, v]) => v !== null && v !== undefined,
+    ([, v]) =>
+      v !== null
+      && v !== undefined
+      && (typeof v === "string"
+        || typeof v === "number"
+        || typeof v === "boolean"),
   );
   if (entries.length === 0) return null;
   return (
-    <div className="flex items-center gap-3 flex-wrap mt-2 text-[11px] text-muted-foreground">
-      <AlertTriangle className="h-3 w-3 flex-shrink-0" />
-      <span className="font-medium">основание:</span>
+    <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-[11px] text-muted-foreground border-t pt-2">
+      <span className="font-medium uppercase tracking-wide">
+        основание:
+      </span>
       {entries.map(([k, v]) => (
         <span key={k} className="tabular-nums">
           <span className="text-muted-foreground/70">{k}</span>={" "}

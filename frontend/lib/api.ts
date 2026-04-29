@@ -968,8 +968,14 @@ export const api = {
         severity: "critical" | "high" | "medium" | "low";
         title: string;
         body_ru: string;
+        what_to_do_ru: string;
         link_to: string;
         link_label: string;
+        examples: Array<{
+          label: string;
+          kind: string;
+          hint?: string | null;
+        }>;
         evidence: Record<string, unknown>;
       }>;
     }>(`/studio/sites/${siteId}/plan`, { base: "admin" }),
