@@ -2534,4 +2534,70 @@ async def brain_action_chat(
     )
 
 
+# ── Studio v2 etap 7 (Phase C) · Free chat (whole-site context) ──────
+
+
+@router.post(
+    "/sites/{site_id}/chat",
+    response_model=BrainChatResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def brain_free_chat(
+    site_id: uuid.UUID,
+    body: BrainChatRequest,
+    db: AsyncSession = Depends(get_db),
+) -> BrainChatResponse:
+    """Free-form chat about the whole site.
+
+    Wider context than per-action chat: business profile +
+    understanding narrative + full snapshot + current plan.
+    The system prompt enforces the same anti-hallucination contract
+    (no fabrication, refer to plan for «what to do», explain terms,
+    trust owner overrides).
+
+    Stateless: client sends history each turn.
+    """
+    site = await _site_or_404(db, site_id)
+    msg = (body.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="message is empty")
+
+    from app.core_audit.brain import build_plan, build_snapshot
+    from app.core_audit.brain.free_chat import (
+        MAX_HISTORY_MESSAGES,
+        free_chat,
+    )
+
+    snap = await build_snapshot(db, site)
+    plan = build_plan(snap, max_actions=10)
+
+    sanitised: list[dict[str, str]] = []
+    for m in (body.history or [])[-MAX_HISTORY_MESSAGES:]:
+        role = m.role if m.role in ("user", "assistant") else "user"
+        content = (m.content or "").strip()
+        if content:
+            sanitised.append({"role": role, "content": content})
+
+    import anyio
+    result = await anyio.to_thread.run_sync(
+        lambda: free_chat(
+            domain=site.domain,
+            target_config=site.target_config or {},
+            understanding=site.understanding or {},
+            snap=snap,
+            plan=plan,
+            history=sanitised,
+            new_message=msg,
+        ),
+    )
+
+    return BrainChatResponse(
+        reply=result["reply"],
+        cost_usd=result["cost_usd"],
+        model=result.get("model") or None,
+        input_tokens=result.get("input_tokens"),
+        output_tokens=result.get("output_tokens"),
+    )
+
+
 __all__ = ["router"]

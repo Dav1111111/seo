@@ -2,7 +2,7 @@ import Link from "next/link";
 import {
   Activity, Search, Telescope, FileText, Swords,
   BarChart3, Megaphone, History, ChevronRight, Sparkles,
-  UserSquare,
+  UserSquare, MessageCircle,
 } from "lucide-react";
 
 import { BrainPlanCard } from "@/components/studio/brain-plan-card";
@@ -125,16 +125,26 @@ function StatusBadge({ status, reason }: { status: ModuleStatus; reason?: string
 export default function StudioIndexPage() {
   return (
     <div className="p-4 sm:p-6 space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <Sparkles className="h-6 w-6 text-primary" />
-          Студия
-        </h1>
-        <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
-          Каждый модуль отвечает за одну сущность — запросы, индексацию, страницы, конкурентов.
-          Их можно запускать отдельно, видеть статус каждого, тестировать пошагово и наблюдать
-          эффект до и после правок.
-        </p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold flex items-center gap-2">
+            <Sparkles className="h-6 w-6 text-primary" />
+            Студия
+          </h1>
+          <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
+            Каждый модуль отвечает за одну сущность — запросы, индексацию, страницы, конкурентов.
+            Их можно запускать отдельно, видеть статус каждого, тестировать пошагово и наблюдать
+            эффект до и после правок.
+          </p>
+        </div>
+        <Link
+          href="/studio/chat"
+          className="inline-flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 hover:bg-primary/10 px-3 py-2 text-sm font-medium text-primary transition-colors cursor-pointer"
+          title="Свободный чат с помощником: задавай вопросы про индексацию, запросы, любые термины — он видит всё что собрано по сайту"
+        >
+          <MessageCircle className="h-4 w-4" />
+          Спросить помощника
+        </Link>
       </div>
 
       {/* V2 etap 7 — brain plan synthesised from all module data.
