@@ -1815,3 +1815,152 @@ def studio_review_page_task(
             return {"status": terminal, **stats}
 
     return _run_async(_run())
+
+
+@celery_app.task(name="missing_landings_scan", bind=True, max_retries=1)
+def missing_landings_scan_task(self, site_id: str, run_id: str | None = None):
+    """Studio v2 etap 6 — find services described in business narrative
+    that lack a dedicated landing page.
+
+    Reads `sites.understanding` (built earlier by BusinessUnderstanding)
+    + `sites.target_config` + the Page table, asks Haiku to spot gaps,
+    drops anything whose evidence_quote is not actually a substring of
+    the narrative, and writes the survivors to
+    `target_config.missing_landings` without touching other slots.
+    """
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.core_audit.missing_landings import find_missing_landings
+    from app.core_audit.sites.locks import lock_site_target_config
+    from app.models.page import Page
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if site is None:
+                await emit_terminal(
+                    db, site_id, "missing_landings", "failed",
+                    "Сайт не найден.",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": "site not found"}
+
+            understanding = site.understanding or {}
+            if not (understanding.get("narrative_ru") or "").strip():
+                await emit_terminal(
+                    db, site_id, "missing_landings", "skipped",
+                    "Не запускаю: нет business understanding (narrative_ru пустой). "
+                    "Сначала построй понимание бизнеса, потом возвращайся.",
+                    extra={"reason": "no_understanding"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "no_understanding"}
+
+            pages_res = await db.execute(
+                select(Page)
+                .where(Page.site_id == site.id)
+                .order_by(Page.url)
+            )
+            page_rows = pages_res.scalars().all()
+            page_dicts = [
+                {
+                    "path": p.path or p.url,
+                    "url": p.url,
+                    "title": p.title,
+                    "h1": p.h1,
+                    "meta_description": p.meta_description,
+                    "content_snippet": (p.content_text or "")[:600],
+                }
+                for p in page_rows
+            ]
+            if not page_dicts:
+                await emit_terminal(
+                    db, site_id, "missing_landings", "skipped",
+                    "Не запускаю: страниц сайта в базе ещё нет — запусти краулинг.",
+                    extra={"reason": "no_pages"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "no_pages"}
+
+            await log_event(
+                db, site_id, "missing_landings", "started",
+                f"Ищу услуги без посадочных среди {len(page_dicts)} страниц…",
+                run_id=run_id,
+            )
+
+            try:
+                import anyio
+                result = await anyio.to_thread.run_sync(
+                    lambda: find_missing_landings(
+                        understanding=understanding,
+                        target_config=site.target_config or {},
+                        pages=page_dicts,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "missing_landings_scan.failed site=%s err=%s",
+                    site_id, exc,
+                )
+                await emit_terminal(
+                    db, site_id, "missing_landings", "failed",
+                    f"LLM-ошибка: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": str(exc)}
+
+            # Persist into target_config.missing_landings WITHOUT touching
+            # the competitor module's growth_opportunities slot.
+            await lock_site_target_config(db, site_id)
+            await db.refresh(site)
+            cfg = dict(site.target_config or {})
+            cfg["missing_landings"] = result
+            site.target_config = cfg
+            await db.commit()
+
+            n_items = len(result["items"])
+            n_rejected = result["rejected_no_evidence"]
+            cost = result["cost_usd"]
+            if n_items == 0:
+                if n_rejected:
+                    message = (
+                        f"Не нашёл пропущенных посадочных. LLM предложил "
+                        f"{n_rejected}, но evidence-фильтр отбросил всё — "
+                        f"модель не сослалась на конкретный текст бизнеса."
+                    )
+                    terminal = "done"
+                else:
+                    summary = result.get("summary_ru") or "Все услуги покрыты страницами."
+                    message = (
+                        f"{summary} (LLM проверил {len(page_dicts)} страниц, "
+                        f"стоимость ${cost:.4f}.)"
+                    )
+                    terminal = "done"
+            else:
+                priorities = [it["priority"] for it in result["items"]]
+                high = priorities.count("high")
+                tail = (
+                    f", {n_rejected} отбросил без evidence" if n_rejected else ""
+                )
+                message = (
+                    f"Нашёл {n_items} {'услугу' if n_items == 1 else 'услуг'} "
+                    f"без отдельных страниц "
+                    f"({high} высокого приоритета){tail}. "
+                    f"Стоимость ${cost:.4f}."
+                )
+                terminal = "done"
+
+            await emit_terminal(
+                db, site_id, "missing_landings", terminal, message,
+                extra={
+                    "items": n_items,
+                    "rejected_no_evidence": n_rejected,
+                    "cost_usd": cost,
+                    "model": result.get("model"),
+                },
+                run_id=run_id,
+            )
+            return {"status": terminal, "items": n_items, "cost_usd": cost}
+
+    return _run_async(_run())

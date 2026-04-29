@@ -49,6 +49,9 @@ import {
   TrendingDown,
   Check,
   X,
+  MapPin,
+  Compass,
+  Quote,
 } from "lucide-react";
 import { cn, getErrorMessage } from "@/lib/utils";
 
@@ -83,7 +86,9 @@ export default function StudioCompetitorsPage() {
   const { currentSite, loading: siteLoading } = useSite();
   const siteId = currentSite?.id || "";
 
-  const [busy, setBusy] = useState<"discover" | "deep-dive" | null>(null);
+  const [busy, setBusy] = useState<
+    "discover" | "deep-dive" | "missing-landings" | null
+  >(null);
   const [banner, setBanner] = useState<{
     kind: "ok" | "err";
     text: string;
@@ -115,6 +120,18 @@ export default function StudioCompetitorsPage() {
     () => api.getGrowthOpportunities(siteId),
     {
       refreshInterval: () => (busy !== null ? 4000 : 0),
+    },
+  );
+
+  // V2 etap 6 — missing landing pages. Independent of competitor data:
+  // it derives from `sites.understanding` + Page table, not SERPs. Same
+  // pollwhile-busy pattern as the rest.
+  const { data: missingLandings } = useSWR(
+    siteId ? studioKey("missing_landings", siteId) : null,
+    () => api.studioGetMissingLandings(siteId),
+    {
+      refreshInterval: () =>
+        busy === "missing-landings" ? 4000 : 0,
     },
   );
 
@@ -178,6 +195,32 @@ export default function StudioCompetitorsPage() {
       setBanner({ kind: "err", text: getErrorMessage(e) });
     } finally {
       setSafeTimeout(() => setBusy(null), 3000);
+    }
+  }
+
+  async function onScanMissingLandings() {
+    if (!siteId || busy) return;
+    setBusy("missing-landings");
+    setBanner(null);
+    try {
+      const res = await api.studioTriggerMissingLandingsScan(siteId);
+      if (res.deduped) {
+        setBanner({
+          kind: "ok",
+          text: `Сканирование уже идёт (run ${res.run_id.slice(0, 8)}…). Карточки обновятся сами.`,
+        });
+      } else {
+        setBanner({
+          kind: "ok",
+          text: `Ищу услуги без посадочных… task ${res.task_id?.slice(0, 8)}…. Один LLM-вызов, ~30 секунд, ~10 центов.`,
+        });
+      }
+    } catch (e: unknown) {
+      setBanner({ kind: "err", text: getErrorMessage(e) });
+    } finally {
+      // Hold busy a bit longer than other actions — single LLM call is
+      // ~30 s, so 60 s safety net so polling stays alive end-to-end.
+      setSafeTimeout(() => setBusy(null), 60_000);
     }
   }
 
@@ -250,6 +293,23 @@ export default function StudioCompetitorsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onScanMissingLandings}
+            disabled={busy !== null}
+            title="Найти услуги в narrative бизнеса, под которые нет отдельной страницы. Защита от выдумок: каждое предложение требует точную цитату из narrative."
+          >
+            <Compass
+              className={cn(
+                "h-4 w-4 mr-2",
+                busy === "missing-landings" && "animate-spin",
+              )}
+            />
+            {busy === "missing-landings"
+              ? "Ищу…"
+              : "Услуги без страниц"}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -344,6 +404,18 @@ export default function StudioCompetitorsPage() {
             ))}
           </div>
         </section>
+      )}
+
+      {/* 1.5 Missing landings — services in narrative without a page.
+          We always render the section once we have a `missingLandings`
+          response: it explains its own state (never run / clean / has
+          gaps) per CONCEPT §5. */}
+      {missingLandings && (
+        <MissingLandingsSection
+          data={missingLandings}
+          onScan={onScanMissingLandings}
+          busy={busy === "missing-landings"}
+        />
       )}
 
       {/* 2. Competitor list */}
@@ -693,4 +765,199 @@ function DeepDiveTable({
       </CardContent>
     </Card>
   );
+}
+
+// ── Missing landings section ─────────────────────────────────────────
+
+const MISSING_PRIORITY_STYLE: Record<string, string> = {
+  high: "border-red-300 bg-red-50 text-red-900",
+  medium: "border-amber-300 bg-amber-50 text-amber-900",
+  low: "border-emerald-300 bg-emerald-50 text-emerald-900",
+};
+
+const MISSING_PRIORITY_LABEL: Record<string, string> = {
+  high: "важно",
+  medium: "средне",
+  low: "несрочно",
+};
+
+type MissingLandingsData = Awaited<
+  ReturnType<typeof api.studioGetMissingLandings>
+>;
+
+function MissingLandingsSection({
+  data,
+  onScan,
+  busy,
+}: {
+  data: MissingLandingsData;
+  onScan: () => void;
+  busy: boolean;
+}) {
+  const items = data.items || [];
+  const neverRun = !data.computed_at;
+  const computedAge = data.computed_at
+    ? formatDateRu(data.computed_at)
+    : null;
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <h2 className="font-medium text-lg flex items-center gap-2">
+          <MapPin className="h-5 w-5 text-primary" />
+          Услуги без посадочных страниц
+          {items.length > 0 && (
+            <span className="text-muted-foreground font-normal text-base">
+              ({items.length})
+            </span>
+          )}
+        </h2>
+        {!neverRun && (
+          <span className="text-xs text-muted-foreground">
+            проверено {computedAge}
+            {data.input_pages != null
+              ? ` · ${data.input_pages} ${pluralRu(data.input_pages, ["страница", "страницы", "страниц"])}`
+              : ""}
+            {data.cost_usd != null
+              ? ` · стоимость $${data.cost_usd.toFixed(4)}`
+              : ""}
+          </span>
+        )}
+      </div>
+
+      {neverRun ? (
+        <Card className="border-dashed">
+          <CardContent className="pt-6 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Модуль ищет услуги, которые упомянуты в описании бизнеса
+              (narrative + observed_facts), но под них нет отдельной
+              страницы. Пример: «экспедиции в Крым» в описании, но
+              страницы <code>/experiences/exp-crimea</code> на сайте нет.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Защита от выдумок: каждое предложение требует точную
+              цитату из narrative — если её нет, элемент отбрасывается.
+            </p>
+            <Button onClick={onScan} disabled={busy} size="sm">
+              <Compass
+                className={cn("h-4 w-4 mr-2", busy && "animate-spin")}
+              />
+              {busy ? "Ищу…" : "Найти услуги без страниц"}
+            </Button>
+          </CardContent>
+        </Card>
+      ) : items.length === 0 ? (
+        <Card className="border-dashed">
+          <CardContent className="pt-6 text-sm text-muted-foreground">
+            {data.summary_ru ||
+              "Все упомянутые услуги покрыты страницами."}
+            {data.rejected_no_evidence
+              ? ` LLM предложил ${data.rejected_no_evidence}, но evidence-фильтр отбросил всё (модель не сослалась на конкретный текст).`
+              : ""}
+          </CardContent>
+        </Card>
+      ) : (
+        <>
+          {data.summary_ru && (
+            <p className="text-sm text-muted-foreground">
+              {data.summary_ru}
+            </p>
+          )}
+          <div className="space-y-2">
+            {items.map((item, idx) => (
+              <MissingLandingCard key={idx} item={item} />
+            ))}
+          </div>
+          {data.rejected_no_evidence ? (
+            <p className="text-xs text-muted-foreground">
+              Дополнительно {data.rejected_no_evidence} предложений LLM
+              было отброшено: модель не сослалась на конкретный
+              фрагмент описания бизнеса.
+            </p>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+}
+
+function MissingLandingCard({
+  item,
+}: {
+  item: MissingLandingsData["items"][number];
+}) {
+  const ps =
+    MISSING_PRIORITY_STYLE[item.priority] ||
+    MISSING_PRIORITY_STYLE.medium;
+  return (
+    <Card>
+      <CardContent className="pt-5 space-y-3">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span
+            className={cn(
+              "text-[10px] uppercase tracking-wide rounded-full border px-2 py-0.5",
+              ps,
+            )}
+          >
+            {MISSING_PRIORITY_LABEL[item.priority] || item.priority}
+          </span>
+          <span className="font-medium text-base">
+            {item.service_name}
+          </span>
+          {item.suggested_url_path && (
+            <code className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+              {item.suggested_url_path}
+            </code>
+          )}
+        </div>
+
+        {item.why_it_matters_ru && (
+          <p className="text-sm leading-snug">{item.why_it_matters_ru}</p>
+        )}
+
+        <div className="rounded-md border border-amber-200 bg-amber-50/50 px-3 py-2 text-xs flex items-start gap-2">
+          <Quote className="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-amber-700" />
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-amber-800/80 mb-0.5">
+              Цитата из описания бизнеса
+            </div>
+            <span className="italic">«{item.evidence_quote}»</span>
+          </div>
+        </div>
+
+        {item.closest_existing_url && (
+          <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+            Ближайшая существующая страница:{" "}
+            <a
+              href={item.closest_existing_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-foreground hover:text-primary inline-flex items-center gap-1"
+            >
+              {item.closest_existing_url}
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatDateRu(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const diffMs = Date.now() - d.getTime();
+    const minutes = Math.round(diffMs / 60_000);
+    if (minutes < 1) return "только что";
+    if (minutes < 60)
+      return `${minutes} ${pluralRu(minutes, ["минуту", "минуты", "минут"])} назад`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24)
+      return `${hours} ${pluralRu(hours, ["час", "часа", "часов"])} назад`;
+    const days = Math.round(hours / 24);
+    return `${days} ${pluralRu(days, ["день", "дня", "дней"])} назад`;
+  } catch {
+    return iso;
+  }
 }

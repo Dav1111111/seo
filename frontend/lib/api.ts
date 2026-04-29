@@ -941,4 +941,36 @@ export const api = {
       }>;
       cross_links: Record<string, boolean>;
     }>(`/studio/sites/${siteId}/pages/${pageId}`, { base: "admin" }),
+
+  // V2 etap 6 — missing landing pages (services in narrative without
+  // a dedicated URL).
+  studioTriggerMissingLandingsScan: (siteId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/missing-landings/scan`,
+      { method: "POST", base: "admin" },
+    ),
+
+  studioGetMissingLandings: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      summary_ru: string;
+      model: string | null;
+      cost_usd: number | null;
+      input_pages: number | null;
+      rejected_no_evidence: number | null;
+      computed_at: string | null;
+      items: Array<{
+        service_name: string;
+        evidence_quote: string;
+        closest_existing_url: string | null;
+        suggested_url_path: string;
+        why_it_matters_ru: string;
+        priority: "high" | "medium" | "low";
+      }>;
+    }>(`/studio/sites/${siteId}/missing-landings`, { base: "admin" }),
 };

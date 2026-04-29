@@ -2206,4 +2206,133 @@ async def put_profile(
     return await get_profile(site_id, db)
 
 
+# ── Studio v2 etap 6 · Missing landings ───────────────────────────────
+
+
+class MissingLandingItem(BaseModel):
+    service_name: str
+    evidence_quote: str
+    closest_existing_url: str | None
+    suggested_url_path: str
+    why_it_matters_ru: str
+    priority: str  # high|medium|low
+
+
+class MissingLandingsOut(BaseModel):
+    site_id: str
+    items: list[MissingLandingItem]
+    summary_ru: str
+    model: str | None
+    cost_usd: float | None
+    input_pages: int | None
+    rejected_no_evidence: int | None
+    computed_at: datetime | None
+
+
+@router.post(
+    "/sites/{site_id}/missing-landings/scan",
+    response_model=TriggerResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_missing_landings_scan(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TriggerResponse:
+    """Run the missing-landings detector. Idempotent within 60 seconds
+    via the standard recent-event guard — re-clicking returns the same
+    run_id instead of queuing a duplicate LLM call.
+    """
+    site = await _site_or_404(db, site_id)
+    if not (
+        (site.understanding or {}).get("narrative_ru") or ""
+    ).strip():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "no business understanding yet — narrative_ru is empty. "
+                "Run business understanding first."
+            ),
+        )
+
+    recent = await _recent_started_event(db, site_id, "missing_landings")
+    if recent is not None:
+        return TriggerResponse(
+            status="deduped",
+            task_id=None,
+            run_id=str(recent.run_id) if recent.run_id else "",
+            deduped=True,
+        )
+
+    from app.collectors.tasks import missing_landings_scan_task
+
+    run_id = str(uuid.uuid4())
+    task = missing_landings_scan_task.delay(str(site_id), run_id=run_id)
+    return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
+
+
+@router.get(
+    "/sites/{site_id}/missing-landings",
+    response_model=MissingLandingsOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_missing_landings(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> MissingLandingsOut:
+    """Return the cached missing-landings result for a site.
+
+    Empty payload (`items=[]`, `computed_at=null`) means the scan has
+    never been run — UI should surface a «нажми «Найти услуги без
+    страниц»» empty state.
+    """
+    site = await _site_or_404(db, site_id)
+    cfg = site.target_config or {}
+    payload = cfg.get("missing_landings") or {}
+
+    items_raw = payload.get("items") or []
+    items: list[MissingLandingItem] = []
+    for it in items_raw:
+        if not isinstance(it, dict):
+            continue
+        items.append(MissingLandingItem(
+            service_name=str(it.get("service_name") or ""),
+            evidence_quote=str(it.get("evidence_quote") or ""),
+            closest_existing_url=it.get("closest_existing_url") or None,
+            suggested_url_path=str(it.get("suggested_url_path") or ""),
+            why_it_matters_ru=str(it.get("why_it_matters_ru") or ""),
+            priority=str(it.get("priority") or "medium"),
+        ))
+
+    computed_at = payload.get("computed_at")
+    computed_dt: datetime | None = None
+    if computed_at:
+        try:
+            computed_dt = datetime.fromisoformat(str(computed_at).replace("Z", "+00:00"))
+        except ValueError:
+            computed_dt = None
+
+    return MissingLandingsOut(
+        site_id=str(site_id),
+        items=items,
+        summary_ru=str(payload.get("summary_ru") or ""),
+        model=payload.get("model") or None,
+        cost_usd=(
+            float(payload["cost_usd"])
+            if isinstance(payload.get("cost_usd"), (int, float))
+            else None
+        ),
+        input_pages=(
+            int(payload["input_pages"])
+            if isinstance(payload.get("input_pages"), int)
+            else None
+        ),
+        rejected_no_evidence=(
+            int(payload["rejected_no_evidence"])
+            if isinstance(payload.get("rejected_no_evidence"), int)
+            else None
+        ),
+        computed_at=computed_dt,
+    )
+
+
 __all__ = ["router"]
