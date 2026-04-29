@@ -184,10 +184,12 @@ def test_harmful_silent_when_no_classifier_run() -> None:
 
 def test_harmful_severity_scales() -> None:
     """26 spam + 11 disputed on grandtourspirit (37 of 45 = 82%) ⇒
-    critical. 5 spam total ⇒ medium. The thresholds are deliberately
-    set so a clean site stays calm."""
+    critical. A small share on a healthy site ⇒ medium.
+    Thresholds: ≥20 bad OR ≥40% share = critical, ≥8 OR ≥20% = high,
+    else medium. Picking 2 + 1 on a 50-query site (6%) keeps small
+    below the high cutoff — exactly the «calm site» case we want."""
     big = build_plan(_snap(own=4, spam=26, disputed=11))
-    small = build_plan(_snap(own=20, spam=3, disputed=2))
+    small = build_plan(_snap(own=47, spam=2, disputed=1))
     big_a = _by_id(big.actions, "queries:harmful")
     small_a = _by_id(small.actions, "queries:harmful")
     assert big_a and big_a.severity == "critical"
