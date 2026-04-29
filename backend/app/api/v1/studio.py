@@ -1516,6 +1516,48 @@ class PageDetail(BaseModel):
     cross_links: dict[str, bool]
 
 
+@router.post(
+    "/sites/{site_id}/pages/{page_id}/review",
+    response_model=TriggerResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_page_review(
+    site_id: uuid.UUID,
+    page_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> TriggerResponse:
+    """Studio v2 etap 3 — trigger review for ONE page on demand.
+
+    Reuses the existing Reviewer pipeline; the wrapper task adds
+    activity events so the page workspace can show «идёт ревью…»
+    and auto-refresh on completion. Underlying composite-hash dedup
+    means re-clicking is cheap if content hasn't changed.
+    """
+    site = await _site_or_404(db, site_id)
+    page = (await db.execute(
+        select(Page).where(Page.id == page_id, Page.site_id == site.id),
+    )).scalar_one_or_none()
+    if page is None:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    recent = await _recent_started_event(db, site_id, "page_review")
+    if recent is not None:
+        return TriggerResponse(
+            status="deduped",
+            task_id=None,
+            run_id=str(recent.run_id) if recent.run_id else "",
+            deduped=True,
+        )
+
+    from app.collectors.tasks import studio_review_page_task
+
+    run_id = str(uuid.uuid4())
+    task = studio_review_page_task.delay(
+        str(site_id), str(page_id), run_id=run_id,
+    )
+    return TriggerResponse(status="queued", task_id=task.id, run_id=run_id)
+
+
 @router.get(
     "/sites/{site_id}/pages/{page_id}",
     response_model=PageDetail,

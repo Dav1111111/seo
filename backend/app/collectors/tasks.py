@@ -1719,3 +1719,97 @@ def webmaster_url_indexation_site_task(
             return {"status": "done", **stats}
 
     return _run_async(_run())
+
+
+@celery_app.task(name="studio_review_page", bind=True, max_retries=1)
+def studio_review_page_task(
+    self, site_id: str, page_id: str, run_id: str | None = None,
+):
+    """Studio v2 etap 3 — review one page on demand.
+
+    Wraps the existing `Reviewer.review_page` so the Studio UI can
+    trigger «Запустить ревью» from the page workspace without going
+    through the global pipeline. Emits activity events so the page
+    can show «идёт ревью…» state and auto-refresh on completion.
+
+    Idempotency: the underlying `review_page` already has its own
+    composite-hash dedup (skip if page content hasn't changed since
+    last review), so re-clicking is cheap.
+    """
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.core_audit.review.reviewer import Reviewer
+    from app.models.page import Page
+
+    async def _run():
+        async with task_session() as db:
+            page = (await db.execute(
+                select(Page).where(Page.id == UUID(page_id))
+            )).scalar_one_or_none()
+            if page is None:
+                await emit_terminal(
+                    db, site_id, "page_review", "failed",
+                    "Страница не найдена.",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": "page not found"}
+
+            await log_event(
+                db, site_id, "page_review", "started",
+                f"Запускаю ревью страницы {page.path or page.url}.",
+                extra={"page_id": page_id},
+                run_id=run_id,
+            )
+
+            try:
+                result = await Reviewer().review_page(db, UUID(page_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "studio_review_page.failed page=%s err=%s", page_id, exc,
+                )
+                await emit_terminal(
+                    db, site_id, "page_review", "failed",
+                    f"Reviewer упал: {str(exc)[:200]}.",
+                    extra={"page_id": page_id},
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": str(exc)}
+
+            recs = len(result.recommendations or [])
+            skip_reason = result.skip_reason.value if result.skip_reason else None
+            status_value = result.status.value if hasattr(result.status, "value") else str(result.status)
+
+            if skip_reason == "content_unchanged":
+                message = (
+                    "Ревью пропущено: содержимое страницы не менялось с "
+                    "прошлого раза. Если хочешь принудительно — обнови "
+                    "page-content (rerun crawl) и нажми снова."
+                )
+                terminal = "skipped"
+            elif skip_reason:
+                message = f"Ревью пропущено: {skip_reason}."
+                terminal = "skipped"
+            elif status_value == "completed":
+                message = (
+                    f"Ревью готово: {recs} {'рекомендация' if recs == 1 else 'рекомендаций'} "
+                    f"(модель {result.reviewer_model}, ${result.cost_usd:.4f})."
+                )
+                terminal = "done"
+            else:
+                message = f"Ревью завершилось со статусом {status_value}."
+                terminal = "failed" if status_value == "failed" else "done"
+
+            stats = {
+                "page_id": page_id,
+                "status": status_value,
+                "skip_reason": skip_reason,
+                "recommendations": recs,
+                "reviewer_model": result.reviewer_model,
+                "cost_usd": float(result.cost_usd or 0.0),
+            }
+            await emit_terminal(
+                db, site_id, "page_review", terminal, message,
+                extra=stats, run_id=run_id,
+            )
+            return {"status": terminal, **stats}
+
+    return _run_async(_run())

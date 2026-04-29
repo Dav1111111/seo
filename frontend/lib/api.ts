@@ -878,6 +878,18 @@ export const api = {
       metrica_latest_date: string | null;
     }>(`/studio/sites/${siteId}/analytics?days=${days}`, { base: "admin" }),
 
+  // V2 etap 3 — trigger per-page review on demand (Reviewer pipeline).
+  studioTriggerPageReview: (siteId: string, pageId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/pages/${pageId}/review`,
+      { method: "POST", base: "admin" },
+    ),
+
   studioGetPage: (siteId: string, pageId: string) =>
     apiFetch<{
       page_id: string;

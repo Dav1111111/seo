@@ -31,7 +31,7 @@
  *     metrics is site-wide; converting it is its own scope.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -40,6 +40,7 @@ import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
 import { fmtAge, pluralRu } from "@/lib/format";
+import { useTimeoutSetter } from "@/lib/hooks/use-timeout";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -60,6 +61,8 @@ import {
   Swords,
   History as HistoryIcon,
   Info,
+  Brain,
+  RefreshCw,
 } from "lucide-react";
 import { cn, getErrorMessage } from "@/lib/utils";
 
@@ -107,15 +110,67 @@ export default function StudioPageWorkspace() {
   const { currentSite, loading: siteLoading } = useSite();
   const siteId = currentSite?.id || "";
 
+  // V2 etap 3 — review trigger state. We poll detail SWR every 5s
+  // while the task is running so review/recommendations appear without
+  // a manual refresh. Mirror the bool into a ref so SWR's
+  // refreshInterval callback always sees the latest value (the same
+  // stale-closure pattern we hit in /queries/harmful).
+  const [reviewPending, setReviewPending] = useState(false);
+  const reviewPendingRef = useRef(false);
+  useEffect(() => {
+    reviewPendingRef.current = reviewPending;
+  }, [reviewPending]);
+  const setSafeTimeout = useTimeoutSetter();
+
   const { data, error, isLoading, mutate } = useSWR(
     siteId && pageId ? studioKey("page_detail", siteId, pageId) : null,
     () => api.studioGetPage(siteId, pageId),
+    {
+      refreshInterval: () => (reviewPendingRef.current ? 5000 : 0),
+    },
   );
+
+  // Stop polling once a review row appears (or refreshes after a re-run)
+  // — server signal that the task wrote results.
+  const lastReviewedAt = data?.review?.reviewed_at;
+  const reviewWatchRef = useRef<string | null | undefined>(lastReviewedAt);
+  useEffect(() => {
+    if (!reviewPending) {
+      reviewWatchRef.current = lastReviewedAt;
+      return;
+    }
+    if (lastReviewedAt && lastReviewedAt !== reviewWatchRef.current) {
+      setReviewPending(false);
+      reviewWatchRef.current = lastReviewedAt;
+    }
+  }, [lastReviewedAt, reviewPending]);
 
   // Local optimistic UI state for in-flight rec actions.
   // key = rec_id, value = label of the action we're firing
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  async function onTriggerReview() {
+    if (!siteId || !pageId || reviewPending) return;
+    setReviewPending(true);
+    setErrMsg(null);
+    try {
+      const res = await api.studioTriggerPageReview(siteId, pageId);
+      if (res.deduped) {
+        setErrMsg(
+          `Ревью уже идёт (run_id ${res.run_id.slice(0, 8)}…). Подожди — карточка обновится сама.`,
+        );
+      }
+      // Otherwise: state stays pending; SWR poll watches for new
+      // reviewed_at and clears it automatically.
+    } catch (e: unknown) {
+      setErrMsg(getErrorMessage(e));
+      setReviewPending(false);
+    }
+    // Safety net — if Celery hangs, drop pending after 5 min so the
+    // UI doesn't poll forever.
+    setSafeTimeout(() => setReviewPending(false), 300_000);
+  }
 
   async function changeRecStatus(
     recId: string,
@@ -360,9 +415,26 @@ export default function StudioPageWorkspace() {
           <CardContent className="pt-6 space-y-3">
             <div className="flex items-baseline justify-between gap-3 flex-wrap">
               <div className="font-medium">Ревью</div>
-              <div className="text-xs text-muted-foreground">
-                {review.reviewer_model} · {fmtAge(review.reviewed_at)} ·{" "}
-                стоимость ${review.cost_usd.toFixed(4)}
+              <div className="flex items-center gap-3">
+                <div className="text-xs text-muted-foreground">
+                  {review.reviewer_model} · {fmtAge(review.reviewed_at)} ·{" "}
+                  стоимость ${review.cost_usd.toFixed(4)}
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onTriggerReview}
+                  disabled={reviewPending}
+                  title="Перезапускает LLM-ревью этой страницы. Если контент не менялся — Reviewer сам пропустит без оплаты."
+                >
+                  <RefreshCw
+                    className={cn(
+                      "h-3.5 w-3.5 mr-1.5",
+                      reviewPending && "animate-spin",
+                    )}
+                  />
+                  {reviewPending ? "Идёт ревью…" : "Перезапустить"}
+                </Button>
               </div>
             </div>
 
@@ -382,15 +454,30 @@ export default function StudioPageWorkspace() {
         </Card>
       ) : (
         <Card className="border-dashed">
-          <CardContent className="pt-6 space-y-2">
-            <div className="font-medium">Ревью ещё не запускалось</div>
+          <CardContent className="pt-6 space-y-3">
+            <div className="font-medium flex items-center gap-2">
+              <Brain className="h-4 w-4 text-primary" />
+              Ревью ещё не запускалось
+            </div>
             <p className="text-sm text-muted-foreground">
-              Эта страница в БД есть (crawler её нашёл), но LLM-ревью
-              для неё ещё не было. Запустить можно из общего конвейера
-              на дашборде Студии — он прогонит ревью по всем страницам,
-              у которых либо нет ревью, либо контент изменился с
-              прошлого раза.
+              LLM (Haiku) прочитает контент страницы, сравнит с профилем
+              бизнеса и выдаст рекомендации: что переписать в title, H1,
+              meta description, тексте, какую schema.org добавить. Стоит
+              ~5-10 центов на одну страницу, занимает 10-30 секунд.
             </p>
+            <Button
+              onClick={onTriggerReview}
+              disabled={reviewPending}
+              size="sm"
+            >
+              <Brain
+                className={cn(
+                  "h-4 w-4 mr-2",
+                  reviewPending && "animate-pulse",
+                )}
+              />
+              {reviewPending ? "Идёт ревью…" : "Запустить ревью"}
+            </Button>
           </CardContent>
         </Card>
       )}
