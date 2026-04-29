@@ -2335,4 +2335,70 @@ async def get_missing_landings(
     )
 
 
+# ── Studio v2 etap 7 · Brain — «what to do this week» plan ──────────
+
+
+class BrainActionOut(BaseModel):
+    id: str
+    severity: str
+    title: str
+    body_ru: str
+    link_to: str
+    link_label: str
+    evidence: dict[str, Any]
+
+
+class BrainPlanOut(BaseModel):
+    site_id: str
+    domain: str
+    actions: list[BrainActionOut]
+    diagnostics: list[str]
+    computed_at: datetime
+
+
+@router.get(
+    "/sites/{site_id}/plan",
+    response_model=BrainPlanOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_brain_plan(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> BrainPlanOut:
+    """Studio v2 etap 7 — synthesised «do this first» plan.
+
+    Pure SQL aggregation + Russian rules, no LLM. Each Action carries
+    the raw counts that triggered it under `evidence`, so the UI can
+    show the receipt («3 вредных запроса в spam, 8 в disputed»)
+    instead of generative summaries.
+
+    Latency budget: <500 ms (six small COUNTs + one JSONB read).
+    """
+    site = await _site_or_404(db, site_id)
+
+    from app.core_audit.brain import build_plan, build_snapshot
+
+    snap = await build_snapshot(db, site)
+    plan = build_plan(snap)
+
+    return BrainPlanOut(
+        site_id=plan.site_id,
+        domain=plan.domain,
+        actions=[
+            BrainActionOut(
+                id=a.id,
+                severity=a.severity,
+                title=a.title,
+                body_ru=a.body_ru,
+                link_to=a.link_to,
+                link_label=a.link_label,
+                evidence=dict(a.evidence),
+            )
+            for a in plan.actions
+        ],
+        diagnostics=plan.diagnostics,
+        computed_at=snap.computed_at,
+    )
+
+
 __all__ = ["router"]

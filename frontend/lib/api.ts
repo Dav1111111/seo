@@ -955,6 +955,25 @@ export const api = {
       { method: "POST", base: "admin" },
     ),
 
+  // V2 etap 7 — brain. Synthesised «do this first» plan from all
+  // module data. Pure SQL + Russian rules, no LLM.
+  studioGetBrainPlan: (siteId: string) =>
+    apiFetch<{
+      site_id: string;
+      domain: string;
+      computed_at: string;
+      diagnostics: string[];
+      actions: Array<{
+        id: string;
+        severity: "critical" | "high" | "medium" | "low";
+        title: string;
+        body_ru: string;
+        link_to: string;
+        link_label: string;
+        evidence: Record<string, unknown>;
+      }>;
+    }>(`/studio/sites/${siteId}/plan`, { base: "admin" }),
+
   studioGetMissingLandings: (siteId: string) =>
     apiFetch<{
       site_id: string;

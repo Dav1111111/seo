@@ -5,6 +5,8 @@ import {
   UserSquare,
 } from "lucide-react";
 
+import { BrainPlanCard } from "@/components/studio/brain-plan-card";
+
 /**
  * Studio index — 8 module cards.
  *
@@ -134,6 +136,11 @@ export default function StudioIndexPage() {
           эффект до и после правок.
         </p>
       </div>
+
+      {/* V2 etap 7 — brain plan synthesised from all module data.
+          Stays above the module grid so the owner sees «do this
+          first» before the inventory of modules. */}
+      <BrainPlanCard />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-2">
         {MODULES.map((m) => {
