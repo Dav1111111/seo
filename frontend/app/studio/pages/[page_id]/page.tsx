@@ -167,9 +167,21 @@ export default function StudioPageWorkspace() {
       setErrMsg(getErrorMessage(e));
       setReviewPending(false);
     }
-    // Safety net — if Celery hangs, drop pending after 5 min so the
-    // UI doesn't poll forever.
-    setSafeTimeout(() => setReviewPending(false), 300_000);
+    // Safety net. python-only path < 1s, LLM path 10-30s. If by 45s
+    // there's still no review row — Reviewer пропустил страницу
+    // (например, не «strengthen»-кандидат: слишком узкий контент или
+    // дубль другой). Сбрасываем pending и поясняем — поллить
+    // бесконечно нечестно.
+    setSafeTimeout(() => {
+      if (reviewPendingRef.current) {
+        setReviewPending(false);
+        // mutate, чтобы подтянуть свежий data.review (вдруг таки записан)
+        mutate();
+        setErrMsg(
+          "Ревью не записалось. Скорее всего эта страница не идёт в ревью — Reviewer берёт только страницы, которые можно усилить (см. решение A в Module 3). Если уверен, что нужна — напиши, разберёмся.",
+        );
+      }
+    }, 45_000);
   }
 
   async function changeRecStatus(
