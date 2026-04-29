@@ -1761,7 +1761,9 @@ def studio_review_page_task(
             )
 
             try:
-                result = await Reviewer().review_page(db, UUID(page_id))
+                result = await Reviewer().review_page(
+                    db, UUID(page_id), None,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "studio_review_page.failed page=%s err=%s", page_id, exc,
