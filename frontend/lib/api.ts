@@ -980,14 +980,17 @@ export const api = {
       }>;
     }>(`/studio/sites/${siteId}/plan`, { base: "admin" }),
 
-  // V2 etap 7 Phase C — free chat about whole site. Wider context
-  // than per-action chat: business profile + snapshot + current plan.
+  // V2 etap 7 Phase C+D — free chat about whole site, persisted in DB.
+  // Pass `conversation_id=null` to start a new thread; the response
+  // carries `conversation_id` to continue. Server reads history from
+  // DB regardless of what the client thinks.
   studioBrainFreeChat: (
     siteId: string,
     message: string,
-    history: Array<{ role: "user" | "assistant"; content: string }>,
+    conversationId: string | null,
   ) =>
     apiFetch<{
+      conversation_id: string;
       reply: string;
       cost_usd: number;
       model: string | null;
@@ -996,8 +999,55 @@ export const api = {
     }>(`/studio/sites/${siteId}/chat`, {
       method: "POST",
       base: "admin",
-      body: JSON.stringify({ message, history }),
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+      }),
     }),
+
+  studioListConversations: (siteId: string, limit = 30) =>
+    apiFetch<
+      Array<{
+        id: string;
+        title: string | null;
+        message_count: number;
+        total_cost_usd: number;
+        last_message_at: string | null;
+        created_at: string;
+      }>
+    >(
+      `/studio/sites/${siteId}/conversations?limit=${limit}`,
+      { base: "admin" },
+    ),
+
+  studioGetConversation: (siteId: string, conversationId: string) =>
+    apiFetch<{
+      id: string;
+      title: string | null;
+      message_count: number;
+      total_cost_usd: number;
+      last_message_at: string | null;
+      created_at: string;
+      messages: Array<{
+        id: string;
+        role: "user" | "assistant";
+        content: string;
+        model: string | null;
+        cost_usd: number;
+        input_tokens: number;
+        output_tokens: number;
+        created_at: string;
+      }>;
+    }>(
+      `/studio/sites/${siteId}/conversations/${conversationId}`,
+      { base: "admin" },
+    ),
+
+  studioDeleteConversation: (siteId: string, conversationId: string) =>
+    apiFetch<null>(
+      `/studio/sites/${siteId}/conversations/${conversationId}`,
+      { method: "DELETE", base: "admin" },
+    ),
 
   // V2 etap 7 Phase B — chat about a specific brain plan action.
   // Stateless: client sends full history each turn.

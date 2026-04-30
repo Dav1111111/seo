@@ -2537,17 +2537,35 @@ async def brain_action_chat(
 # ── Studio v2 etap 7 (Phase C) · Free chat (whole-site context) ──────
 
 
+class FreeChatRequest(BaseModel):
+    """Phase D: client sends an existing `conversation_id` to continue
+    a saved thread, or null to start a new one. The server returns
+    `conversation_id` either way so the client can save it (URL or
+    localStorage) and re-attach next turn."""
+    message: str
+    conversation_id: uuid.UUID | None = None
+
+
+class FreeChatResponse(BaseModel):
+    conversation_id: uuid.UUID
+    reply: str
+    cost_usd: float
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
 @router.post(
     "/sites/{site_id}/chat",
-    response_model=BrainChatResponse,
+    response_model=FreeChatResponse,
     dependencies=[Depends(_require_admin)],
 )
 async def brain_free_chat(
     site_id: uuid.UUID,
-    body: BrainChatRequest,
+    body: FreeChatRequest,
     db: AsyncSession = Depends(get_db),
-) -> BrainChatResponse:
-    """Free-form chat about the whole site.
+) -> FreeChatResponse:
+    """Free-form chat about the whole site, with persistent history.
 
     Wider context than per-action chat: business profile +
     understanding narrative + full snapshot + current plan.
@@ -2555,7 +2573,16 @@ async def brain_free_chat(
     (no fabrication, refer to plan for «what to do», explain terms,
     trust owner overrides).
 
-    Stateless: client sends history each turn.
+    Phase D persistence:
+      - If `conversation_id` is null → create a new ChatConversation,
+        return its id in the response. Client saves it (URL `?c=<id>`
+        or localStorage) and sends back next turn.
+      - If `conversation_id` is set → load that thread's messages
+        from DB as history (overrides whatever the client thinks the
+        history is — DB is the source of truth).
+      - After the LLM call we persist BOTH the user turn and the
+        assistant turn in one transaction, with cost / tokens / model
+        attached to the assistant row.
     """
     site = await _site_or_404(db, site_id)
     msg = (body.message or "").strip()
@@ -2567,16 +2594,51 @@ async def brain_free_chat(
         MAX_HISTORY_MESSAGES,
         free_chat,
     )
+    from app.models.chat import ChatConversation, ChatMessage
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    # Resolve / create the conversation up-front so we have an id to
+    # attach to all writes below.
+    if body.conversation_id is not None:
+        conv = (await db.execute(
+            select(ChatConversation).where(
+                ChatConversation.id == body.conversation_id,
+                ChatConversation.site_id == site_id,
+                ChatConversation.kind == "free",
+            )
+        )).scalar_one_or_none()
+        if conv is None:
+            raise HTTPException(
+                status_code=404,
+                detail="conversation not found for this site",
+            )
+    else:
+        conv = ChatConversation(
+            site_id=site_id,
+            kind="free",
+            action_id=None,
+            title=None,
+            message_count=0,
+            total_cost_usd=Decimal("0"),
+        )
+        db.add(conv)
+        await db.flush()
+
+    # Load persisted history from DB. The client may pass nothing on
+    # reload — DB is the source of truth, so we always read.
+    history_rows = (await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conv.id)
+        .order_by(ChatMessage.created_at.asc())
+    )).scalars().all()
+    history = [
+        {"role": r.role, "content": r.content}
+        for r in history_rows[-MAX_HISTORY_MESSAGES:]
+    ]
 
     snap = await build_snapshot(db, site)
     plan = build_plan(snap, max_actions=10)
-
-    sanitised: list[dict[str, str]] = []
-    for m in (body.history or [])[-MAX_HISTORY_MESSAGES:]:
-        role = m.role if m.role in ("user", "assistant") else "user"
-        content = (m.content or "").strip()
-        if content:
-            sanitised.append({"role": role, "content": content})
 
     import anyio
     result = await anyio.to_thread.run_sync(
@@ -2586,18 +2648,204 @@ async def brain_free_chat(
             understanding=site.understanding or {},
             snap=snap,
             plan=plan,
-            history=sanitised,
+            history=history,
             new_message=msg,
         ),
     )
 
-    return BrainChatResponse(
+    # Persist both turns atomically. Title set on first user turn.
+    now = datetime.now(timezone.utc)
+    user_row = ChatMessage(
+        conversation_id=conv.id,
+        role="user",
+        content=msg,
+        cost_usd=Decimal("0"),
+    )
+    asst_row = ChatMessage(
+        conversation_id=conv.id,
+        role="assistant",
+        content=result["reply"] or "",
+        model=result.get("model") or None,
+        cost_usd=Decimal(str(result.get("cost_usd") or 0.0)),
+        input_tokens=int(result.get("input_tokens") or 0),
+        output_tokens=int(result.get("output_tokens") or 0),
+    )
+    db.add(user_row)
+    db.add(asst_row)
+
+    if conv.title is None:
+        # First user message becomes the conversation title (truncated).
+        conv.title = msg[:120]
+    conv.message_count = (conv.message_count or 0) + 2
+    conv.total_cost_usd = (conv.total_cost_usd or Decimal("0")) + Decimal(
+        str(result.get("cost_usd") or 0.0),
+    )
+    conv.last_message_at = now
+
+    await db.commit()
+
+    return FreeChatResponse(
+        conversation_id=conv.id,
         reply=result["reply"],
         cost_usd=result["cost_usd"],
         model=result.get("model") or None,
         input_tokens=result.get("input_tokens"),
         output_tokens=result.get("output_tokens"),
     )
+
+
+# ── Conversation list / detail / delete ──────────────────────────────
+
+
+class ConversationSummary(BaseModel):
+    id: uuid.UUID
+    title: str | None
+    message_count: int
+    total_cost_usd: float
+    last_message_at: datetime | None
+    created_at: datetime
+
+
+class ConversationMessage(BaseModel):
+    id: uuid.UUID
+    role: str
+    content: str
+    model: str | None = None
+    cost_usd: float
+    input_tokens: int
+    output_tokens: int
+    created_at: datetime
+
+
+class ConversationDetail(BaseModel):
+    id: uuid.UUID
+    title: str | None
+    message_count: int
+    total_cost_usd: float
+    last_message_at: datetime | None
+    created_at: datetime
+    messages: list[ConversationMessage]
+
+
+@router.get(
+    "/sites/{site_id}/conversations",
+    response_model=list[ConversationSummary],
+    dependencies=[Depends(_require_admin)],
+)
+async def list_conversations(
+    site_id: uuid.UUID,
+    limit: int = 30,
+    db: AsyncSession = Depends(get_db),
+) -> list[ConversationSummary]:
+    """List free-chat conversations for the site, newest activity
+    first. Used by the sidebar list in /studio/chat."""
+    await _site_or_404(db, site_id)
+    from app.models.chat import ChatConversation
+
+    rows = (await db.execute(
+        select(ChatConversation)
+        .where(
+            ChatConversation.site_id == site_id,
+            ChatConversation.kind == "free",
+        )
+        .order_by(
+            ChatConversation.last_message_at.desc().nulls_last(),
+            ChatConversation.created_at.desc(),
+        )
+        .limit(max(1, min(limit, 100)))
+    )).scalars().all()
+    return [
+        ConversationSummary(
+            id=c.id,
+            title=c.title,
+            message_count=c.message_count or 0,
+            total_cost_usd=float(c.total_cost_usd or 0),
+            last_message_at=c.last_message_at,
+            created_at=c.created_at,
+        )
+        for c in rows
+    ]
+
+
+@router.get(
+    "/sites/{site_id}/conversations/{conversation_id}",
+    response_model=ConversationDetail,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_conversation(
+    site_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> ConversationDetail:
+    """Full message log for one conversation. Used when /studio/chat
+    opens with `?c=<id>` — we hydrate the UI from this."""
+    await _site_or_404(db, site_id)
+    from app.models.chat import ChatConversation, ChatMessage
+
+    conv = (await db.execute(
+        select(ChatConversation).where(
+            ChatConversation.id == conversation_id,
+            ChatConversation.site_id == site_id,
+            ChatConversation.kind == "free",
+        )
+    )).scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    msgs = (await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conv.id)
+        .order_by(ChatMessage.created_at.asc())
+    )).scalars().all()
+
+    return ConversationDetail(
+        id=conv.id,
+        title=conv.title,
+        message_count=conv.message_count or 0,
+        total_cost_usd=float(conv.total_cost_usd or 0),
+        last_message_at=conv.last_message_at,
+        created_at=conv.created_at,
+        messages=[
+            ConversationMessage(
+                id=m.id,
+                role=m.role,
+                content=m.content,
+                model=m.model,
+                cost_usd=float(m.cost_usd or 0),
+                input_tokens=m.input_tokens or 0,
+                output_tokens=m.output_tokens or 0,
+                created_at=m.created_at,
+            )
+            for m in msgs
+        ],
+    )
+
+
+@router.delete(
+    "/sites/{site_id}/conversations/{conversation_id}",
+    status_code=204,
+    dependencies=[Depends(_require_admin)],
+)
+async def delete_conversation(
+    site_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Owner-initiated «удалить чат». Cascades to messages via FK."""
+    await _site_or_404(db, site_id)
+    from app.models.chat import ChatConversation
+
+    conv = (await db.execute(
+        select(ChatConversation).where(
+            ChatConversation.id == conversation_id,
+            ChatConversation.site_id == site_id,
+            ChatConversation.kind == "free",
+        )
+    )).scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    await db.delete(conv)
+    await db.commit()
 
 
 __all__ = ["router"]
