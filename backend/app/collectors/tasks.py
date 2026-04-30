@@ -1738,6 +1738,7 @@ def studio_review_page_task(
     """
     from app.core_audit.activity import emit_terminal, log_event
     from app.core_audit.review.reviewer import Reviewer
+    from app.intent.models import CoverageDecision
     from app.models.page import Page
 
     async def _run():
@@ -1753,16 +1754,64 @@ def studio_review_page_task(
                 )
                 return {"status": "failed", "error": "page not found"}
 
+            # Reviewer is decision-driven: it expects a strengthen-decision
+            # to know «which intent are we improving the page for». A
+            # manual UI trigger doesn't carry that id, so we look it up
+            # ourselves — pick the open strengthen decision targeting
+            # this page with the highest impressions, falling back to
+            # the most recent. Without a decision Reviewer would skip
+            # with `not_strengthen` even though the substrate exists.
+            decision_row = (await db.execute(
+                select(CoverageDecision)
+                .where(
+                    CoverageDecision.site_id == UUID(site_id),
+                    CoverageDecision.target_page_id == UUID(page_id),
+                    CoverageDecision.action == "strengthen",
+                    CoverageDecision.status == "open",
+                )
+                .order_by(
+                    CoverageDecision.total_impressions.desc(),
+                    CoverageDecision.decided_at.desc(),
+                )
+                .limit(1)
+            )).scalar_one_or_none()
+
+            if decision_row is None:
+                await emit_terminal(
+                    db, site_id, "page_review", "skipped",
+                    (
+                        "Ревью не запускается: для этой страницы нет "
+                        "решения «усилить» (strengthen). Это значит, "
+                        "что система не нашла запросов, под которые "
+                        "стоит докручивать именно её. Если уверен, что "
+                        "нужно — сначала запусти Decisioner на сайте."
+                    ),
+                    extra={"page_id": page_id, "reason": "no_strengthen_decision"},
+                    run_id=run_id,
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "no_strengthen_decision",
+                    "page_id": page_id,
+                }
+
             await log_event(
                 db, site_id, "page_review", "started",
-                f"Запускаю ревью страницы {page.path or page.url}.",
-                extra={"page_id": page_id},
+                (
+                    f"Запускаю ревью страницы {page.path or page.url} "
+                    f"(intent: {decision_row.intent_code})."
+                ),
+                extra={
+                    "page_id": page_id,
+                    "decision_id": str(decision_row.id),
+                    "intent_code": decision_row.intent_code,
+                },
                 run_id=run_id,
             )
 
             try:
                 result = await Reviewer().review_page(
-                    db, UUID(page_id), None,
+                    db, UUID(page_id), decision_row.id,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
