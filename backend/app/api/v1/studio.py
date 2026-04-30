@@ -2382,6 +2382,7 @@ class BrainActionOut(BaseModel):
     link_label: str
     examples: list[BrainActionExample] = []
     evidence: dict[str, Any]
+    in_focus: bool = False  # Phase E step 2 — set when action signals overlap focus tokens
 
 
 class BrainPlanOut(BaseModel):
@@ -2390,6 +2391,7 @@ class BrainPlanOut(BaseModel):
     actions: list[BrainActionOut]
     diagnostics: list[str]
     computed_at: datetime
+    focus_label: str | None = None  # owner's «Сейчас работаем над…» if any
 
 
 @router.get(
@@ -2415,7 +2417,7 @@ async def get_brain_plan(
     from app.core_audit.brain import build_plan, build_snapshot
 
     snap = await build_snapshot(db, site)
-    plan = build_plan(snap)
+    plan = build_plan(snap, target_config=site.target_config or {})
 
     return BrainPlanOut(
         site_id=plan.site_id,
@@ -2438,11 +2440,13 @@ async def get_brain_plan(
                     for ex in (a.examples or [])
                 ],
                 evidence=dict(a.evidence),
+                in_focus=bool(a.in_focus),
             )
             for a in plan.actions
         ],
         diagnostics=plan.diagnostics,
         computed_at=snap.computed_at,
+        focus_label=plan.focus_label,
     )
 
 
@@ -2496,7 +2500,7 @@ async def brain_action_chat(
     )
 
     snap = await build_snapshot(db, site)
-    plan = build_plan(snap, max_actions=10)
+    plan = build_plan(snap, max_actions=10, target_config=site.target_config or {})
     action = next((a for a in plan.actions if a.id == action_id), None)
     if action is None:
         raise HTTPException(
@@ -2547,9 +2551,26 @@ class FreeChatRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
 
 
+class FocusProposalOut(BaseModel):
+    """Phase E step 2 — when the model calls propose_strategic_focus,
+    we hand the structured payload to the frontend so it can render
+    the «Применить фокус?» modal. Owner confirms, frontend POSTs to
+    /strategic-focus/from-proposal — server validates and persists."""
+    label: str
+    products: list[str] = []
+    regions: list[str] = []
+    query_signals: list[str] = []
+    deprioritised: list[str] = []
+    exit_criterion: str | None = None
+    owner_note: str | None = None
+    deadline: str | None = None
+    rationale: str = ""
+
+
 class FreeChatResponse(BaseModel):
     conversation_id: uuid.UUID
-    reply: str
+    reply: str | None = None
+    proposal: FocusProposalOut | None = None
     cost_usd: float
     model: str | None = None
     input_tokens: int | None = None
@@ -2639,7 +2660,7 @@ async def brain_free_chat(
     ]
 
     snap = await build_snapshot(db, site)
-    plan = build_plan(snap, max_actions=10)
+    plan = build_plan(snap, max_actions=10, target_config=site.target_config or {})
 
     import anyio
     result = await anyio.to_thread.run_sync(
@@ -2662,10 +2683,25 @@ async def brain_free_chat(
         content=msg,
         cost_usd=Decimal("0"),
     )
+    # When the model called the focus tool with no accompanying text,
+    # store a stable placeholder so the conversation thread reads
+    # naturally on reload — UI also gets `proposal` separately.
+    proposal = result.get("proposal")
+    if result.get("reply"):
+        assistant_content = result["reply"]
+    elif proposal:
+        rationale = (proposal.get("rationale") or "").strip()
+        label = (proposal.get("label") or "").strip()
+        assistant_content = (
+            f"📌 Предложил установить стратегический фокус: «{label}». "
+            f"{rationale}".strip()
+        )
+    else:
+        assistant_content = ""
     asst_row = ChatMessage(
         conversation_id=conv.id,
         role="assistant",
-        content=result["reply"] or "",
+        content=assistant_content,
         model=result.get("model") or None,
         cost_usd=Decimal(str(result.get("cost_usd") or 0.0)),
         input_tokens=int(result.get("input_tokens") or 0),
@@ -2685,9 +2721,24 @@ async def brain_free_chat(
 
     await db.commit()
 
+    proposal_out: FocusProposalOut | None = None
+    if proposal:
+        proposal_out = FocusProposalOut(
+            label=str(proposal.get("label") or ""),
+            products=list(proposal.get("products") or []),
+            regions=list(proposal.get("regions") or []),
+            query_signals=list(proposal.get("query_signals") or []),
+            deprioritised=list(proposal.get("deprioritised") or []),
+            exit_criterion=proposal.get("exit_criterion"),
+            owner_note=proposal.get("owner_note"),
+            deadline=proposal.get("deadline"),
+            rationale=str(proposal.get("rationale") or ""),
+        )
+
     return FreeChatResponse(
         conversation_id=conv.id,
-        reply=result["reply"],
+        reply=result.get("reply"),
+        proposal=proposal_out,
         cost_usd=result["cost_usd"],
         model=result.get("model") or None,
         input_tokens=result.get("input_tokens"),

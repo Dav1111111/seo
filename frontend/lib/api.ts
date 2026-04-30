@@ -999,10 +999,13 @@ export const api = {
       }>;
     }>(`/studio/sites/${siteId}/plan`, { base: "admin" }),
 
-  // V2 etap 7 Phase C+D — free chat about whole site, persisted in DB.
-  // Pass `conversation_id=null` to start a new thread; the response
-  // carries `conversation_id` to continue. Server reads history from
-  // DB regardless of what the client thinks.
+  // V2 etap 7 Phase C+D+E — free chat about whole site, persisted
+  // in DB. Pass `conversation_id=null` to start a new thread; the
+  // response carries `conversation_id` to continue. Server reads
+  // history from DB regardless of what the client thinks.
+  // Phase E: response may include a `proposal` when the LLM picked
+  // the propose_strategic_focus tool — UI shows a modal asking the
+  // owner to confirm before anything is written.
   studioBrainFreeChat: (
     siteId: string,
     message: string,
@@ -1010,7 +1013,18 @@ export const api = {
   ) =>
     apiFetch<{
       conversation_id: string;
-      reply: string;
+      reply: string | null;
+      proposal: {
+        label: string;
+        products: string[];
+        regions: string[];
+        query_signals: string[];
+        deprioritised: string[];
+        exit_criterion: string | null;
+        owner_note: string | null;
+        deadline: string | null;
+        rationale: string;
+      } | null;
       cost_usd: number;
       model: string | null;
       input_tokens: number | null;

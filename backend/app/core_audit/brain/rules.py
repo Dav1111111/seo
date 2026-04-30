@@ -45,6 +45,11 @@ class Action:
                  them under the body so the count gets a face.
 
     `evidence` is the raw count receipt — for the «основание» row.
+    `in_focus` (Phase E step 2): True iff at least one example /
+                signal of this action matches the site's strategic
+                focus (products / regions / query_signals). Drives
+                the focus-first plan sort. Without focus → False on
+                everything (and sort falls back to pure severity).
     """
     id: str               # stable id (kind:detail) so UI can dedupe
     severity: Severity
@@ -55,6 +60,7 @@ class Action:
     link_label: str       # CTA text for the link button
     examples: list[dict[str, str]] = field(default_factory=list)
     evidence: dict[str, int | str | float | None] = field(default_factory=dict)
+    in_focus: bool = False
 
 
 @dataclass
@@ -64,16 +70,75 @@ class Plan:
     actions: list[Action]
     diagnostics: list[str]  # owner-readable «module X hasn't run yet»
     computed_at: str        # iso8601
+    focus_label: str | None = None  # «Сейчас работаем над: …» — UI banner copy
 
 
-# ── Severity ordering ────────────────────────────────────────────────
+# ── Severity ordering + focus-aware sort ────────────────────────────
 
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
-def _sort_key(a: Action) -> tuple[int, str]:
-    return (_SEV_ORDER.get(a.severity, 9), a.id)
+def _sort_key(a: Action) -> tuple[int, int, str]:
+    """Sort key: (focus-bucket, severity, id).
+
+    Focus-bucket = 0 when action.in_focus, 1 otherwise. So the order is:
+
+        critical-in-focus → high-in-focus → medium-in-focus → low-in-focus
+        critical-out-of-focus → high-out → medium-out → low-out
+
+    This way, a clean «in-focus medium» beats a noisy «out-of-focus
+    critical» — exactly the behaviour the owner asked for: «сейчас
+    мне важно ТОЛЬКО Абхазия, остальное потом». Without focus,
+    everything is in_focus=False, and the order falls back to pure
+    severity (since the bucket is constant).
+    """
+    bucket = 0 if a.in_focus else 1
+    return (bucket, _SEV_ORDER.get(a.severity, 9), a.id)
+
+
+# ── Focus-match helper ──────────────────────────────────────────────
+
+
+def _focus_tokens(focus) -> list[str]:  # type: ignore[no-untyped-def]
+    """Flat list of substrings the focus is interested in. Lowercased,
+    stripped. Used by `_signals_in_focus` for substring matching."""
+    if focus is None:
+        return []
+    out: list[str] = []
+    for collection in (focus.products, focus.regions, focus.query_signals):
+        for item in collection or []:
+            s = (item or "").strip().lower()
+            if s:
+                out.append(s)
+    # Deduped while preserving order — the longer ones first so we
+    # don't match «крым» when the focus item is «крымская экспедиция».
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for s in sorted(out, key=len, reverse=True):
+        if s in seen:
+            continue
+        seen.add(s)
+        deduped.append(s)
+    return deduped
+
+
+def _signals_in_focus(signals: list[str], tokens: list[str]) -> bool:
+    """True iff any signal substring-matches any focus token. Both
+    sides are lowercased. We don't require token boundaries — for
+    URLs and Russian morphology partial match is the realistic bar
+    («багги-абхазия», «багги абхазии», «багги-абхазский маршрут»
+    all share the substring «багги»)."""
+    if not tokens or not signals:
+        return False
+    for sig in signals:
+        s = (sig or "").strip().lower()
+        if not s:
+            continue
+        for t in tokens:
+            if t in s:
+                return True
+    return False
 
 
 # ── Pluralisation helper (keep brain self-contained) ────────────────
@@ -94,7 +159,9 @@ def _ru_plural(n: int, forms: tuple[str, str, str]) -> str:
 # ── Rules ────────────────────────────────────────────────────────────
 
 
-def _rule_indexation_coverage(snap: BrainSnapshot) -> Action | None:
+def _rule_indexation_coverage(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
     """Pages NOT in Yandex index (and not deliberately excluded) are
     a hard ranking blocker — surface as critical when the gap is real.
 
@@ -165,10 +232,15 @@ def _rule_indexation_coverage(snap: BrainSnapshot) -> Action | None:
             "excluded": idx.pages_excluded,
             "unknown": idx.pages_unknown,
         },
+        in_focus=_signals_in_focus(
+            idx.sample_not_indexed_urls or [], focus_tokens,
+        ),
     )
 
 
-def _rule_harmful_visibility(snap: BrainSnapshot) -> Action | None:
+def _rule_harmful_visibility(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
     """Spam + disputed queries we already classified ourselves as
     «not ours» but still rank for. Severity scales with count.
 
@@ -246,6 +318,16 @@ def _rule_harmful_visibility(snap: BrainSnapshot) -> Action | None:
         sev = "high"
     else:
         sev = "medium"
+    # Harmful visibility is about queries we DON'T want — so the
+    # in-focus check inverts: if our spam/disputed examples sit
+    # «around» focus tokens, that's exactly the harm worth fixing
+    # first (they're confusing Yandex about our focus). If they're
+    # totally unrelated to the focus topic, it's still harmful but
+    # less urgent in the focus phase.
+    harmful_query_signals = [
+        h.get("query_text", "") for h in (q.sample_harmful or [])
+        if isinstance(h, dict)
+    ]
     return Action(
         id="queries:harmful",
         severity=sev,
@@ -262,10 +344,13 @@ def _rule_harmful_visibility(snap: BrainSnapshot) -> Action | None:
             "total": q.total,
             "share_pct": round(share_pct, 1),
         },
+        in_focus=_signals_in_focus(harmful_query_signals, focus_tokens),
     )
 
 
-def _rule_missing_landings(snap: BrainSnapshot) -> Action | None:
+def _rule_missing_landings(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
     """Services that exist in narrative but lack a dedicated page.
     The missing_landings module already enforces evidence — we trust
     its output here without re-validation."""
@@ -319,6 +404,18 @@ def _rule_missing_landings(snap: BrainSnapshot) -> Action | None:
         sev = "high"
     else:
         sev = "medium"
+    # Match focus by service names + their evidence quotes —
+    # «Багги-экспедиция в Крым» falls in focus iff focus tokens
+    # include «крым». Quotes catch the case where service_name is
+    # generic but the supporting quote mentions the focus topic.
+    landing_signals: list[str] = []
+    for it in m.items[:8]:
+        sn = (it.get("service_name") or "").strip()
+        if sn:
+            landing_signals.append(sn)
+        q = (it.get("evidence_quote") or "").strip()
+        if q:
+            landing_signals.append(q)
     return Action(
         id="missing_landings:create",
         severity=sev,
@@ -334,10 +431,13 @@ def _rule_missing_landings(snap: BrainSnapshot) -> Action | None:
             "medium": m.medium_priority,
             "low": m.low_priority,
         },
+        in_focus=_signals_in_focus(landing_signals, focus_tokens),
     )
 
 
-def _rule_pages_without_review(snap: BrainSnapshot) -> Action | None:
+def _rule_pages_without_review(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
     """Pages we never asked Reviewer about. Each unreviewed page is a
     blind spot — the owner can't see what the LLM thinks of its title,
     H1, schema. Surface as medium because reviews don't fix anything by
@@ -382,10 +482,15 @@ def _rule_pages_without_review(snap: BrainSnapshot) -> Action | None:
             "pages_with_review": r.pages_with_review,
             "pages_without_review": r.pages_without_review,
         },
+        in_focus=_signals_in_focus(
+            r.sample_unreviewed_urls or [], focus_tokens,
+        ),
     )
 
 
-def _rule_pending_recs(snap: BrainSnapshot) -> Action | None:
+def _rule_pending_recs(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
     """Recommendations sitting in `pending` status — already paid for,
     waiting for owner action. High-priority pending get loud surfacing."""
     r = snap.review
@@ -431,7 +536,9 @@ def _rule_pending_recs(snap: BrainSnapshot) -> Action | None:
     )
 
 
-def _rule_followup_due(snap: BrainSnapshot) -> Action | None:
+def _rule_followup_due(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
     """Outcomes applied but never measured. The 14-day cycle was the
     whole point of marking «applied». Surfacing here nudges the owner
     when the follow-up is overdue."""
@@ -521,11 +628,28 @@ _RULES = (
 )
 
 
-def build_plan(snap: BrainSnapshot, *, max_actions: int = 5) -> Plan:
-    """Apply each rule, drop None, sort by severity, cap at N."""
+def build_plan(
+    snap: BrainSnapshot,
+    *,
+    max_actions: int = 5,
+    target_config: dict | None = None,
+) -> Plan:
+    """Apply each rule, drop None, sort by (focus, severity), cap at N.
+
+    `target_config` is optional for backwards compat (existing tests
+    that build a snapshot directly don't need to pass it). When set,
+    we pull strategic_focus from it and feed each rule a list of
+    focus tokens — every Action thus knows whether it's in-focus,
+    and the sort puts in-focus actions first.
+    """
+    from app.core_audit.strategic_focus import from_target_config
+
+    focus = from_target_config(target_config or {})
+    focus_tokens = _focus_tokens(focus)
+
     actions: list[Action] = []
     for rule in _RULES:
-        a = rule(snap)
+        a = rule(snap, focus_tokens)
         if a is not None:
             actions.append(a)
     actions.sort(key=_sort_key)
@@ -537,6 +661,7 @@ def build_plan(snap: BrainSnapshot, *, max_actions: int = 5) -> Plan:
         actions=actions,
         diagnostics=_build_diagnostics(snap),
         computed_at=snap.computed_at.isoformat(),
+        focus_label=focus.label if focus else None,
     )
 
 

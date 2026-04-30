@@ -205,3 +205,76 @@ def call_plain(
         if block.type == "text":
             text_parts.append(block.text)
     return "".join(text_parts), usage_stats
+
+
+def call_with_optional_tools(
+    *,
+    model_tier: str = "cheap",
+    system: str,
+    user_message: str,
+    tools: list[dict[str, Any]],
+    max_tokens: int = 1500,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Mixed-mode call: model may answer with plain text OR pick a
+    tool. We don't force `tool_choice` — `auto` lets the model decide.
+
+    Returns ({"text": str | None, "tool_use": {"name": str, "input": dict} | None}, usage_stats).
+    Caller branches on whichever arrived. Streaming for the same proxy-
+    timeout reasons as `call_plain`.
+    """
+    client = get_client()
+    model = MODEL_MAP.get(model_tier, MODEL_MAP["cheap"])
+
+    system_blocks = [
+        {
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    messages = [{"role": "user", "content": user_message}]
+
+    with client.messages.stream(
+        model=model,
+        max_tokens=max_tokens,
+        system=system_blocks,
+        tools=tools,
+        # `auto`: model chooses. We DON'T set tool_choice={"type":"tool",...}
+        # because that forces a tool every time — owner's normal questions
+        # should still get a plain answer.
+        tool_choice={"type": "auto"},
+        messages=messages,
+    ) as stream:
+        response = stream.get_final_message()
+
+    usage = response.usage
+    cost = _compute_cost(model, usage)
+    usage_stats = {
+        "model": model,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_creation_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
+        "cost_usd": cost,
+        "prompt_hash": _prompt_hash(system, messages),
+    }
+
+    text_parts: list[str] = []
+    tool_use: dict[str, Any] | None = None
+    for block in response.content:
+        if block.type == "text":
+            text_parts.append(block.text)
+        elif block.type == "tool_use":
+            # Take the first tool_use; ignore subsequent ones (we
+            # don't ask for parallel tools and Anthropic streaming
+            # rarely emits more than one anyway).
+            if tool_use is None:
+                tool_use = {"name": block.name, "input": dict(block.input)}
+
+    text = "".join(text_parts) or None
+    logger.info(
+        "LLM call (optional-tools): model=%s tokens=%d+%d cost=$%.5f tool=%s",
+        model, usage.input_tokens, usage.output_tokens, cost,
+        tool_use["name"] if tool_use else "none",
+    )
+    return {"text": text, "tool_use": tool_use}, usage_stats

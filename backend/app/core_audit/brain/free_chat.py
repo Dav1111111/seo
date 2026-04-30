@@ -1,4 +1,4 @@
-"""Free chat — Phase C.
+"""Free chat — Phase C + E.
 
 Separate from `brain.chat` (which is per-action). Owner asks anything
 about the site — «почему Webmaster такое показывает», «что такое
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.agents.llm_client import call_plain
+from app.agents.llm_client import call_plain, call_with_optional_tools
 from app.core_audit.brain.rules import Plan
 from app.core_audit.brain.snapshot import BrainSnapshot
 
@@ -40,6 +40,90 @@ URL_EXAMPLES_LIMIT = 5         # not-indexed / unreviewed URL samples
 
 
 # ── System prompt ────────────────────────────────────────────────────
+
+
+# ── Tool: propose_strategic_focus ──────────────────────────────────
+
+
+PROPOSE_FOCUS_TOOL = {
+    "name": "propose_strategic_focus",
+    "description": (
+        "Предложи владельцу установить новый стратегический фокус "
+        "сайта. Используй ТОЛЬКО когда владелец явно говорит, что "
+        "хочет на чём-то сосредоточиться, или когда он несколько раз "
+        "упоминает одно направление как главное. Не используй для "
+        "вопросов «что мне делать» — на них отвечай текстом, ссылаясь "
+        "на текущий план. Все списки заполняй на основе того, что "
+        "владелец сам сказал в чате — не выдумывай продукты или "
+        "регионы из ничего. Если деталей не хватает — заполни label "
+        "и products/regions, остальное оставь пустым."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "label": {
+                "type": "string",
+                "description": (
+                    "Одна строка, как владелец сказал. Например "
+                    "«Багги-экспедиции в Абхазию»."
+                ),
+            },
+            "products": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Продукты в фокусе. Берёшь из слов владельца "
+                    "(«багги», «экспедиции»)."
+                ),
+            },
+            "regions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Регионы в фокусе.",
+            },
+            "query_signals": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "2-5 ключевых запросов, по которым видно, что "
+                    "сайт в зоне фокуса. Если непонятно — пустой список."
+                ),
+            },
+            "deprioritised": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Что владелец явно отложил. Только если он сам "
+                    "это назвал."
+                ),
+            },
+            "exit_criterion": {
+                "type": "string",
+                "description": (
+                    "Условие выхода из фокуса, если владелец его назвал. "
+                    "Иначе пусто."
+                ),
+            },
+            "owner_note": {
+                "type": "string",
+                "description": (
+                    "Свободная заметка от владельца, цитатой или "
+                    "близко к тексту."
+                ),
+            },
+            "rationale": {
+                "type": "string",
+                "description": (
+                    "Короткое объяснение для владельца, почему "
+                    "система предлагает именно такой фокус. 1-2 "
+                    "предложения. Будет показано в модалке "
+                    "подтверждения."
+                ),
+            },
+        },
+        "required": ["label", "rationale"],
+    },
+}
 
 
 SYSTEM_PROMPT = """\
@@ -90,6 +174,23 @@ SYSTEM_PROMPT = """\
   - Давать общие SEO-советы из обучения, не привязанные к КОНТЕКСТУ.
   - Писать длинные планы или «вот тебе 10 шагов» сверх плана из
     КОНТЕКСТА.
+
+ИНСТРУМЕНТ propose_strategic_focus:
+  Тебе дан инструмент propose_strategic_focus. Вызывай его ТОЛЬКО
+  когда владелец явно просит сменить или установить фокус — например:
+    «давай сосредоточимся на X», «сейчас для меня важно только Y»,
+    «можешь скорректировать вводные про проект, чтобы …»,
+    «фокус: …», «приоритет — …».
+  Если владелец просто спрашивает «что делать», «с чего начать»,
+  «расскажи про…» — НЕ вызывай инструмент. Отвечай текстом, ссылайся
+  на ТЕКУЩИЙ ПЛАН.
+  Когда вызываешь инструмент — заполняй поля ТОЛЬКО на основе слов
+  владельца. Не выдумывай продукты, регионы, exit_criterion — если
+  владелец не назвал, оставляй пусто.
+  В rationale напиши 1-2 предложения, почему ты предложил именно
+  это — это покажется в модалке подтверждения.
+  Сам ничего не записывает — после вызова инструмента владелец
+  увидит модалку «Применить фокус?» и подтвердит вручную.
 """
 
 
@@ -331,7 +432,19 @@ def free_chat(
     history: list[dict[str, str]],
     new_message: str,
 ) -> dict[str, Any]:
-    """One-turn chat. Returns `{reply, cost_usd, model, ...}`."""
+    """One-turn chat. Returns
+        {reply: str | None, proposal: dict | None,
+         cost_usd, model, input_tokens, output_tokens}.
+
+    Two mutually-exclusive happy paths:
+      - LLM answers with text → reply is set, proposal is None.
+      - LLM calls propose_strategic_focus → proposal is set with the
+        full focus payload + rationale, reply may be None or a short
+        accompanying note. The caller (endpoint) returns both to the
+        frontend; the UI shows a modal «Применить фокус?» when
+        proposal is non-null. NOTHING is written to DB until the
+        owner confirms via POST .../strategic-focus/from-proposal.
+    """
     new_message = (new_message or "").strip()
     if not new_message:
         raise ValueError("empty message")
@@ -348,20 +461,53 @@ def free_chat(
         new_message=new_message,
     )
 
-    reply, usage = call_plain(
+    out, usage = call_with_optional_tools(
         model_tier="cheap",
         system=SYSTEM_PROMPT,
         user_message=user_msg,
+        tools=[PROPOSE_FOCUS_TOOL],
         max_tokens=MAX_REPLY_TOKENS,
     )
 
+    proposal: dict[str, Any] | None = None
+    tu = out.get("tool_use")
+    if tu and tu.get("name") == "propose_strategic_focus":
+        raw = tu.get("input") or {}
+        # Coerce shapes the API model expects. Drop empty fields so
+        # frontend doesn't render «—» chips for nothing.
+        proposal = {
+            "label": str(raw.get("label") or "").strip(),
+            "products": _ensure_str_list(raw.get("products")),
+            "regions": _ensure_str_list(raw.get("regions")),
+            "query_signals": _ensure_str_list(raw.get("query_signals")),
+            "deprioritised": _ensure_str_list(raw.get("deprioritised")),
+            "exit_criterion": (raw.get("exit_criterion") or "").strip() or None,
+            "owner_note": (raw.get("owner_note") or "").strip() or None,
+            "deadline": None,
+            "rationale": (raw.get("rationale") or "").strip(),
+        }
+
+    text = (out.get("text") or "").strip() or None
     return {
-        "reply": (reply or "").strip(),
+        "reply": text,
+        "proposal": proposal,
         "cost_usd": float(usage.get("cost_usd") or 0.0),
         "model": usage.get("model") or "",
         "input_tokens": int(usage.get("input_tokens") or 0),
         "output_tokens": int(usage.get("output_tokens") or 0),
     }
+
+
+def _ensure_str_list(v: Any) -> list[str]:
+    if not isinstance(v, list):
+        return []
+    out: list[str] = []
+    for item in v:
+        if isinstance(item, str):
+            s = item.strip()
+            if s:
+                out.append(s)
+    return out
 
 
 __all__ = [

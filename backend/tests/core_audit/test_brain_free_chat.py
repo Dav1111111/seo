@@ -290,16 +290,20 @@ def test_user_message_history_truncates_at_cap() -> None:
 
 
 def test_free_chat_returns_reply_and_usage() -> None:
-    """Happy path. Mocked call_plain returns reply + usage; wrapper
-    surfaces both. Pin the response shape."""
+    """Happy path — model picked plain text. Mocked
+    call_with_optional_tools returns {text, tool_use=None} + usage;
+    wrapper surfaces both. Pin the response shape."""
     fake_usage = {
         "model": "claude-haiku-4-5",
         "input_tokens": 1500, "output_tokens": 100,
         "cost_usd": 0.0042,
     }
     with patch(
-        "app.core_audit.brain.free_chat.call_plain",
-        return_value=("Вот мой ответ.", fake_usage),
+        "app.core_audit.brain.free_chat.call_with_optional_tools",
+        return_value=(
+            {"text": "Вот мой ответ.", "tool_use": None},
+            fake_usage,
+        ),
     ) as mock_call:
         result = free_chat(
             domain="grandtourspirit.ru",
@@ -312,6 +316,7 @@ def test_free_chat_returns_reply_and_usage() -> None:
         )
 
     assert result["reply"] == "Вот мой ответ."
+    assert result["proposal"] is None
     assert result["cost_usd"] == 0.0042
     assert result["model"] == "claude-haiku-4-5"
     assert result["input_tokens"] == 1500
@@ -319,10 +324,83 @@ def test_free_chat_returns_reply_and_usage() -> None:
 
     # The system prompt must contain the anti-fabrication rules.
     sys = mock_call.call_args.kwargs["system"]
-    assert "не выдумывай" in sys.lower() or "не придумывай" in sys.lower() \
-        or "не выдумыв" in sys.lower()
+    assert "не выдумывай" in sys.lower() or "не придумывай" in sys.lower()
     # User message contains the actual question.
     assert "что у меня самое слабое место?" in mock_call.call_args.kwargs["user_message"]
+
+
+def test_free_chat_returns_proposal_when_tool_picked() -> None:
+    """Phase E step 2 — when the LLM picks the
+    propose_strategic_focus tool, the wrapper surfaces a structured
+    proposal alongside (or instead of) plain text. Pin the shape so
+    the API model + frontend modal stay in sync."""
+    fake_usage = {
+        "model": "claude-haiku-4-5",
+        "input_tokens": 2100, "output_tokens": 150,
+        "cost_usd": 0.0089,
+    }
+    tool_call = {
+        "name": "propose_strategic_focus",
+        "input": {
+            "label": "Багги-экспедиции в Абхазию",
+            "products": ["багги-экспедиции"],
+            "regions": ["абхазия"],
+            "query_signals": ["багги абхазия", "экскурсии абхазия"],
+            "deprioritised": ["яхты", "вертолёты"],
+            "exit_criterion": "топ-10 по «экскурсии абхазия»",
+            "owner_note": "Сначала с этим, остальное потом.",
+            "rationale": "Ты сам это сказал в чате.",
+        },
+    }
+    with patch(
+        "app.core_audit.brain.free_chat.call_with_optional_tools",
+        return_value=(
+            {"text": None, "tool_use": tool_call},
+            fake_usage,
+        ),
+    ):
+        result = free_chat(
+            domain="x", target_config={}, understanding={},
+            snap=_snap(), plan=_plan(), history=[],
+            new_message="давай сосредоточимся на багги в Абхазию",
+        )
+
+    assert result["reply"] is None
+    p = result["proposal"]
+    assert p is not None
+    assert p["label"] == "Багги-экспедиции в Абхазию"
+    assert p["products"] == ["багги-экспедиции"]
+    assert p["regions"] == ["абхазия"]
+    assert "багги абхазия" in p["query_signals"]
+    assert "яхты" in p["deprioritised"]
+    assert p["exit_criterion"] == "топ-10 по «экскурсии абхазия»"
+    assert p["rationale"] == "Ты сам это сказал в чате."
+
+
+def test_free_chat_ignores_unknown_tool_calls() -> None:
+    """Defensive: if the model somehow calls a tool we didn't define,
+    the wrapper silently drops the proposal and treats the response
+    as plain text. We never want UI to show a modal for garbage."""
+    fake_usage = {
+        "model": "h", "input_tokens": 1, "output_tokens": 1, "cost_usd": 0.0,
+    }
+    with patch(
+        "app.core_audit.brain.free_chat.call_with_optional_tools",
+        return_value=(
+            {
+                "text": "ok",
+                "tool_use": {"name": "rogue_tool", "input": {}},
+            },
+            fake_usage,
+        ),
+    ):
+        result = free_chat(
+            domain="x", target_config={}, understanding={},
+            snap=_snap(), plan=_plan(), history=[],
+            new_message="?",
+        )
+    assert result["proposal"] is None
+    assert result["reply"] == "ok"
 
 
 def test_free_chat_truncates_overlong_message() -> None:
@@ -333,8 +411,11 @@ def test_free_chat_truncates_overlong_message() -> None:
     }
     long_msg = "x" * (MAX_USER_MESSAGE_CHARS + 1000)
     with patch(
-        "app.core_audit.brain.free_chat.call_plain",
-        return_value=("ok", fake_usage),
+        "app.core_audit.brain.free_chat.call_with_optional_tools",
+        return_value=(
+            {"text": "ok", "tool_use": None},
+            fake_usage,
+        ),
     ) as mock_call:
         free_chat(
             domain="x", target_config={}, understanding={},

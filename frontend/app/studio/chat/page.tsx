@@ -45,6 +45,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn, getErrorMessage } from "@/lib/utils";
+import {
+  FocusProposalDialog,
+  type FocusProposal,
+} from "@/components/studio/focus-proposal-dialog";
 
 
 type ChatTurn = {
@@ -76,6 +80,12 @@ export default function StudioChatPage() {
   const [draft, setDraft] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [totalCost, setTotalCost] = useState(0);
+  // Phase E step 2: when the LLM picked propose_strategic_focus the
+  // server returns a structured proposal. Stash it in state, render
+  // the modal, only on «Применить» does anything reach DB.
+  const [pendingProposal, setPendingProposal] = useState<FocusProposal | null>(
+    null,
+  );
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -150,9 +160,18 @@ export default function StudioChatPage() {
           message,
           conversationId,
         );
+        // Show whichever the model returned. If it picked the focus
+        // tool with no accompanying text, fall back to a placeholder
+        // so the bubble in the thread is non-empty — and surface the
+        // dialog. Server already wrote a friendly assistant row to DB.
+        const assistantText =
+          res.reply
+          ?? (res.proposal
+            ? `📌 Предложил установить фокус: «${res.proposal.label}». ${res.proposal.rationale}`.trim()
+            : "");
         setHistory((h) => [
           ...h,
-          { role: "assistant", content: res.reply || "" },
+          { role: "assistant", content: assistantText },
         ]);
         setTotalCost((c) => c + (res.cost_usd || 0));
         // If this was the first message in a brand-new conversation,
@@ -160,6 +179,12 @@ export default function StudioChatPage() {
         // refresh / share preserves the thread.
         if (!conversationId && res.conversation_id) {
           router.replace(`/studio/chat?c=${res.conversation_id}`);
+        }
+        // Phase E: if the response carries a focus proposal, open
+        // the confirmation dialog. NOTHING is written to DB until
+        // owner clicks «Применить».
+        if (res.proposal) {
+          setPendingProposal(res.proposal);
         }
         // Sidebar list needs to refresh: new conversation appears,
         // existing one's last_message_at moves it to the top.
@@ -405,6 +430,33 @@ export default function StudioChatPage() {
           </Link>
         )}
       </div>
+
+      {/* Phase E step 2 — confirmation dialog when LLM picked
+          propose_strategic_focus. Nothing reaches DB until owner
+          clicks «Применить» here. */}
+      {pendingProposal && siteId && (
+        <FocusProposalDialog
+          siteId={siteId}
+          proposal={pendingProposal}
+          onClose={() => setPendingProposal(null)}
+          onApplied={() => {
+            // Add a confirmation bubble so the thread reads naturally:
+            // owner asked, helper proposed, owner confirmed, helper
+            // acknowledges. This is local-only — it doesn't write to
+            // the DB conversation log. The next real turn will.
+            setHistory((h) => [
+              ...h,
+              {
+                role: "assistant",
+                content:
+                  `✓ Фокус «${pendingProposal.label}» установлен. ` +
+                  "Дальше я буду подстраивать советы под него; в плане " +
+                  "работ действия в зоне фокуса поднимутся наверх.",
+              },
+            ]);
+          }}
+        />
+      )}
     </div>
   );
 }

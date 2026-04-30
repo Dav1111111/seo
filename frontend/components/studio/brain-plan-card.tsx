@@ -227,6 +227,14 @@ function ActionCard({
             <span className="text-[10px] uppercase tracking-wide text-muted-foreground/80">
               {SEV_LABEL[a.severity] || a.severity}
             </span>
+            {a.in_focus && (
+              <span
+                className="text-[10px] uppercase tracking-wide rounded-full border border-primary/40 bg-primary/10 text-primary px-2 py-0.5"
+                title="В зоне твоего стратегического фокуса"
+              >
+                в фокусе
+              </span>
+            )}
           </div>
           <p className="text-sm leading-relaxed text-foreground/90 whitespace-pre-line">
             {a.body_ru}
