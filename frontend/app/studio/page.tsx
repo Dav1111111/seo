@@ -1,19 +1,24 @@
 import Link from "next/link";
 import {
   Activity, Search, Telescope, FileText, Swords,
-  BarChart3, Megaphone, History, ChevronRight, Sparkles,
+  BarChart3, History, ChevronRight, Sparkles,
   UserSquare, MessageCircle,
 } from "lucide-react";
 
 import { BrainPlanCard } from "@/components/studio/brain-plan-card";
 
 /**
- * Studio index — 8 module cards.
+ * Studio index — module cards + brain plan + helper-link.
  *
  * No data calls here on purpose. Each card links into the module's own
  * page where the heavy lifting happens. Status text is sourced from
  * docs/studio/IMPLEMENTATION.md §1 and is updated module-by-module
  * as PRs land (see "ready" flag below).
+ *
+ * Module list is the source of truth for «what's shipped». Anything
+ * `blocked` / `stub` should NOT live here — until it has a real page,
+ * the card just confuses owners. Cards reappear when the route is
+ * ready.
  *
  * Concept: docs/studio/CONCEPT.md
  */
@@ -76,14 +81,6 @@ const MODULES: Array<{
     description: "Видимость в Яндексе (показы / клики / позиции), поведение посетителей, тренд индексации — за 30/90/180/365 дней.",
     icon: BarChart3,
     status: "ready",
-  },
-  {
-    href: "/studio/ads",
-    title: "Реклама",
-    description: "Яндекс.Директ — бюджеты и эффективность. Google Ads, когда подключим.",
-    icon: Megaphone,
-    status: "blocked",
-    reason: "ждём интеграцию Direct API",
   },
   {
     href: "/studio/outcomes",
