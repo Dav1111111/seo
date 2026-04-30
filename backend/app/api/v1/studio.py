@@ -2522,6 +2522,7 @@ async def brain_action_chat(
             snap=snap,
             history=sanitised,
             new_message=msg,
+            target_config=site.target_config or {},
         ),
     )
 
@@ -2846,6 +2847,163 @@ async def delete_conversation(
         raise HTTPException(status_code=404, detail="conversation not found")
     await db.delete(conv)
     await db.commit()
+
+
+# ── Studio v2 etap 7 (Phase E) · Strategic focus ─────────────────────
+
+
+class StrategicFocusOut(BaseModel):
+    label: str
+    active_since: str
+    set_by: str
+    products: list[str]
+    regions: list[str]
+    query_signals: list[str]
+    deprioritised: list[str]
+    exit_criterion: str | None
+    owner_note: str | None
+    deadline: str | None
+
+
+class StrategicFocusIn(BaseModel):
+    """Owner-supplied focus shape. Server validates + normalises via
+    core_audit.strategic_focus.validate_and_normalise. All fields are
+    optional in JSON terms, but at least one of products / regions /
+    query_signals must be populated — enforced server-side."""
+    label: str
+    products: list[str] = []
+    regions: list[str] = []
+    query_signals: list[str] = []
+    deprioritised: list[str] = []
+    exit_criterion: str | None = None
+    owner_note: str | None = None
+    deadline: str | None = None
+
+
+@router.get(
+    "/sites/{site_id}/strategic-focus",
+    response_model=StrategicFocusOut | None,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_strategic_focus(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> StrategicFocusOut | None:
+    """Return the site's current focus, or null if none."""
+    site = await _site_or_404(db, site_id)
+    from app.core_audit.strategic_focus import from_target_config
+
+    focus = from_target_config(site.target_config or {})
+    if focus is None:
+        return None
+    return StrategicFocusOut(**focus.to_jsonb())
+
+
+@router.put(
+    "/sites/{site_id}/strategic-focus",
+    response_model=StrategicFocusOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def set_strategic_focus(
+    site_id: uuid.UUID,
+    body: StrategicFocusIn,
+    db: AsyncSession = Depends(get_db),
+) -> StrategicFocusOut:
+    """Manual set/update of focus from the /studio/profile UI.
+
+    Replaces any existing focus. The chat tool-call path uses the
+    same logic but tags `set_by='owner_via_chat'` — see
+    apply_strategic_focus_proposal below.
+    """
+    site = await _site_or_404(db, site_id)
+    from app.core_audit.sites.locks import lock_site_target_config
+    from app.core_audit.strategic_focus import (
+        FocusValidationError,
+        validate_and_normalise,
+    )
+
+    try:
+        focus = validate_and_normalise(
+            body.model_dump(),
+            set_by="owner_via_ui",
+        )
+    except FocusValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    await lock_site_target_config(db, site_id)
+    fresh = (await db.execute(
+        select(Site).where(Site.id == site_id)
+    )).scalar_one()
+    cfg = dict(fresh.target_config or {})
+    cfg["strategic_focus"] = focus.to_jsonb()
+    fresh.target_config = cfg
+    await db.commit()
+
+    return StrategicFocusOut(**focus.to_jsonb())
+
+
+@router.delete(
+    "/sites/{site_id}/strategic-focus",
+    status_code=204,
+    dependencies=[Depends(_require_admin)],
+)
+async def clear_strategic_focus(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Owner-initiated «снять фокус» — back to general mode."""
+    await _site_or_404(db, site_id)
+    from app.core_audit.sites.locks import lock_site_target_config
+
+    await lock_site_target_config(db, site_id)
+    fresh = (await db.execute(
+        select(Site).where(Site.id == site_id)
+    )).scalar_one()
+    cfg = dict(fresh.target_config or {})
+    if "strategic_focus" in cfg:
+        del cfg["strategic_focus"]
+        fresh.target_config = cfg
+        await db.commit()
+
+
+@router.post(
+    "/sites/{site_id}/strategic-focus/from-proposal",
+    response_model=StrategicFocusOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def apply_strategic_focus_proposal(
+    site_id: uuid.UUID,
+    body: StrategicFocusIn,
+    db: AsyncSession = Depends(get_db),
+) -> StrategicFocusOut:
+    """Apply a focus that originated from a chat proposal. Same shape
+    as PUT but tagged `set_by='owner_via_chat'` for telemetry — lets
+    us tell apart manual edits from chat-driven applications."""
+    site = await _site_or_404(db, site_id)
+    from app.core_audit.sites.locks import lock_site_target_config
+    from app.core_audit.strategic_focus import (
+        FocusValidationError,
+        validate_and_normalise,
+    )
+
+    try:
+        focus = validate_and_normalise(
+            body.model_dump(),
+            set_by="owner_via_chat",
+        )
+    except FocusValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    await lock_site_target_config(db, site_id)
+    fresh = (await db.execute(
+        select(Site).where(Site.id == site_id)
+    )).scalar_one()
+    cfg = dict(fresh.target_config or {})
+    cfg["strategic_focus"] = focus.to_jsonb()
+    fresh.target_config = cfg
+    await db.commit()
+
+    return StrategicFocusOut(**focus.to_jsonb())
 
 
 __all__ = ["router"]

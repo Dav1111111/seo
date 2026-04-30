@@ -25,6 +25,25 @@ async function apiFetch<T>(
   return res.json() as Promise<T>;
 }
 
+// V2 etap 7 Phase E — strategic focus shape, used by /studio/profile
+// editor and the chat «Применить» dialog. Server contract lives in
+// backend/app/core_audit/strategic_focus.py.
+export type StudioStrategicFocusInput = {
+  label: string;
+  products: string[];
+  regions: string[];
+  query_signals: string[];
+  deprioritised: string[];
+  exit_criterion: string | null;
+  owner_note: string | null;
+  deadline: string | null;
+};
+
+export type StudioStrategicFocus = StudioStrategicFocusInput & {
+  active_since: string;
+  set_by: "owner_via_ui" | "owner_via_chat";
+};
+
 export const api = {
   // Health
   health: () => apiFetch<{ status: string; db: string; redis: string }>("/health"),
@@ -1047,6 +1066,48 @@ export const api = {
     apiFetch<null>(
       `/studio/sites/${siteId}/conversations/${conversationId}`,
       { method: "DELETE", base: "admin" },
+    ),
+
+  // V2 etap 7 Phase E — strategic focus.
+  // The /studio/profile «Стратегический фокус» editor uses GET/PUT/
+  // DELETE; the chat «Применить» dialog uses POST .../from-proposal
+  // (semantically identical PUT but tags set_by='owner_via_chat').
+  studioGetStrategicFocus: (siteId: string) =>
+    apiFetch<StudioStrategicFocus | null>(
+      `/studio/sites/${siteId}/strategic-focus`,
+      { base: "admin" },
+    ),
+
+  studioSetStrategicFocus: (
+    siteId: string,
+    focus: StudioStrategicFocusInput,
+  ) =>
+    apiFetch<StudioStrategicFocus>(
+      `/studio/sites/${siteId}/strategic-focus`,
+      {
+        method: "PUT",
+        base: "admin",
+        body: JSON.stringify(focus),
+      },
+    ),
+
+  studioClearStrategicFocus: (siteId: string) =>
+    apiFetch<null>(
+      `/studio/sites/${siteId}/strategic-focus`,
+      { method: "DELETE", base: "admin" },
+    ),
+
+  studioApplyStrategicFocusProposal: (
+    siteId: string,
+    focus: StudioStrategicFocusInput,
+  ) =>
+    apiFetch<StudioStrategicFocus>(
+      `/studio/sites/${siteId}/strategic-focus/from-proposal`,
+      {
+        method: "POST",
+        base: "admin",
+        body: JSON.stringify(focus),
+      },
     ),
 
   // V2 etap 7 Phase B — chat about a specific brain plan action.

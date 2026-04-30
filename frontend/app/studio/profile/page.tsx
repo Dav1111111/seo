@@ -38,6 +38,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { StrategicFocusEditor } from "@/components/studio/strategic-focus-editor";
 import {
   ArrowLeft,
   Sparkles,
@@ -264,6 +265,12 @@ export default function StudioProfilePage() {
         </div>
       )}
 
+      {/* V2 etap 7 Phase E — strategic focus. Lives above the
+          profile fields because it's the lens that recolors everything
+          downstream. Independent SWR cache; doesn't share dirty state
+          with the profile form. */}
+      <FocusBlock siteId={siteId} />
+
       {/* Primary product */}
       <Card>
         <CardContent className="pt-5 space-y-2">
@@ -476,5 +483,26 @@ function ChipField({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+
+// ── Strategic focus block (V2 etap 7 Phase E) ────────────────────────
+
+
+function FocusBlock({ siteId }: { siteId: string }) {
+  const { data: focus, mutate: refetch } = useSWR(
+    siteId ? studioKey("strategic_focus", siteId) : null,
+    () => api.studioGetStrategicFocus(siteId),
+  );
+
+  return (
+    <StrategicFocusEditor
+      siteId={siteId}
+      focus={focus}
+      onChanged={() => {
+        refetch();
+      }}
+    />
   );
 }

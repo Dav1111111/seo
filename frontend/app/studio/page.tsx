@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 
 import { BrainPlanCard } from "@/components/studio/brain-plan-card";
+import { StrategicFocusBanner } from "@/components/studio/strategic-focus-banner";
 
 /**
  * Studio index — module cards + brain plan + helper-link.
@@ -143,6 +144,10 @@ export default function StudioIndexPage() {
           Спросить помощника
         </Link>
       </div>
+
+      {/* V2 etap 7 Phase E — strategic focus banner. Hidden when
+          no focus is set. Click → /studio/profile editor. */}
+      <StrategicFocusBanner />
 
       {/* V2 etap 7 — brain plan synthesised from all module data.
           Stays above the module grid so the owner sees «do this

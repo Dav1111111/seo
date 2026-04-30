@@ -276,9 +276,20 @@ def build_user_message(
     new_message: str,
 ) -> str:
     """Compose the single user-message string for `call_plain`."""
+    # Strategic focus, if owner has set one, takes the top-of-prompt
+    # slot — every answer must be subordinated to it (the prompt
+    # itself spells out the rule).
+    from app.core_audit.strategic_focus import (
+        from_target_config,
+        render_for_prompt,
+    )
+    focus = from_target_config(target_config or {})
+
     blocks = [
         "КОНТЕКСТ — это всё, что ты знаешь про сайт. Все ответы должны "
         "опираться только на этот блок. Если факта тут нет — его нет.",
+        "",
+        render_for_prompt(focus),
         "",
         _format_business_block(
             domain=domain,

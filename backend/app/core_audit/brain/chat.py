@@ -195,12 +195,27 @@ def build_user_message(
     snap: BrainSnapshot,
     history: list[dict[str, str]],
     new_message: str,
+    target_config: dict[str, Any] | None = None,
 ) -> str:
     """Compose the single user-message string for `call_plain`. We
     don't use the SDK's multi-turn messages here on purpose — the
     server is stateless, and prompt caching on the system block
-    already covers the bulk of the recurring cost."""
+    already covers the bulk of the recurring cost.
+
+    `target_config` is optional for backwards compat; when supplied
+    we extract the strategic focus (if any) and include it as the
+    top-of-prompt lens. Per-action chat answers should respect the
+    same focus rule as free chat — owner expects consistency.
+    """
+    from app.core_audit.strategic_focus import (
+        from_target_config,
+        render_for_prompt,
+    )
+    focus = from_target_config(target_config or {})
+
     blocks = [
+        render_for_prompt(focus),
+        "",
         _format_action_block(action),
         "",
         _format_snapshot_slice(action.id, snap),
@@ -228,6 +243,7 @@ def chat_about_action(
     snap: BrainSnapshot,
     history: list[dict[str, str]],
     new_message: str,
+    target_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One-turn chat exchange. Returns
     `{reply, cost_usd, model, input_tokens, output_tokens}`."""
@@ -242,6 +258,7 @@ def chat_about_action(
         snap=snap,
         history=history or [],
         new_message=new_message,
+        target_config=target_config,
     )
 
     reply, usage = call_plain(
