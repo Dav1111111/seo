@@ -12,6 +12,7 @@ Stores in Page model. Runs on demand or scheduled.
 """
 
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -19,12 +20,11 @@ from urllib.parse import urlparse, urljoin
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.page import Page
-from app.models.site import Site
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,28 @@ _H1_RE = re.compile(r'<h1[^>]*>([\s\S]*?)</h1>', re.IGNORECASE)
 _LINK_RE = re.compile(r'<a\s+[^>]*href=[\"\']([^\"\']+)[\"\']', re.IGNORECASE)
 _IMG_RE = re.compile(r'<img\s', re.IGNORECASE)
 _SCHEMA_RE = re.compile(r'application/ld\+json', re.IGNORECASE)
+_SCHEMA_JSONLD_RE = re.compile(
+    r'<script\s+[^>]*type\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
+)
 _SITEMAP_LOC_RE = re.compile(r'<loc>([^<]+)</loc>', re.IGNORECASE)
+_CANONICAL_RE = re.compile(
+    r'<link\s+[^>]*rel=[\"\']canonical[\"\'][^>]*href=[\"\']([^\"\']+)[\"\']',
+    re.IGNORECASE,
+)
+_CANONICAL_RE2 = re.compile(
+    r'<link\s+[^>]*href=[\"\']([^\"\']+)[\"\'][^>]*rel=[\"\']canonical[\"\']',
+    re.IGNORECASE,
+)
+_META_ROBOTS_RE = re.compile(
+    r'<meta\s+[^>]*name=[\"\']robots[\"\'][^>]*content=[\"\']([^\"\']+)[\"\']',
+    re.IGNORECASE,
+)
+_META_ROBOTS_RE2 = re.compile(
+    r'<meta\s+[^>]*content=[\"\']([^\"\']+)[\"\'][^>]*name=[\"\']robots[\"\']',
+    re.IGNORECASE,
+)
+_H1_ALL_RE = re.compile(r'<h1[^>]*>([\s\S]*?)</h1>', re.IGNORECASE)
 
 
 def _strip_html(html: str) -> str:
@@ -71,6 +92,70 @@ def _extract_text(pattern: re.Pattern, html: str) -> str | None:
 def _extract_meta_description(html: str) -> str | None:
     m = _META_DESC_RE.search(html) or _META_DESC_RE2.search(html)
     return m.group(1).strip() if m else None
+
+
+def _extract_canonical(html: str, page_url: str) -> str | None:
+    m = _CANONICAL_RE.search(html) or _CANONICAL_RE2.search(html)
+    if not m:
+        return None
+    return urljoin(page_url, m.group(1).strip())
+
+
+def _extract_meta_robots(html: str) -> str | None:
+    m = _META_ROBOTS_RE.search(html) or _META_ROBOTS_RE2.search(html)
+    return m.group(1).strip().lower() if m else None
+
+
+def _extract_schema_types(html: str) -> list[str]:
+    types: list[str] = []
+    for match in _SCHEMA_JSONLD_RE.finditer(html):
+        raw = match.group(1).strip()
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        stack = payload if isinstance(payload, list) else [payload]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                t = item.get("@type")
+                if isinstance(t, list):
+                    for value in t:
+                        if isinstance(value, str) and value not in types:
+                            types.append(value)
+                elif isinstance(t, str) and t not in types:
+                    types.append(t)
+                for value in item.values():
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(item, list):
+                stack.extend(item)
+    return types
+
+
+def _normalize_url(url: str) -> str:
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+
+def _same_host(a: str, b: str) -> bool:
+    def clean(host: str) -> str:
+        return host.lower().removeprefix("www.")
+
+    return clean(a) == clean(b)
+
+
+def _redirect_meta(response: httpx.Response) -> dict:
+    chain = [str(h.url) for h in response.history] + [str(response.url)]
+    return {
+        "final_url": str(response.url),
+        "redirect_count": len(response.history),
+        "redirect_chain": chain if len(chain) > 1 else [],
+        "content_type": response.headers.get("content-type", ""),
+    }
 
 
 class SiteCrawler:
@@ -104,6 +189,8 @@ class SiteCrawler:
             logger.warning(f"Fetch failed {url}: {e}")
             return None
 
+        meta = _redirect_meta(r)
+
         if r.status_code >= 400:
             return {
                 "url": url,
@@ -116,6 +203,7 @@ class SiteCrawler:
                 "internal_links": [],
                 "images_count": 0,
                 "has_schema": False,
+                "meta": meta,
             }
 
         html = r.text
@@ -125,6 +213,10 @@ class SiteCrawler:
         title = _extract_text(_TITLE_RE, html)
         meta_desc = _extract_meta_description(html)
         h1 = _extract_text(_H1_RE, html)
+        h1_count = len(_H1_ALL_RE.findall(html))
+        canonical_url = _extract_canonical(html, url)
+        robots_meta = _extract_meta_robots(html)
+        schema_types = _extract_schema_types(html)
         content_text = _strip_html(html)
 
         # Truncate content to 10k chars for storage
@@ -137,19 +229,33 @@ class SiteCrawler:
         all_links = _LINK_RE.findall(html)
         internal = []
         for link in all_links:
+            if link.startswith(("mailto:", "tel:", "javascript:", "#")):
+                continue
             abs_url = urljoin(url, link)
             parsed = urlparse(abs_url)
-            if parsed.netloc == domain_host and not any(
+            if _same_host(parsed.netloc, domain_host) and not any(
                 abs_url.endswith(ext) for ext in ['.jpg', '.png', '.svg', '.pdf', '.ico']
             ):
                 # Normalize: drop fragment and query
-                clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-                if clean != url and clean not in internal:
+                clean = _normalize_url(abs_url)
+                if clean != _normalize_url(url) and clean not in internal:
                     internal.append(clean)
         internal = internal[:50]  # cap
 
         images_count = len(_IMG_RE.findall(html))
         has_schema = bool(_SCHEMA_RE.search(html))
+        robots_tokens = {
+            t.strip() for t in (robots_meta or "").split(",") if t.strip()
+        }
+        meta.update({
+            "canonical_url": canonical_url,
+            "canonical_host": urlparse(canonical_url).netloc if canonical_url else None,
+            "meta_robots": robots_meta,
+            "noindex": "noindex" in robots_tokens,
+            "nofollow": "nofollow" in robots_tokens,
+            "h1_count": h1_count,
+            "schema_types": schema_types,
+        })
 
         return {
             "url": url,
@@ -162,6 +268,7 @@ class SiteCrawler:
             "internal_links": internal,
             "images_count": images_count,
             "has_schema": has_schema,
+            "meta": meta,
         }
 
     async def crawl_and_store(self, db: AsyncSession, site_id: UUID) -> dict:
@@ -177,6 +284,13 @@ class SiteCrawler:
             # 1. Read sitemap
             urls = await self.fetch_sitemap(client)
             stats["sitemap_urls"] = len(urls)
+            sitemap_url_set = {_normalize_url(u) for u in urls}
+
+            await db.execute(
+                update(Page)
+                .where(Page.site_id == site_id)
+                .values(in_sitemap=False)
+            )
 
             if not urls:
                 # Fallback: just crawl the homepage and discovered links
@@ -206,6 +320,8 @@ class SiteCrawler:
                 url = result["url"]
                 parsed = urlparse(url)
                 path = parsed.path or "/"
+                now = datetime.now(timezone.utc)
+                in_sitemap = _normalize_url(url) in sitemap_url_set
 
                 stmt = pg_insert(Page).values(
                     site_id=site_id,
@@ -220,9 +336,10 @@ class SiteCrawler:
                     images_count=result["images_count"],
                     has_schema=result["has_schema"],
                     http_status=result["http_status"],
-                    last_crawled_at=datetime.now(timezone.utc),
-                    last_seen_at=datetime.now(timezone.utc),
-                    in_sitemap=True,
+                    meta=result["meta"],
+                    last_crawled_at=now,
+                    last_seen_at=now,
+                    in_sitemap=in_sitemap,
                 ).on_conflict_do_update(
                     index_elements=["site_id", "url"],
                     set_={
@@ -235,8 +352,10 @@ class SiteCrawler:
                         "images_count": result["images_count"],
                         "has_schema": result["has_schema"],
                         "http_status": result["http_status"],
-                        "last_crawled_at": datetime.now(timezone.utc),
-                        "last_seen_at": datetime.now(timezone.utc),
+                        "meta": result["meta"],
+                        "in_sitemap": in_sitemap,
+                        "last_crawled_at": now,
+                        "last_seen_at": now,
                     },
                 )
                 await db.execute(stmt)

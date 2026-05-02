@@ -4,15 +4,147 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
+interface DemandSummary {
+  clusters?: number;
+  observed_impressions?: number;
+  covered?: number;
+}
+
+interface ClusterRef {
+  cluster_key: string;
+  name_ru: string;
+  business_relevance: number;
+  coverage_score?: number | null;
+}
+
+interface DiagnosticPayload {
+  available?: boolean;
+  root_problem_classification?: string;
+  root_problem_ru?: string;
+  supporting_symptoms_ru?: string[];
+  recommended_first_actions_ru?: string[];
+  brand_demand?: DemandSummary;
+  non_brand_demand?: DemandSummary;
+  missing_target_clusters?: ClusterRef[];
+}
+
+interface ReportMetaPayload {
+  status: string;
+  site_host: string;
+  week_start: string;
+  week_end: string;
+  generated_at: string;
+  builder_version: string;
+  llm_cost_usd: number;
+  generation_ms: number;
+}
+
+interface ExecutivePayload {
+  health_score: number;
+  wow_impressions_pct?: number | null;
+  wow_clicks_pct?: number | null;
+  health_score_delta?: number | null;
+  prose_ru?: string;
+  top_wins?: string[];
+  top_losses?: string[];
+}
+
+interface ActionPlanItemPayload {
+  recommendation_id: string;
+  page_url?: string | null;
+  priority: string;
+  priority_score: number;
+  category: string;
+  suggested_owner: string;
+  eta_ru: string;
+  reasoning_ru: string;
+  expected_lift_impressions?: number | null;
+}
+
+interface ActionPlanPayload {
+  items?: ActionPlanItemPayload[];
+  narrative_ru?: string;
+  total_in_backlog?: number;
+}
+
+interface CoveragePayload {
+  strong_count: number;
+  weak_count: number;
+  missing_count: number;
+  open_decisions_count?: number;
+  intent_gaps?: string[];
+}
+
+interface QueryMovePayload {
+  query_text: string;
+  impressions_diff: number;
+}
+
+interface QueryTrendsPayload {
+  data_available?: boolean;
+  note_ru?: string;
+  totals_this_week?: { impressions?: number };
+  totals_prev_week?: { impressions?: number };
+  wow_diff?: { impressions_pct?: number | null };
+  top_movers_up?: QueryMovePayload[];
+  top_movers_down?: QueryMovePayload[];
+  new_queries?: string[];
+  lost_queries?: string[];
+}
+
+interface PageFindingPayload {
+  page_id: string;
+  page_url?: string | null;
+  target_intent_code: string;
+  critical_count: number;
+  high_count: number;
+  medium_count: number;
+  top_issues?: string[];
+  missing_eeat_signals?: string[];
+}
+
+interface PageFindingsPayload {
+  reviews_run_count: number;
+  pages_reviewed: number;
+  warning_ru?: string | null;
+  by_priority_count?: Record<string, number>;
+  pages?: PageFindingPayload[];
+}
+
+interface TechnicalIssuePayload {
+  code: string;
+  severity: string;
+  title_ru: string;
+  detail_ru: string;
+  count: number;
+  examples?: string[];
+}
+
+interface TechnicalPayload {
+  pages_total: number;
+  pages_indexed: number;
+  pages_non_200: number;
+  indexation_rate: number;
+  duplicates_suspected: number;
+  fingerprint_stale_count: number;
+  technical_score?: number;
+  robots?: { ok?: boolean };
+  sitemap?: { valid_xml?: boolean; urls_declared?: number };
+  checks?: Record<string, number | undefined>;
+  schema_types?: Record<string, number>;
+  issues?: TechnicalIssuePayload[];
+  warning_ru?: string | null;
+}
+
 interface ReportPayload {
-  diagnostic?: any;
-  meta: any;
-  executive: any;
-  action_plan: any;
-  coverage: any;
-  query_trends: any;
-  page_findings: any;
-  technical: any;
+  diagnostic?: DiagnosticPayload | null;
+  meta: ReportMetaPayload;
+  executive: ExecutivePayload;
+  action_plan: ActionPlanPayload;
+  coverage: CoveragePayload;
+  query_trends: QueryTrendsPayload;
+  page_findings: PageFindingsPayload;
+  technical: TechnicalPayload;
 }
 
 const PRIORITY_TONE: Record<string, string> = {
@@ -20,6 +152,13 @@ const PRIORITY_TONE: Record<string, string> = {
   high:     "bg-orange-100 text-orange-800 border-orange-300",
   medium:   "bg-amber-100 text-amber-800 border-amber-300",
   low:      "bg-slate-100 text-slate-700 border-slate-300",
+};
+
+const SEVERITY_TONE: Record<string, string> = {
+  critical: "border-rose-300 bg-rose-50 text-rose-900",
+  high: "border-orange-300 bg-orange-50 text-orange-900",
+  medium: "border-amber-300 bg-amber-50 text-amber-900",
+  low: "border-slate-200 bg-slate-50 text-slate-800",
 };
 
 function HealthRing({ score }: { score: number }) {
@@ -48,6 +187,19 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
   const pf = payload.page_findings;
   const tech = payload.technical;
   const d = payload.diagnostic;
+  const diagnosticSymptoms = d?.supporting_symptoms_ru ?? [];
+  const diagnosticActions = d?.recommended_first_actions_ru ?? [];
+  const missingClusters = d?.missing_target_clusters ?? [];
+  const topWins = e.top_wins ?? [];
+  const topLosses = e.top_losses ?? [];
+  const intentGaps = cov.intent_gaps ?? [];
+  const moversUp = tr.top_movers_up ?? [];
+  const moversDown = tr.top_movers_down ?? [];
+  const newQueries = tr.new_queries ?? [];
+  const lostQueries = tr.lost_queries ?? [];
+  const priorityCounts = pf.by_priority_count ?? {};
+  const techSchemaTypes = tech.schema_types ?? {};
+  const techIssues = tech.issues ?? [];
 
   return (
     <div className={cn(
@@ -82,20 +234,20 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
           <CardContent className="space-y-3">
             <p className="text-base">{d.root_problem_ru}</p>
 
-            {d.supporting_symptoms_ru?.length > 0 && (
+            {diagnosticSymptoms.length > 0 && (
               <div>
                 <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Сопутствующие симптомы</div>
                 <ul className="list-disc pl-5 text-sm space-y-1">
-                  {d.supporting_symptoms_ru.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                  {diagnosticSymptoms.map((s, i) => <li key={i}>{s}</li>)}
                 </ul>
               </div>
             )}
 
-            {d.recommended_first_actions_ru?.length > 0 && (
+            {diagnosticActions.length > 0 && (
               <div>
                 <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Что делать в первую очередь</div>
                 <ol className="list-decimal pl-5 text-sm space-y-1">
-                  {d.recommended_first_actions_ru.map((s: string, i: number) => <li key={i}>{s}</li>)}
+                  {diagnosticActions.map((s, i) => <li key={i}>{s}</li>)}
                 </ol>
               </div>
             )}
@@ -118,11 +270,11 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
               )}
             </div>
 
-            {d.missing_target_clusters?.length > 0 && (
+            {missingClusters.length > 0 && (
               <div>
                 <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Приоритетные пробелы (топ-10)</div>
                 <ul className="space-y-1 text-sm">
-                  {d.missing_target_clusters.slice(0, 10).map((c: any) => (
+                  {missingClusters.slice(0, 10).map((c) => (
                     <li key={c.cluster_key} className="flex items-baseline justify-between gap-2">
                       <span>{c.name_ru}</span>
                       <span className="text-xs text-muted-foreground tabular-nums">
@@ -155,19 +307,19 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
           </div>
           {e.prose_ru && <p className="text-sm leading-relaxed">{e.prose_ru}</p>}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {e.top_wins?.length > 0 && (
+            {topWins.length > 0 && (
               <div>
                 <div className="text-xs font-semibold uppercase text-emerald-700 mb-1">Победы недели</div>
                 <ul className="space-y-1 text-sm">
-                  {e.top_wins.map((w: string, i: number) => <li key={i}>✅ {w}</li>)}
+                  {topWins.map((w, i) => <li key={i}>✅ {w}</li>)}
                 </ul>
               </div>
             )}
-            {e.top_losses?.length > 0 && (
+            {topLosses.length > 0 && (
               <div>
                 <div className="text-xs font-semibold uppercase text-rose-700 mb-1">Потери недели</div>
                 <ul className="space-y-1 text-sm">
-                  {e.top_losses.map((l: string, i: number) => <li key={i}>⚠️ {l}</li>)}
+                  {topLosses.map((l, i) => <li key={i}>⚠️ {l}</li>)}
                 </ul>
               </div>
             )}
@@ -188,7 +340,7 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
             <p className="text-sm text-muted-foreground italic">Нет приоритетных задач.</p>
           ) : (
             <ol className="space-y-2">
-              {ap.items.map((it: any, i: number) => (
+              {ap.items.map((it, i) => (
                 <li key={it.recommendation_id} className="rounded border p-3 text-sm break-inside-avoid">
                   <div className="flex items-center gap-2 flex-wrap mb-1">
                     <span className="font-bold">#{i + 1}</span>
@@ -224,11 +376,11 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <div>Открытых решений в очереди: <b>{cov.open_decisions_count ?? 0}</b></div>
-          {cov.intent_gaps?.length > 0 && (
+          {intentGaps.length > 0 && (
             <div>
               <div className="text-xs font-semibold uppercase text-muted-foreground mb-1">Пробелы</div>
               <ul className="list-disc pl-5 space-y-1">
-                {cov.intent_gaps.map((g: string, i: number) => <li key={i}>{g}</li>)}
+                {intentGaps.map((g, i) => <li key={i}>{g}</li>)}
               </ul>
             </div>
           )}
@@ -250,11 +402,11 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
                 {" "}({pct(tr.wow_diff?.impressions_pct)} от {(tr.totals_prev_week?.impressions ?? 0).toLocaleString("ru")})
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {tr.top_movers_up?.length > 0 && (
+                {moversUp.length > 0 && (
                   <div>
                     <div className="text-xs font-semibold uppercase text-emerald-700 mb-1">Растут</div>
                     <ul className="space-y-1">
-                      {tr.top_movers_up.slice(0, 5).map((q: any, i: number) => (
+                      {moversUp.slice(0, 5).map((q, i) => (
                         <li key={i} className="font-mono text-xs">
                           {q.query_text}: +{q.impressions_diff}
                         </li>
@@ -262,11 +414,11 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
                     </ul>
                   </div>
                 )}
-                {tr.top_movers_down?.length > 0 && (
+                {moversDown.length > 0 && (
                   <div>
                     <div className="text-xs font-semibold uppercase text-rose-700 mb-1">Падают</div>
                     <ul className="space-y-1">
-                      {tr.top_movers_down.slice(0, 5).map((q: any, i: number) => (
+                      {moversDown.slice(0, 5).map((q, i) => (
                         <li key={i} className="font-mono text-xs">
                           {q.query_text}: {q.impressions_diff}
                         </li>
@@ -275,11 +427,11 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
                   </div>
                 )}
               </div>
-              {tr.new_queries?.length > 0 && (
-                <div><b>Новые в топ-50:</b> <span className="font-mono text-xs">{tr.new_queries.join(", ")}</span></div>
+              {newQueries.length > 0 && (
+                <div><b>Новые в топ-50:</b> <span className="font-mono text-xs">{newQueries.join(", ")}</span></div>
               )}
-              {tr.lost_queries?.length > 0 && (
-                <div><b>Потеряны из топ-50:</b> <span className="font-mono text-xs">{tr.lost_queries.join(", ")}</span></div>
+              {lostQueries.length > 0 && (
+                <div><b>Потеряны из топ-50:</b> <span className="font-mono text-xs">{lostQueries.join(", ")}</span></div>
               )}
             </>
           )}
@@ -301,23 +453,23 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
               {pf.by_priority_count && (
                 <div className="text-xs text-muted-foreground">
                   {["critical", "high", "medium", "low"].map((p) => (
-                    <span key={p} className="mr-3">{p}: <b>{pf.by_priority_count[p] ?? 0}</b></span>
+                    <span key={p} className="mr-3">{p}: <b>{priorityCounts[p] ?? 0}</b></span>
                   ))}
                 </div>
               )}
               <div className="space-y-2">
-                {pf.pages?.slice(0, 10).map((p: any) => (
+                {pf.pages?.slice(0, 10).map((p) => (
                   <div key={p.page_id} className="rounded border p-2 break-inside-avoid">
                     <div className="text-sm font-medium truncate">{p.page_url || p.page_id}</div>
                     <div className="text-xs text-muted-foreground mt-0.5">
                       интент: {p.target_intent_code} · крит {p.critical_count} / важно {p.high_count} / средне {p.medium_count}
                     </div>
-                    {p.top_issues?.length > 0 && (
-                      <div className="text-xs mt-1">Проблемы: {p.top_issues.join(", ")}</div>
+                    {(p.top_issues ?? []).length > 0 && (
+                      <div className="text-xs mt-1">Проблемы: {(p.top_issues ?? []).join(", ")}</div>
                     )}
-                    {p.missing_eeat_signals?.length > 0 && (
+                    {(p.missing_eeat_signals ?? []).length > 0 && (
                       <div className="text-xs mt-0.5 text-muted-foreground">
-                        Не найдено E-E-A-T: {p.missing_eeat_signals.join(", ")}
+                        Не найдено E-E-A-T: {(p.missing_eeat_signals ?? []).join(", ")}
                       </div>
                     )}
                   </div>
@@ -331,14 +483,96 @@ export function ReportView({ payload, present = false }: { payload: ReportPayloa
       {/* 6. Technical */}
       <Card className="break-inside-avoid">
         <CardHeader>
-          <CardTitle className="text-lg">
-            6. Техническое SEO · индексация: {(tech.indexation_rate * 100).toFixed(1)}% ({tech.pages_indexed}/{tech.pages_total})
-          </CardTitle>
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <CardTitle className="text-lg">6. Техническое SEO</CardTitle>
+            <Badge variant="outline" className={cn(
+              "text-xs",
+              (tech.technical_score ?? 100) >= 80
+                ? "bg-emerald-50 text-emerald-800 border-emerald-300"
+                : (tech.technical_score ?? 100) >= 50
+                  ? "bg-amber-50 text-amber-800 border-amber-300"
+                  : "bg-rose-50 text-rose-800 border-rose-300",
+            )}>
+              техscore {tech.technical_score ?? 100}/100
+            </Badge>
+          </div>
         </CardHeader>
-        <CardContent className="space-y-1 text-sm">
-          <div>Non-200 страниц: <b>{tech.pages_non_200}</b></div>
-          <div>Подозрение на дубли: <b>{tech.duplicates_suspected}</b></div>
-          <div>Устаревшие fingerprints (&gt;30 дн.): <b>{tech.fingerprint_stale_count}</b></div>
+        <CardContent className="space-y-4 text-sm">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="rounded border p-3">
+              <div className="text-xs text-muted-foreground">Индексация</div>
+              <div className="font-semibold">
+                {(tech.indexation_rate * 100).toFixed(1)}% ({tech.pages_indexed}/{tech.pages_total})
+              </div>
+            </div>
+            <div className="rounded border p-3">
+              <div className="text-xs text-muted-foreground">robots.txt</div>
+              <div className="font-semibold">{tech.robots?.ok ? "в порядке" : "есть проблема"}</div>
+            </div>
+            <div className="rounded border p-3">
+              <div className="text-xs text-muted-foreground">sitemap.xml</div>
+              <div className="font-semibold">
+                {tech.sitemap?.valid_xml ? `${tech.sitemap.urls_declared ?? 0} URL` : "не валиден"}
+              </div>
+            </div>
+            <div className="rounded border p-3">
+              <div className="text-xs text-muted-foreground">HTTP ошибки</div>
+              <div className="font-semibold">{tech.pages_non_200}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+            <div>Дубли title: <b>{tech.checks?.duplicate_titles ?? 0}</b></div>
+            <div>noindex: <b>{tech.checks?.noindex_pages ?? 0}</b></div>
+            <div>битые ссылки: <b>{tech.checks?.broken_internal_links ?? 0}</b></div>
+            <div>canonical ошибки: <b>{(tech.checks?.canonical_external ?? 0) + (tech.checks?.canonical_mismatch ?? 0)}</b></div>
+          </div>
+
+          {Object.keys(techSchemaTypes).length > 0 && (
+            <div>
+              <div className="text-xs font-semibold uppercase text-muted-foreground mb-1">Schema types</div>
+              <div className="flex flex-wrap gap-1">
+                {Object.entries(techSchemaTypes).map(([name, count]) => (
+                  <Badge key={name} variant="secondary" className="text-xs">
+                    {name}: {String(count)}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {techIssues.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-xs font-semibold uppercase text-muted-foreground">Что исправить</div>
+              {techIssues.slice(0, 8).map((issue) => (
+                <div
+                  key={issue.code}
+                  className={cn(
+                    "rounded border p-3",
+                    SEVERITY_TONE[issue.severity] ?? SEVERITY_TONE.low,
+                  )}
+                >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Badge variant="outline" className="text-xs">{issue.severity}</Badge>
+                    <b>{issue.title_ru}</b>
+                    <span className="text-xs opacity-75">({issue.count})</span>
+                  </div>
+                  <p className="mt-1 leading-snug">{issue.detail_ru}</p>
+                  {(issue.examples ?? []).length > 0 && (
+                    <div className="mt-2 space-y-1 text-xs opacity-80">
+                      {(issue.examples ?? []).slice(0, 3).map((ex) => (
+                        <div key={ex} className="truncate">пример: {ex}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="text-xs text-muted-foreground">
+            Подозрение на дубли: <b>{tech.duplicates_suspected}</b> · Устаревшие fingerprints (&gt;30 дн.): <b>{tech.fingerprint_stale_count}</b>
+          </div>
           {tech.warning_ru && <div className="text-amber-700 mt-2">⚠ {tech.warning_ru}</div>}
         </CardContent>
       </Card>

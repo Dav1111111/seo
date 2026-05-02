@@ -1,4 +1,12 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
+
+
+_PRODUCTION_ENVS = {"production", "prod"}
+_DEFAULT_SECRET_VALUES = {
+    "SECRET_KEY": "dev-secret-key-change-in-production",
+    "JWT_SECRET": "dev-jwt-secret-change-in-production",
+}
 
 
 class Settings(BaseSettings):
@@ -72,6 +80,48 @@ class Settings(BaseSettings):
     # Keep False until shadow data confirms new picker produces at
     # least parity coverage + reduces the Abkhazia skew.
     USE_BUSINESS_TRUTH_DISCOVERY: bool = False
+
+    @model_validator(mode="after")
+    def validate_production_config(self):
+        if (self.APP_ENV or "").strip().lower() not in _PRODUCTION_ENVS:
+            return self
+
+        required = (
+            "DATABASE_URL",
+            "DATABASE_URL_SYNC",
+            "REDIS_URL",
+            "ANTHROPIC_API_KEY",
+            "ADMIN_API_KEY",
+            "SECRET_KEY",
+            "JWT_SECRET",
+            "ENCRYPTION_KEY",
+        )
+        missing = [
+            name for name in required
+            if not str(getattr(self, name, "") or "").strip()
+        ]
+        weak = [
+            name for name, default in _DEFAULT_SECRET_VALUES.items()
+            if getattr(self, name) == default
+        ]
+        for name in ("ADMIN_API_KEY", "SECRET_KEY", "JWT_SECRET", "ENCRYPTION_KEY"):
+            value = str(getattr(self, name, "") or "").strip().lower()
+            if value.startswith("change-me"):
+                weak.append(name)
+        if self.ENCRYPTION_KEY and len(self.ENCRYPTION_KEY.strip()) < 32:
+            weak.append("ENCRYPTION_KEY")
+        if self.ADMIN_API_KEY.startswith("admin_dev_"):
+            weak.append("ADMIN_API_KEY")
+        if missing or weak:
+            parts = []
+            if missing:
+                parts.append(f"missing: {', '.join(missing)}")
+            if weak:
+                parts.append(f"weak/default: {', '.join(sorted(set(weak)))}")
+            raise ValueError(
+                "Invalid production configuration; fix " + "; ".join(parts)
+            )
+        return self
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

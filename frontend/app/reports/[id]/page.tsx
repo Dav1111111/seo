@@ -52,7 +52,7 @@ export default function ReportDetailPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="p-4 sm:p-6 space-y-4">
       {!present && (
         <div className="flex items-center justify-between gap-2 flex-wrap print:hidden">
           <Button size="sm" variant="ghost" onClick={() => router.push("/reports")}>

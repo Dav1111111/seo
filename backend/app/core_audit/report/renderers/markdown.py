@@ -163,9 +163,36 @@ def render_markdown(report: WeeklyReport) -> str:
     tech = report.technical
     out.append(f"## 6. Техническое SEO  ·  индексация: "
                f"{tech.indexation_rate * 100:.1f}% ({tech.pages_indexed}/{tech.pages_total})")
+    out.append(f"**Технический score:** {tech.technical_score}/100")
     out.append(f"- Non-200 страниц: {tech.pages_non_200}")
     out.append(f"- Подозрение на дубли: {tech.duplicates_suspected}")
     out.append(f"- Устаревшие fingerprints (>30 дней): {tech.fingerprint_stale_count}")
+    if tech.robots:
+        out.append(
+            "- robots.txt: "
+            f"{'ok' if tech.robots.get('ok') else 'проблема'}"
+            f"{' · Disallow: /' if tech.robots.get('disallow_all') else ''}"
+        )
+    if tech.sitemap:
+        out.append(
+            "- sitemap.xml: "
+            f"{tech.sitemap.get('urls_declared', 0)} URL"
+            f" · не в sitemap: {tech.sitemap.get('pages_not_in_sitemap', 0)}"
+        )
+    if tech.schema_types:
+        schema_line = ", ".join(
+            f"{name}: {count}" for name, count in sorted(tech.schema_types.items())
+        )
+        out.append(f"- Schema types: {schema_line}")
+    if tech.issues:
+        out.append("\n**Главные технические проблемы:**")
+        for issue in tech.issues[:10]:
+            out.append(
+                f"- [{issue.severity}] {issue.title_ru} "
+                f"({issue.count}): {issue.detail_ru}"
+            )
+            for ex in issue.examples[:3]:
+                out.append(f"  - пример: {ex}")
     if tech.warning_ru:
         out.append(f"\n_⚠ {tech.warning_ru}_")
 

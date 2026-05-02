@@ -996,6 +996,7 @@ export const api = {
           hint?: string | null;
         }>;
         evidence: Record<string, unknown>;
+        in_focus: boolean;
       }>;
     }>(`/studio/sites/${siteId}/plan`, { base: "admin" }),
 

@@ -6,6 +6,7 @@ from app.database import get_db
 from app.models.site import Site
 from app.models.tenant import Tenant
 from app.schemas.site import SiteCreate, SiteUpdate, SiteResponse
+from app.security.crypto import EncryptionKeyMissing, encrypt_secret
 
 router = APIRouter()
 
@@ -33,7 +34,13 @@ async def list_sites(db: AsyncSession = Depends(get_db)):
 @router.post("", response_model=SiteResponse, status_code=201)
 async def create_site(body: SiteCreate, db: AsyncSession = Depends(get_db)):
     tenant_id = await _ensure_default_tenant(db)
-    site = Site(tenant_id=tenant_id, **body.model_dump(exclude_none=True))
+    payload = body.model_dump(exclude_none=True)
+    try:
+        if "yandex_oauth_token" in payload:
+            payload["yandex_oauth_token"] = encrypt_secret(payload["yandex_oauth_token"])
+    except EncryptionKeyMissing as exc:
+        raise HTTPException(status_code=500, detail="ENCRYPTION_KEY not configured") from exc
+    site = Site(tenant_id=tenant_id, **payload)
     db.add(site)
     await db.flush()
     await db.refresh(site)
@@ -55,7 +62,13 @@ async def update_site(site_id: uuid.UUID, body: SiteUpdate, db: AsyncSession = D
     site = result.scalar_one_or_none()
     if not site:
         raise HTTPException(status_code=404, detail="Site not found")
-    for key, value in body.model_dump(exclude_none=True).items():
+    payload = body.model_dump(exclude_none=True)
+    try:
+        if "yandex_oauth_token" in payload:
+            payload["yandex_oauth_token"] = encrypt_secret(payload["yandex_oauth_token"])
+    except EncryptionKeyMissing as exc:
+        raise HTTPException(status_code=500, detail="ENCRYPTION_KEY not configured") from exc
+    for key, value in payload.items():
         setattr(site, key, value)
     await db.flush()
     await db.refresh(site)

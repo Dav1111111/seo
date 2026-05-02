@@ -168,7 +168,7 @@ export default function ConnectorsPage() {
 
   if (listLoading) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="p-4 sm:p-6 space-y-4">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-48 w-full" />
       </div>
@@ -177,7 +177,7 @@ export default function ConnectorsPage() {
 
   if (listErr) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <Card>
           <CardContent className="pt-6 text-red-800">
             Не удалось получить список коннекторов: {String(listErr)}
@@ -188,7 +188,7 @@ export default function ConnectorsPage() {
   }
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
+    <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold">Коннекторы</h1>

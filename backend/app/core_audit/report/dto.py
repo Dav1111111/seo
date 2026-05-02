@@ -134,6 +134,16 @@ class PageFindingsSection(BaseModel):
 
 # ── 6. Technical ──────────────────────────────────────────────────────
 
+class TechnicalIssue(BaseModel):
+    code: str
+    severity: str                                  # critical|high|medium|low
+    title_ru: str
+    detail_ru: str
+    count: int = 0
+    examples: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class TechnicalSection(BaseModel):
     pages_total: int = 0
     pages_indexed: int = 0
@@ -142,6 +152,12 @@ class TechnicalSection(BaseModel):
     indexation_rate_prev_week: float | None = None
     duplicates_suspected: int = 0                  # content_hash groups count>1
     fingerprint_stale_count: int = 0               # >30d unchanged
+    technical_score: int = 100
+    robots: dict[str, Any] = Field(default_factory=dict)
+    sitemap: dict[str, Any] = Field(default_factory=dict)
+    checks: dict[str, Any] = Field(default_factory=dict)
+    schema_types: dict[str, int] = Field(default_factory=dict)
+    issues: list[TechnicalIssue] = Field(default_factory=list)
     warning_ru: str | None = None
 
 

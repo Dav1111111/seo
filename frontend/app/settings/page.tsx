@@ -125,7 +125,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="space-y-6 max-w-2xl">
+    <div className="p-4 sm:p-6 space-y-6 max-w-2xl">
       <h1 className="text-2xl font-bold">Настройки</h1>
 
       {/* System health */}

@@ -13,8 +13,13 @@ from app.workers.db_session import task_session
 from app.models.site import Site
 from app.collectors.webmaster import WebmasterCollector
 from app.collectors.metrica import MetricaCollector
+from app.security.crypto import decrypt_secret
 
 logger = logging.getLogger(__name__)
+
+
+def _site_oauth_token(site_token: str | None, fallback_token: str) -> str:
+    return decrypt_secret(site_token) or fallback_token
 
 
 def _run_async(coro):
@@ -122,7 +127,10 @@ async def _get_active_sites() -> list[dict]:
         site_list.append({
             "id": s.id,
             "domain": s.domain,
-            "yandex_oauth_token": s.yandex_oauth_token or settings.YANDEX_OAUTH_TOKEN,
+            "yandex_oauth_token": _site_oauth_token(
+                s.yandex_oauth_token,
+                settings.YANDEX_OAUTH_TOKEN,
+            ),
             "webmaster_user_id": settings.YANDEX_WEBMASTER_USER_ID,
             "yandex_webmaster_host_id": s.yandex_webmaster_host_id or settings.YANDEX_WEBMASTER_HOST_ID,
             "yandex_metrica_counter_id": s.yandex_metrica_counter_id or settings.YANDEX_METRICA_COUNTER_ID,
@@ -199,7 +207,10 @@ def collect_site_webmaster(site_id: str, run_id: str | None = None):
                 run_id=run_id,
             )
             collector = WebmasterCollector(
-                oauth_token=site.yandex_oauth_token or settings.YANDEX_OAUTH_TOKEN,
+                oauth_token=_site_oauth_token(
+                    site.yandex_oauth_token,
+                    settings.YANDEX_OAUTH_TOKEN,
+                ),
                 user_id=settings.YANDEX_WEBMASTER_USER_ID,
                 host_id=site.yandex_webmaster_host_id or settings.YANDEX_WEBMASTER_HOST_ID,
             )
@@ -349,7 +360,10 @@ def collect_site_metrica(site_id: str):
                 return {"status": "skipped", "reason": "no counter_id"}
 
             collector = MetricaCollector(
-                oauth_token=site.yandex_oauth_token or settings.YANDEX_OAUTH_TOKEN,
+                oauth_token=_site_oauth_token(
+                    site.yandex_oauth_token,
+                    settings.YANDEX_OAUTH_TOKEN,
+                ),
                 counter_id=counter_id,
             )
             try:
@@ -1613,7 +1627,10 @@ def webmaster_url_indexation_site_task(
                 site.yandex_webmaster_host_id
                 or _settings.YANDEX_WEBMASTER_HOST_ID
             )
-            oauth = site.yandex_oauth_token or _settings.YANDEX_OAUTH_TOKEN
+            oauth = _site_oauth_token(
+                site.yandex_oauth_token,
+                _settings.YANDEX_OAUTH_TOKEN,
+            )
             user_id = _settings.YANDEX_WEBMASTER_USER_ID
             if not host_id or not oauth or not user_id:
                 await emit_terminal(
