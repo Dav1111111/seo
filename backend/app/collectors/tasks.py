@@ -275,7 +275,7 @@ def crawl_site(self, site_id: str, run_id: str | None = None):
 
             domain = site.domain
             base_url = f"https://{domain}" if not domain.startswith("xn--") and "." in domain else f"https://{domain}"
-            crawler = SiteCrawler(domain=domain, base_url=base_url, max_pages=50)
+            crawler = SiteCrawler(domain=domain, base_url=base_url, max_pages=200)
             try:
                 out = await crawler.crawl_and_store(db, site.id)
             except Exception as exc:  # noqa: BLE001
@@ -326,10 +326,94 @@ def crawl_site(self, site_id: str, run_id: str | None = None):
     return result
 
 
-@celery_app.task(name="crawl_all_sites_monthly", bind=True, max_retries=0)
-def crawl_all_sites_monthly(self):
-    """Monthly re-crawl of every active site. Spaces sites by 60 seconds
-    so one giant crawl doesn't hog the worker pool."""
+@celery_app.task(name="crawl_single_page_site", bind=True, max_retries=0)
+def crawl_single_page_task(
+    self, site_id: str, page_id: str, run_id: str | None = None,
+):
+    """Re-fetch ONE page on demand. Used by /studio/pages/{id}/recrawl
+    when owner edited a page and wants the system to see the new
+    title/h1/meta without re-running the full site crawl."""
+    from app.collectors.site_crawler import SiteCrawler
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.models.page import Page
+
+    async def _run():
+        async with task_session() as db:
+            site_row = await db.execute(
+                select(Site).where(Site.id == UUID(site_id)),
+            )
+            site = site_row.scalar_one_or_none()
+            if not site:
+                await emit_terminal(
+                    db, site_id, "page_recrawl", "failed",
+                    "Сайт не найден.", run_id=run_id,
+                )
+                return {"status": "failed", "error": "site not found"}
+
+            page_row = await db.execute(
+                select(Page).where(
+                    Page.id == UUID(page_id), Page.site_id == site.id,
+                ),
+            )
+            page = page_row.scalar_one_or_none()
+            if not page:
+                await emit_terminal(
+                    db, site_id, "page_recrawl", "failed",
+                    "Страница не найдена.", run_id=run_id,
+                    extra={"page_id": page_id},
+                )
+                return {"status": "failed", "error": "page not found"}
+
+            await log_event(
+                db, site_id, "page_recrawl", "started",
+                f"Перезагружаю {page.path or page.url}…",
+                extra={"page_id": page_id, "url": page.url},
+                run_id=run_id,
+            )
+
+            domain = site.domain
+            base_url = f"https://{domain}"
+            crawler = SiteCrawler(domain=domain, base_url=base_url, max_pages=1)
+            try:
+                result = await crawler.crawl_single_page(db, site.id, page.url)
+            except Exception as exc:  # noqa: BLE001
+                await emit_terminal(
+                    db, site_id, "page_recrawl", "failed",
+                    f"Перезагрузка остановлена: {str(exc)[:200]}",
+                    extra={"page_id": page_id},
+                    run_id=run_id,
+                )
+                return {"status": "failed", "error": str(exc)}
+
+            if result.get("status") == "failed":
+                await emit_terminal(
+                    db, site_id, "page_recrawl", "failed",
+                    f"Не удалось загрузить {page.url}",
+                    extra={"page_id": page_id},
+                    run_id=run_id,
+                )
+                return result
+
+            await emit_terminal(
+                db, site_id, "page_recrawl", "done",
+                (
+                    f"Страница перезагружена · HTTP {result.get('http_status')}. "
+                    f"Title/h1/meta обновлены."
+                ),
+                extra={"page_id": page_id, **result},
+                run_id=run_id,
+            )
+            return result
+
+    return _run_async(_run())
+
+
+@celery_app.task(name="crawl_all_sites_weekly", bind=True, max_retries=0)
+def crawl_all_sites_weekly(self):
+    """Weekly re-crawl of every active site. Spaces sites by 60 seconds
+    so one giant crawl doesn't hog the worker pool. Was monthly — that
+    let title/h1/meta drift up to 30 days, and Reviewer skipped on
+    `unchanged_hash` while UI showed cached month-old content."""
     logger.info("Starting monthly crawl for all active sites")
     sites = _run_async(_get_active_sites())
     queued = []
@@ -566,6 +650,24 @@ def check_site_indexation(self, site_id: str, run_id: str | None = None):
 # limits. 1 req/sec is conservative — Yandex documents far higher
 # limits but the dynamics endpoint is heavier than search.
 WORDSTAT_INTER_QUERY_SLEEP_SEC = 1.0
+
+
+@celery_app.task(name="wordstat_refresh_all", bind=True, max_retries=0)
+def wordstat_refresh_all(self):
+    """Weekly fan-out for Wordstat volume refresh. Without this beat,
+    monthly volumes only update on manual button click and the UI
+    silently shows stale_30d+ status."""
+    logger.info("Starting weekly Wordstat volume refresh for all sites")
+    sites = _run_async(_get_active_sites())
+    queued = []
+    for i, site in enumerate(sites):
+        if site.get("id"):
+            wordstat_refresh_site.apply_async(
+                args=[str(site["id"])],
+                countdown=i * 60,  # generous spacing — Wordstat is slow
+            )
+            queued.append(site["domain"])
+    return {"queued": queued}
 
 
 @celery_app.task(name="wordstat_refresh_site", bind=True, max_retries=1)
@@ -1090,6 +1192,24 @@ def studio_indexation_run(self, site_id: str, run_id: str | None = None):
     return _run_async(_run())
 
 
+@celery_app.task(name="classify_queries_all", bind=True, max_retries=0)
+def classify_queries_all(self):
+    """Daily fan-out for query relevance classification. Runs after
+    `collect_webmaster_all` so any newly observed SearchQuery rows
+    get tagged the same morning instead of waiting for a manual click."""
+    logger.info("Starting daily query relevance classification for all sites")
+    sites = _run_async(_get_active_sites())
+    queued = []
+    for i, site in enumerate(sites):
+        if site.get("id"):
+            classify_queries_site_task.apply_async(
+                args=[str(site["id"])],
+                countdown=i * 30,
+            )
+            queued.append(site["domain"])
+    return {"queued": queued}
+
+
 @celery_app.task(name="classify_queries_site", bind=True, max_retries=1)
 def classify_queries_site_task(self, site_id: str, run_id: str | None = None):
     """Studio v2 etap 4 — classify SearchQuery rows by relevance.
@@ -1581,7 +1701,46 @@ def diagnose_harmful_queries_site_task(
             )
             return {"status": terminal, **stats}
 
-    return _run_async(_run())
+    result = _run_async(_run())
+
+    # Translate the freshly-cached harmful_diagnosis fixes into
+    # PageReviewRecommendation rows so the owner sees them on
+    # /studio/pages — without this they only show up as text inside
+    # the harmful-query card. No LLM call here, just DB transformation.
+    if result.get("status") in ("done", "skipped"):
+        try:
+            from app.core_audit.harmful_fix.tasks import harmful_fix_materialize_task
+            harmful_fix_materialize_task.apply_async(args=[site_id])
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "harmful_diagnose.materialize_dispatch_failed site=%s err=%s",
+                site_id, exc,
+            )
+    return result
+
+
+@celery_app.task(name="webmaster_url_indexation_all", bind=True, max_retries=0)
+def webmaster_url_indexation_all(self):
+    """Daily fan-out for per-URL Webmaster index status. Same pattern as
+    `crawl_all_sites_monthly`: enqueues `webmaster_url_indexation_site`
+    per active site spaced by 30s so one big site can't hog the worker.
+
+    Without this beat job the per-URL state in Page.yandex_index_checked_at
+    only updates on manual `/studio/indexation/refresh-urls` clicks, so the
+    UI silently shows weeks-stale data."""
+    logger.info("Starting daily per-URL Webmaster indexation for all sites")
+    sites = _run_async(_get_active_sites())
+    queued = []
+    for i, site in enumerate(sites):
+        if not site.get("yandex_webmaster_host_id"):
+            continue
+        if site.get("id"):
+            webmaster_url_indexation_site_task.apply_async(
+                args=[str(site["id"])],
+                countdown=i * 30,
+            )
+            queued.append(site["domain"])
+    return {"queued": queued}
 
 
 @celery_app.task(name="webmaster_url_indexation_site", bind=True, max_retries=1)

@@ -16,8 +16,8 @@ Gate: competitor discovery is EXPENSIVE (SERP API calls) and only
 worth running if we have enough real money-queries to drive it.
 `money_queries` = observed Webmaster queries that pass the business-
 token filter. Below MIN_MONEY_QUERIES we skip competitor stages and
-opportunities, then emit skipped terminals so the pipeline wrap-up
-closes cleanly.
+opportunities, then run the intent decisioner before review so the
+page-review layer has fresh CoverageDecision rows to work from.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from uuid import UUID
 
 from sqlalchemy import desc, func, select
 
-from app.core_audit.activity import emit_terminal
+from app.core_audit.activity import emit_terminal, log_event
 from app.models.daily_metric import DailyMetric
 from app.models.search_query import SearchQuery
 from app.models.site import Site
@@ -191,6 +191,11 @@ async def _skip_after_primary_failure(
         extra=extra, run_id=run_id,
     )
     await emit_terminal(
+        db, site_id, "intent_decide", "skipped",
+        "Решения покрытия пропущены — базовый сбор завершился с ошибкой.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
         db, site_id, "review", "skipped",
         "Проверка страниц пропущена — сначала надо починить базовый сбор.",
         extra=extra, run_id=run_id,
@@ -239,6 +244,131 @@ async def _mark_review_chain_dispatch_failed(
         "Отчёт пропущен — проверка страниц не запустилась.",
         run_id=run_id,
     )
+
+
+async def _mark_intent_chain_dispatch_failed(
+    db, site_id: str, run_id: str | None,
+) -> None:
+    await emit_terminal(
+        db, site_id, "intent_decide", "failed",
+        "Не удалось запустить решения покрытия страниц.",
+        run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "review", "skipped",
+        "Проверка страниц пропущена — решения покрытия не запустились.",
+        run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "priorities", "skipped",
+        "Приоритеты пропущены — нет свежей проверки страниц.",
+        run_id=run_id,
+    )
+    await emit_terminal(
+        db, site_id, "report", "skipped",
+        "Отчёт пропущен — нет свежих приоритетов.",
+        run_id=run_id,
+    )
+
+
+def queue_intent_review_chain(site_id: str, run_id: str | None) -> bool:
+    """Continue full analysis into intent_decide -> review -> priorities -> report."""
+    try:
+        pipeline_intent_then_review_task.apply_async(
+            args=[site_id],
+            kwargs={"run_id": run_id},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pipeline.intent_review_chain_dispatch_failed site=%s err=%s", site_id, exc)
+        return False
+
+
+@celery_app.task(name="pipeline_intent_then_review", bind=True, max_retries=0)
+def pipeline_intent_then_review_task(
+    self,
+    site_id: str,
+    run_id: str | None = None,
+    use_llm: bool = True,
+) -> dict:
+    """Build fresh CoverageDecision rows before the page-review chain.
+
+    Review candidates come from CoverageDecision. Running review directly
+    after crawl/Webmaster/demand_map can therefore produce a clean but
+    useless "0 checked" result on freshly reset data.
+    """
+
+    async def _run_decisioner() -> dict:
+        async with task_session() as db:
+            await log_event(
+                db, site_id, "intent_decide", "started",
+                "Классифицирую интенты и строю решения покрытия страниц…",
+                run_id=run_id,
+            )
+            try:
+                from app.intent.decisioner import Decisioner
+                stats = await Decisioner().run_for_site(
+                    db, UUID(site_id), use_llm_fallback=use_llm,
+                )
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                await emit_terminal(
+                    db, site_id, "intent_decide", "failed",
+                    f"Решения покрытия остановлены: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                await emit_terminal(
+                    db, site_id, "review", "skipped",
+                    "Проверка страниц пропущена — решения покрытия не завершились.",
+                    run_id=run_id,
+                )
+                await emit_terminal(
+                    db, site_id, "priorities", "skipped",
+                    "Приоритеты пропущены — нет свежей проверки страниц.",
+                    run_id=run_id,
+                )
+                await emit_terminal(
+                    db, site_id, "report", "skipped",
+                    "Отчёт пропущен — нет свежих приоритетов.",
+                    run_id=run_id,
+                )
+                return {"status": "failed", "site_id": site_id, "error": str(exc)}
+
+            decisions = stats.get("decisions_by_action") or {}
+            total_decisions = sum(int(v or 0) for v in decisions.values())
+            await emit_terminal(
+                db, site_id, "intent_decide", "done",
+                f"Решения покрытия готовы: {total_decisions} решений.",
+                extra=stats,
+                run_id=run_id,
+            )
+            return {
+                "status": "ok",
+                "site_id": site_id,
+                "decisions": total_decisions,
+                "stats": stats,
+            }
+
+    result = _run(_run_decisioner())
+    if isinstance(result, dict) and result.get("status") == "failed":
+        return result
+
+    if not _queue_review_chain(site_id, run_id):
+        async def _mark_review_failed() -> None:
+            async with task_session() as db:
+                await _mark_review_chain_dispatch_failed(db, site_id, run_id)
+
+        _run(_mark_review_failed())
+        return {
+            "status": "failed",
+            "site_id": site_id,
+            "action": "review_dispatch_failed",
+        }
+
+    return result
 
 
 @celery_app.task(
@@ -303,12 +433,12 @@ def pipeline_after_primary_task(
             await _skip_competitor_stages(db, site_id, run_id, money_q)
 
     _run(_skip())
-    if not _queue_review_chain(site_id, run_id):
-        async def _mark_review_failed() -> None:
+    if not queue_intent_review_chain(site_id, run_id):
+        async def _mark_intent_failed() -> None:
             async with task_session() as db:
-                await _mark_review_chain_dispatch_failed(db, site_id, run_id)
+                await _mark_intent_chain_dispatch_failed(db, site_id, run_id)
 
-        _run(_mark_review_failed())
+        _run(_mark_intent_failed())
     return {
         "status": "ok",
         "site_id": site_id,
@@ -320,5 +450,7 @@ def pipeline_after_primary_task(
 __all__ = [
     "MIN_MONEY_QUERIES",
     "_primary_stage_failures",
+    "pipeline_intent_then_review_task",
     "pipeline_after_primary_task",
+    "queue_intent_review_chain",
 ]

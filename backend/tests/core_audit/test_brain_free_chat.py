@@ -20,14 +20,20 @@ from unittest.mock import patch
 import pytest
 
 from app.core_audit.brain.free_chat import (
+    MAX_BATTLE_PLAN_REPLY_TOKENS,
+    MAX_DISCUSSION_REPLY_TOKENS,
     MAX_HISTORY_MESSAGES,
+    MAX_REPLY_TOKENS,
     MAX_USER_MESSAGE_CHARS,
+    SYSTEM_PROMPT,
+    _normalise_mode,
     build_user_message,
     free_chat,
 )
 from app.core_audit.brain.rules import Action, Plan
 from app.core_audit.brain.snapshot import (
     BrainSnapshot,
+    CompetitorFacts,
     IndexationFacts,
     QueriesFacts,
     ReviewFacts,
@@ -82,6 +88,72 @@ def _snap() -> BrainSnapshot:
         ),
         outcomes=OutcomesFacts(
             applied_total=0, applied_last_14d=0, pending_followup=0,
+        ),
+        competitors=CompetitorFacts(
+            domains=["abhazia-buggy.ru", "adventure-sochi.ru"],
+            profile_available=True,
+            queries_probed=8,
+            queries_with_results=6,
+            unique_domains_seen=14,
+            cost_usd=0.024,
+            top_competitors=[
+                {
+                    "domain": "abhazia-buggy.ru",
+                    "serp_hits": 4,
+                    "best_position": 2,
+                    "avg_position": 4.5,
+                    "example_query": "багги абхазия",
+                    "example_url": "https://abhazia-buggy.ru/tours",
+                    "example_title": "Багги-туры по Абхазии",
+                },
+            ],
+            deep_dive_available=True,
+            self_signals={
+                "url": "https://grandtourspirit.ru/",
+                "status": "ok",
+                "title": "Grand Tour Spirit",
+                "has_price": False,
+                "has_booking_cta": True,
+                "has_reviews": False,
+                "has_phone": True,
+                "has_telegram": True,
+                "has_whatsapp": False,
+                "schema_types": ["Organization"],
+            },
+            deep_dive_competitors=[
+                {
+                    "domain": "abhazia-buggy.ru",
+                    "has_price": True,
+                    "has_booking_cta": True,
+                    "has_reviews": True,
+                    "has_phone": True,
+                    "has_telegram": True,
+                    "has_whatsapp": True,
+                    "schema_types": ["Product", "FAQPage"],
+                    "pages": [
+                        {
+                            "url": "https://abhazia-buggy.ru/tours",
+                            "status": "ok",
+                            "title": "Багги-туры по Абхазии",
+                            "h1": "Багги-туры",
+                            "word_count": 920,
+                        },
+                    ],
+                },
+            ],
+            growth_opportunities=[
+                {
+                    "source": "feature_diff",
+                    "category": "on_page_feature",
+                    "priority": "high",
+                    "title_ru": "Покажи цены на страницах услуг",
+                    "reasoning_ru": "1 из 1 найденных конкурентов имеет цены.",
+                    "evidence": {
+                        "feature": "has_price",
+                        "competitors_with": ["abhazia-buggy.ru"],
+                    },
+                },
+            ],
         ),
     )
 
@@ -163,10 +235,10 @@ def test_user_message_carries_business_profile() -> None:
     assert "1200+ клиентов в месяц" in msg
 
 
-def test_user_message_carries_full_snapshot_all_five_sections() -> None:
+def test_user_message_carries_full_snapshot_all_sections() -> None:
     """Free chat must see ALL snapshot sections — owner can ask
     about any of them. Per-action chat slices; free chat does NOT.
-    Pin each of the 5 section headers + at least one fact per section."""
+    Pin each section header + at least one fact per section."""
     msg = build_user_message(
         domain="grandtourspirit.ru",
         target_config={},
@@ -176,12 +248,15 @@ def test_user_message_carries_full_snapshot_all_five_sections() -> None:
         history=[],
         new_message="?",
     )
-    # Five sections + at least one bullet from each.
     assert "Индексация:" in msg
     assert "в индексе Яндекса: 18" in msg
 
     assert "Запросы:" in msg
     assert "спам: 26" in msg
+
+    assert "Конкуренты:" in msg
+    assert "abhazia-buggy.ru" in msg
+    assert "Покажи цены на страницах услуг" in msg
 
     assert "Ревью страниц:" in msg
     assert "без ревью: 20" in msg
@@ -191,6 +266,40 @@ def test_user_message_carries_full_snapshot_all_five_sections() -> None:
 
     assert "Применённые правки и замеры:" in msg
     assert "ждут замера через 14 дней: 0" in msg
+
+
+def test_user_message_marks_recommendations_as_full_list_when_uncapped() -> None:
+    snap = _snap()
+    snap.review.recs_pending = 2
+    snap.review.recs_high_priority_pending = 1
+    snap.review.top_pending_recommendations = [
+        {
+            "rec_id": "1",
+            "priority": "high",
+            "category": "title",
+            "url": "https://x/a",
+            "reasoning_ru": "current title",
+        },
+        {
+            "rec_id": "2",
+            "priority": "medium",
+            "category": "h1",
+            "url": "https://x/b",
+            "reasoning_ru": "current h1",
+        },
+    ]
+
+    msg = build_user_message(
+        domain="x", target_config={}, understanding={},
+        snap=snap, plan=_plan(), history=[],
+        new_message="покажи рекомендации",
+    )
+
+    assert "источник рекомендаций: последние завершённые ревью" in msg
+    assert "все ожидающие рекомендации в контексте: 2 из 2" in msg
+    assert "это полный список, а не примеры" in msg
+    assert "current title" in msg
+    assert "current h1" in msg
 
 
 def test_user_message_carries_examples_for_grounding() -> None:
@@ -247,6 +356,71 @@ def test_user_message_explains_empty_plan() -> None:
         new_message="?",
     )
     assert "ТЕКУЩИЙ ПЛАН: пусто" in msg
+
+
+def test_user_message_carries_discussion_mode_instruction() -> None:
+    """Discussion mode changes answer style without changing the data
+    contract: still factual, but more collaborative."""
+    msg = build_user_message(
+        domain="x", target_config={}, understanding={},
+        snap=_snap(), plan=_plan(), history=[],
+        new_message="давай разберём приоритеты",
+        mode="discussion",
+    )
+    assert "РЕЖИМ ОТВЕТА: ОБСУЖДЕНИЕ" in msg
+    assert "что видно по фактам" in msg
+    assert "максимум 2 вопроса" in msg
+
+
+def test_user_message_carries_battle_plan_mode_instruction() -> None:
+    msg = build_user_message(
+        domain="x", target_config={}, understanding={},
+        snap=_snap(), plan=_plan(), history=[],
+        new_message="собери боевой SEO-план",
+        mode="battle_plan",
+    )
+    assert _normalise_mode("battle_plan") == "battle_plan"
+    assert "РЕЖИМ ОТВЕТА: БОЕВОЙ SEO-ПЛАН" in msg
+    assert "максимум 5 действий" in msg
+    assert "причина, конкретная правка, ожидаемый" in msg
+    assert "Не обещай гарантированный топ-5" in msg
+
+
+def test_user_message_unknown_mode_falls_back_to_answer() -> None:
+    """Mode is URL/user-input adjacent, so garbage must not leak into
+    the prompt contract."""
+    msg = build_user_message(
+        domain="x", target_config={}, understanding={},
+        snap=_snap(), plan=_plan(), history=[],
+        new_message="?",
+        mode="yolo",
+    )
+    assert _normalise_mode("yolo") == "answer"
+    assert "РЕЖИМ ОТВЕТА: РАЗВЁРНУТЫЙ КОРОТКИЙ ОТВЕТ" in msg
+    assert "РЕЖИМ ОТВЕТА: ОБСУЖДЕНИЕ" not in msg
+
+
+def test_system_prompt_pins_mode_and_honesty_rules() -> None:
+    """Keep stable anchors for the rules that protect free chat from
+    bad indexation and discussion-mode answers."""
+    assert "7. КОГДА ОБСУЖДАЕМ ИНДЕКСАЦИЮ" in SYSTEM_PROMPT
+    assert "8. КОГДА НЕ ЗНАЕШЬ" in SYSTEM_PROMPT
+    assert "9. РЕЖИМ ОБСУЖДЕНИЯ" in SYSTEM_PROMPT
+    assert "11. РЕЖИМ БОЕВОГО SEO-ПЛАНА" in SYSTEM_PROMPT
+
+
+def test_user_message_adds_competitor_question_instruction() -> None:
+    """Competitor questions get an extra guardrail: split SERP,
+    deep-dive and computed opportunities, and point to the module when
+    data is missing."""
+    msg = build_user_message(
+        domain="x", target_config={}, understanding={},
+        snap=_snap(), plan=_plan(), history=[],
+        new_message="что видно по конкурентам?",
+    )
+    assert "Для вопроса про конкурентов ответь слоями" in msg
+    assert "кто реально виден в выдаче" in msg
+    assert "/studio/competitors" in msg
 
 
 def test_user_message_history_uses_role_tags() -> None:
@@ -325,8 +499,30 @@ def test_free_chat_returns_reply_and_usage() -> None:
     # The system prompt must contain the anti-fabrication rules.
     sys = mock_call.call_args.kwargs["system"]
     assert "не выдумывай" in sys.lower() or "не придумывай" in sys.lower()
+    assert mock_call.call_args.kwargs["max_tokens"] == MAX_REPLY_TOKENS
     # User message contains the actual question.
     assert "что у меня самое слабое место?" in mock_call.call_args.kwargs["user_message"]
+
+
+def test_free_chat_unknown_mode_uses_answer_budget() -> None:
+    fake_usage = {
+        "model": "h", "input_tokens": 1, "output_tokens": 1, "cost_usd": 0.0,
+    }
+    with patch(
+        "app.core_audit.brain.free_chat.call_with_optional_tools",
+        return_value=(
+            {"text": "ok", "tool_use": None},
+            fake_usage,
+        ),
+    ) as mock_call:
+        free_chat(
+            domain="x", target_config={}, understanding={},
+            snap=_snap(), plan=_plan(), history=[],
+            new_message="?",
+            mode="garbage",
+        )
+    assert mock_call.call_args.kwargs["max_tokens"] == MAX_REPLY_TOKENS
+    assert "РЕЖИМ ОТВЕТА: РАЗВЁРНУТЫЙ КОРОТКИЙ ОТВЕТ" in mock_call.call_args.kwargs["user_message"]
 
 
 def test_free_chat_returns_proposal_when_tool_picked() -> None:
@@ -424,6 +620,50 @@ def test_free_chat_truncates_overlong_message() -> None:
         )
     user_msg = mock_call.call_args.kwargs["user_message"]
     assert "[…обрезано]" in user_msg
+
+
+def test_free_chat_discussion_mode_uses_larger_reply_budget() -> None:
+    """Discussion mode may need a little more room for alternatives
+    and a next-step question."""
+    fake_usage = {
+        "model": "h", "input_tokens": 1, "output_tokens": 1, "cost_usd": 0.0,
+    }
+    with patch(
+        "app.core_audit.brain.free_chat.call_with_optional_tools",
+        return_value=(
+            {"text": "ok", "tool_use": None},
+            fake_usage,
+        ),
+    ) as mock_call:
+        free_chat(
+            domain="x", target_config={}, understanding={},
+            snap=_snap(), plan=_plan(), history=[],
+            new_message="давай обсудим порядок работ",
+            mode="discussion",
+        )
+    assert mock_call.call_args.kwargs["max_tokens"] == MAX_DISCUSSION_REPLY_TOKENS
+    assert "РЕЖИМ ОТВЕТА: ОБСУЖДЕНИЕ" in mock_call.call_args.kwargs["user_message"]
+
+
+def test_free_chat_battle_plan_mode_uses_largest_reply_budget() -> None:
+    fake_usage = {
+        "model": "h", "input_tokens": 1, "output_tokens": 1, "cost_usd": 0.0,
+    }
+    with patch(
+        "app.core_audit.brain.free_chat.call_with_optional_tools",
+        return_value=(
+            {"text": "ok", "tool_use": None},
+            fake_usage,
+        ),
+    ) as mock_call:
+        free_chat(
+            domain="x", target_config={}, understanding={},
+            snap=_snap(), plan=_plan(), history=[],
+            new_message="собери боевой план",
+            mode="battle_plan",
+        )
+    assert mock_call.call_args.kwargs["max_tokens"] == MAX_BATTLE_PLAN_REPLY_TOKENS
+    assert "РЕЖИМ ОТВЕТА: БОЕВОЙ SEO-ПЛАН" in mock_call.call_args.kwargs["user_message"]
 
 
 def test_free_chat_rejects_empty_message() -> None:

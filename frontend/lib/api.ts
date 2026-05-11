@@ -1,6 +1,32 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
 const ADMIN_PROXY = "/admin-proxy";  // Next.js server-side proxy — holds the admin key in backend env only
 
+export interface DeepExtractRow {
+  id: string;
+  url: string;
+  is_competitor: boolean;
+  competitor_domain: string | null;
+  status: string;
+  error: string | null;
+  extracted_at: string;
+  duration_ms: number | null;
+  title: string | null;
+  h1: string | null;
+  meta_description: string | null;
+  headings_tree: Array<{ level: number; text: string }> | null;
+  cta_inventory: Array<Record<string, any>> | null;
+  forms_inventory: Array<Record<string, any>> | null;
+  images_inventory: Array<Record<string, any>> | null;
+  css_palette: Array<{ color: string; count: number }> | null;
+  fonts: Array<{ family: string; count: number }> | null;
+  layout_meta: Record<string, any> | null;
+  performance: Record<string, any> | null;
+  js_errors: Array<Record<string, any>> | null;
+  schema_blocks: Array<Record<string, any>> | null;
+  has_screenshot_desktop: boolean;
+  has_screenshot_mobile: boolean;
+}
+
 // Default site ID — in Phase 9 this becomes dynamic
 export const SITE_ID = process.env.NEXT_PUBLIC_SITE_ID || "1e11339f-c87e-4742-9d38-6f79463b0d16";
 
@@ -25,6 +51,26 @@ async function apiFetch<T>(
   return res.json() as Promise<T>;
 }
 
+async function apiDownload(
+  path: string,
+  init?: RequestInit & { base?: "api" | "admin" },
+): Promise<Blob> {
+  const { base = "api", ...rest } = init || {};
+  const prefix = base === "admin" ? ADMIN_PROXY : API_BASE;
+  const res = await fetch(`${prefix}${path}`, {
+    ...rest,
+    headers: {
+      "ngrok-skip-browser-warning": "true",
+      ...rest.headers,
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`API ${res.status}: ${text}`);
+  }
+  return res.blob();
+}
+
 // V2 etap 7 Phase E — strategic focus shape, used by /studio/profile
 // editor and the chat «Применить» dialog. Server contract lives in
 // backend/app/core_audit/strategic_focus.py.
@@ -44,6 +90,8 @@ export type StudioStrategicFocus = StudioStrategicFocusInput & {
   set_by: "owner_via_ui" | "owner_via_chat";
 };
 
+export type ChatMode = "answer" | "discussion" | "battle_plan";
+
 export const api = {
   // Health
   health: () => apiFetch<{ status: string; db: string; redis: string }>("/health"),
@@ -56,7 +104,11 @@ export const api = {
   // Sites
   sites: () => apiFetch<any[]>("/sites"),
   updateSite: (siteId: string, body: Record<string, unknown>) =>
-    apiFetch<any>(`/sites/${siteId}`, { method: "PATCH", body: JSON.stringify(body) }),
+    apiFetch<any>(`/sites/${siteId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+      base: "admin",
+    }),
 
   // Reviews (Module 3)
   review: (reviewId: string) =>
@@ -160,7 +212,7 @@ export const api = {
     }),
 
   // Competitor discovery (SERP-based)
-  triggerCompetitorDiscovery: (siteId: string, maxQueries = 20, topK = 10) =>
+  triggerCompetitorDiscovery: (siteId: string, maxQueries = 30, topK = 10) =>
     apiFetch<{ task_id: string; status: string }>(
       `/sites/${siteId}/competitors/discover?max_queries=${maxQueries}&top_k=${topK}`,
       { method: "POST", base: "admin" },
@@ -185,10 +237,11 @@ export const api = {
         cost_usd?: number;
         errors?: Record<string, number>;
         query_serps?: Record<string, any[]>;
+        computed_at?: string;
       };
     }>(`/sites/${siteId}/competitors`, { base: "admin" }),
 
-  getContentGaps: (siteId: string, topK = 20) =>
+  getContentGaps: (siteId: string, topK = 50) =>
     apiFetch<{
       site_id: string;
       own_domain?: string;
@@ -289,6 +342,41 @@ export const api = {
   triggerFullAnalysis: (siteId: string) =>
     apiFetch<{ status: string; queued: string[]; run_id: string }>(
       `/sites/${siteId}/pipeline/full`,
+      { method: "POST", base: "admin" },
+    ),
+
+  // Deep extract: Playwright-rendered snapshot (own pages + competitor URLs)
+  // NOTE: admin-proxy already prepends `/api/v1/admin/` — paths here
+  // start with `/studio/...`, NOT `/admin/studio/...`.
+  studioTriggerDeepExtractOwnPage: (siteId: string, pageId: string) =>
+    apiFetch<{ status: string; task_id: string; url: string }>(
+      `/studio/sites/${siteId}/pages/${pageId}/deep-extract`,
+      { method: "POST", base: "admin" },
+    ),
+  studioTriggerDeepExtractCompetitor: (siteId: string, url: string) =>
+    apiFetch<{ status: string; task_id: string; url: string }>(
+      `/studio/sites/${siteId}/competitors/deep-extract`,
+      { method: "POST", base: "admin", body: JSON.stringify({ url }) },
+    ),
+  studioGetDeepExtractForPage: (siteId: string, pageId: string) =>
+    apiFetch<DeepExtractRow | null>(
+      `/studio/sites/${siteId}/pages/${pageId}/deep-extract`,
+      { base: "admin" },
+    ),
+  studioListCompetitorDeepExtracts: (siteId: string) =>
+    apiFetch<{ items: DeepExtractRow[] }>(
+      `/studio/sites/${siteId}/competitors/deep-extracts`,
+      { base: "admin" },
+    ),
+  studioDeepExtractScreenshotUrl: (
+    siteId: string,
+    extractId: string,
+    kind: "desktop" | "mobile",
+  ) =>
+    `/admin-proxy/studio/sites/${siteId}/deep-extracts/${extractId}/screenshot/${kind}`,
+  studioAnalyzeDeepExtract: (siteId: string, extractId: string) =>
+    apiFetch<{ extract_id: string; summary_md: string; cost_usd: number; model: string }>(
+      `/studio/sites/${siteId}/deep-extracts/${extractId}/analyze`,
       { method: "POST", base: "admin" },
     ),
 
@@ -515,7 +603,7 @@ export const api = {
   studioListQueries: (
     siteId: string,
     sort: "volume" | "recent" | "alpha" | "position" = "volume",
-    limit = 200,
+    limit = 1000,
   ) =>
     apiFetch<{
       site_id: string;
@@ -720,11 +808,13 @@ export const api = {
       | "broken_http"
       | "yandex_excluded"
       | "yandex_unknown" = "all",
-    limit = 200,
+    limit = 1000,
   ) =>
     apiFetch<{
       site_id: string;
       total: number;
+      filtered_total: number;
+      truncated: boolean;
       items: Array<{
         page_id: string;
         url: string;
@@ -783,7 +873,9 @@ export const api = {
         url: string;
         path: string;
         title: string | null;
-        in_index: boolean;
+        in_yandex_index: boolean | null;
+        yandex_excluded_reason: string | null;
+        yandex_index_checked_at: string | null;
         in_sitemap: boolean;
         http_status: number | null;
         last_crawled_at: string | null;
@@ -909,6 +1001,18 @@ export const api = {
       { method: "POST", base: "admin" },
     ),
 
+  // Studio — re-fetch a single page on demand (after owner edits the page).
+  studioTriggerPageRecrawl: (siteId: string, pageId: string) =>
+    apiFetch<{
+      status: "queued" | "deduped";
+      task_id: string | null;
+      run_id: string;
+      deduped: boolean;
+    }>(
+      `/studio/sites/${siteId}/pages/${pageId}/recrawl`,
+      { method: "POST", base: "admin" },
+    ),
+
   studioGetPage: (siteId: string, pageId: string) =>
     apiFetch<{
       page_id: string;
@@ -919,7 +1023,9 @@ export const api = {
       h1: string | null;
       meta_description: string | null;
       word_count: number | null;
-      in_index: boolean;
+      in_yandex_index: boolean | null;
+      yandex_excluded_reason: string | null;
+      yandex_index_checked_at: string | null;
       in_sitemap: boolean;
       http_status: number | null;
       has_schema: boolean;
@@ -1000,6 +1106,11 @@ export const api = {
       }>;
     }>(`/studio/sites/${siteId}/plan`, { base: "admin" }),
 
+  studioDownloadRecommendations: (siteId: string) =>
+    apiDownload(`/studio/sites/${siteId}/recommendations/export`, {
+      base: "admin",
+    }),
+
   // V2 etap 7 Phase C+D+E — free chat about whole site, persisted
   // in DB. Pass `conversation_id=null` to start a new thread; the
   // response carries `conversation_id` to continue. Server reads
@@ -1011,6 +1122,7 @@ export const api = {
     siteId: string,
     message: string,
     conversationId: string | null,
+    mode: ChatMode = "answer",
   ) =>
     apiFetch<{
       conversation_id: string;
@@ -1030,12 +1142,19 @@ export const api = {
       model: string | null;
       input_tokens: number | null;
       output_tokens: number | null;
+      // Set when the LLM hit max_tokens — UI shows a warning + retry.
+      truncated: boolean;
+      // Set when the server served from the 60s idempotency cache
+      // (double-click / F5 / second tab during in-flight). UI skips
+      // optimistic updates because nothing new happened server-side.
+      deduped: boolean;
     }>(`/studio/sites/${siteId}/chat`, {
       method: "POST",
       base: "admin",
       body: JSON.stringify({
         message,
         conversation_id: conversationId,
+        mode,
       }),
     }),
 

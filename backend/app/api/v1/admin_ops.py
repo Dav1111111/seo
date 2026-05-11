@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.config import settings
 from app.core_audit.activity import log_event
 from app.database import get_db
@@ -28,11 +29,12 @@ router = APIRouter(prefix="/admin")
 
 
 def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
-    configured = settings.ADMIN_API_KEY or ""
-    if not configured:
-        raise HTTPException(status_code=401, detail="admin api disabled")
-    if not x_admin_key or x_admin_key != configured:
-        raise HTTPException(status_code=401, detail="invalid admin key")
+    """Thin wrapper preserved for in-module Depends() callers.
+
+    All policy lives in :func:`app.api.v1.deps.require_admin` which uses
+    :func:`secrets.compare_digest` to avoid timing leaks.
+    """
+    require_admin(x_admin_key or "")
 
 
 # ── Full pipeline ────────────────────────────────────────────────────────
@@ -103,6 +105,7 @@ async def trigger_full_pipeline(
         "competitor_discovery",
         "competitor_deep_dive",
         "opportunities",
+        "intent_decide",
         "review",
         "priorities",
         "report",
@@ -111,7 +114,8 @@ async def trigger_full_pipeline(
     await log_event(
         db, site_id, "pipeline", "started",
         "Запустил полный анализ: страницы, Вебмастер, карта спроса, "
-        "понимание бизнеса и конкуренты. Обычно 1–2 минуты.",
+        "понимание бизнеса, конкуренты, решения покрытия и проверка страниц. "
+        "Обычно несколько минут.",
         extra={"queued": queued, "run_id": run_id},
         run_id=run_id,
     )

@@ -34,7 +34,7 @@
 import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
@@ -47,6 +47,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DisabledLink } from "@/components/studio/disabled-link";
+import { DeepExtractPanel } from "@/components/studio/deep-extract-panel";
 import {
   ArrowLeft,
   ExternalLink,
@@ -91,6 +92,34 @@ const STATUS_LABEL: Record<string, string> = {
   dismissed: "отклонено",
 };
 
+// Maps backend SkipReason enum (review/enums.py) to owner-friendly Russian.
+// Used when latest review row is in `skipped` status and we need to
+// explain why the system didn't analyse the page.
+const SKIP_REASON_RU: Record<string, string> = {
+  unchanged_hash:
+    "содержимое страницы не менялось с прошлого ревью — мы не платим за повторный анализ.",
+  not_strengthen:
+    "по этой странице нет открытого решения «усилить» — Reviewer берёт только страницы с активной задачей улучшения.",
+  missing_content: "у страницы пустой контент — нечего анализировать.",
+  no_profile_rules: "у сайта ещё нет «картины бизнеса» — заполни Профиль.",
+  page_deleted: "страница больше не отвечает (404).",
+  no_fingerprint: "не собрался отпечаток страницы — нужен повторный краулинг.",
+  over_budget_cap: "достигнут месячный лимит на стоимость LLM-ревью.",
+};
+
+const YANDEX_REASON_RU: Record<string, string> = {
+  NOT_FOUND: "404 — страница не отвечает",
+  BAD_HTTP_STATUS: "HTTP-ошибка",
+  META_NO_INDEX: "noindex в meta",
+  ROBOTS_TXT_HOST: "запрещено в robots.txt",
+  NOT_CANONICAL: "не canonical (есть другая основная)",
+  EXCLUDED_FROM_SEARCH: "исключено правилом",
+  DUPLICATE_PAGE: "дубль другой страницы",
+  REDIRECT: "редирект",
+  ERROR: "ошибка обработки",
+  UNKNOWN: "причина не указана",
+};
+
 const CATEGORY_LABEL: Record<string, string> = {
   title: "title",
   meta_description: "meta description",
@@ -109,6 +138,7 @@ export default function StudioPageWorkspace() {
   const pageId = params?.page_id || "";
   const { currentSite, loading: siteLoading } = useSite();
   const siteId = currentSite?.id || "";
+  const router = useRouter();
 
   // V2 etap 3 — review trigger state. We poll detail SWR every 5s
   // while the task is running so review/recommendations appear without
@@ -120,6 +150,8 @@ export default function StudioPageWorkspace() {
   useEffect(() => {
     reviewPendingRef.current = reviewPending;
   }, [reviewPending]);
+  // Per-page recrawl button — independent from review pending.
+  const [recrawlPending, setRecrawlPending] = useState(false);
   // Token captured per click. The 45-s safety timer compares this on
   // wake — if the user re-clicked «Перезапустить» within the window
   // the first timer would otherwise fire on the SECOND click's run
@@ -201,6 +233,26 @@ export default function StudioPageWorkspace() {
     }, 45_000);
   }
 
+  async function onRecrawl() {
+    if (!siteId || !pageId || recrawlPending) return;
+    setRecrawlPending(true);
+    setErrMsg(null);
+    try {
+      const res = await api.studioTriggerPageRecrawl(siteId, pageId);
+      if (res.deduped) {
+        setErrMsg(
+          `Перезагрузка этой страницы уже идёт (run_id ${res.run_id.slice(0, 8)}…). Подожди — данные обновятся сами.`,
+        );
+      }
+      // SWR mutate after a short delay — page-recrawl is fast (~3-5s).
+      setSafeTimeout(() => mutate(), 8_000);
+    } catch (e: unknown) {
+      setErrMsg(getErrorMessage(e));
+    } finally {
+      setSafeTimeout(() => setRecrawlPending(false), 3000);
+    }
+  }
+
   async function changeRecStatus(
     recId: string,
     nextStatus: "applied" | "deferred" | "dismissed",
@@ -213,16 +265,24 @@ export default function StudioPageWorkspace() {
       await api.patchRecommendation(recId, { user_status: nextStatus });
       // "Применил" also creates an outcome_snapshot — single source of
       // truth for PR-S8. Idempotent server-side on (site_id, rec_id).
+      // If the snapshot fails we roll the status back to 'pending' so
+      // the user isn't stuck with a half-applied state — without a
+      // baseline measurement the «applied» record is meaningless.
       if (nextStatus === "applied") {
         try {
           await api.markApplied(siteId, recId, "priority", pageUrl);
         } catch (e) {
-          // Don't unwind the PATCH — the outcome record being missing
-          // is recoverable later, but flipping back the user_status is
-          // confusing. Log + tell the user, leave PATCH applied.
+          try {
+            await api.patchRecommendation(recId, { user_status: "pending" });
+          } catch {
+            // Rollback itself failed — surface the original outcome
+            // error anyway; user retry will reconcile state.
+          }
           setErrMsg(
-            `Статус сохранён, но замер до/после не запустился: ${getErrorMessage(e)}. Можно позже повторить через /studio/outcomes.`,
+            "Не удалось сохранить замер. Попробуй ещё раз через минуту.",
           );
+          await mutate();
+          return;
         }
       }
       await mutate();
@@ -236,6 +296,18 @@ export default function StudioPageWorkspace() {
       });
     }
   }
+
+  // 404 means the page_id doesn't belong to the currently selected site
+  // (most common cause: user switched sites while sitting on a page detail
+  // URL of the previous site). Redirect to the page list of the new site
+  // instead of showing a confusing red error card. Must run BEFORE any
+  // early return below — rules of hooks.
+  const is404 = !!error && /^API 404\b/.test(getErrorMessage(error));
+  useEffect(() => {
+    if (is404 && siteId && !siteLoading) {
+      router.replace("/studio/pages");
+    }
+  }, [is404, siteId, siteLoading, router]);
 
   // ── Render guards ──────────────────────────────────────────────
 
@@ -275,6 +347,13 @@ export default function StudioPageWorkspace() {
   }
 
   if (error || !data) {
+    if (is404) {
+      return (
+        <div className="p-4 sm:p-6 max-w-6xl text-sm text-muted-foreground">
+          Страница не принадлежит выбранному сайту — открываю список страниц…
+        </div>
+      );
+    }
     return (
       <div className="p-4 sm:p-6 max-w-6xl">
         <Card className="border-red-300 bg-red-50">
@@ -290,6 +369,23 @@ export default function StudioPageWorkspace() {
   const review = data.review;
   const recs = review?.recommendations ?? [];
   const xLinks = data.cross_links ?? {};
+  // Page is gone (404 or marked deleted by collector). Re-running the
+  // LLM review is pointless until the URL is fixed or the record is
+  // removed — disable the trigger and explain in the button text.
+  const pageUnavailable =
+    review?.skip_reason === "page_deleted"
+    || review?.skip_reason === "page_404"
+    || (data.http_status != null && data.http_status === 404);
+  const reviewButtonLabel = pageUnavailable
+    ? "Страница недоступна (404) — обнови URL или удали запись"
+    : reviewPending
+      ? "Идёт ревью…"
+      : "Перезапустить";
+  const startReviewButtonLabel = pageUnavailable
+    ? "Страница недоступна (404) — обнови URL или удали запись"
+    : reviewPending
+      ? "Идёт ревью…"
+      : "Запустить ревью";
 
   return (
     <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
@@ -314,19 +410,38 @@ export default function StudioPageWorkspace() {
           <ExternalLink className="h-3 w-3 flex-shrink-0" />
         </a>
         <div className="flex items-center gap-2 flex-wrap mt-2">
-          {data.in_index ? (
+          {data.in_yandex_index === true && (
             <Badge
               variant="outline"
               className="border-emerald-300 bg-emerald-50 text-emerald-800"
+              title={
+                data.yandex_index_checked_at
+                  ? `Webmaster проверил ${fmtAge(data.yandex_index_checked_at)}`
+                  : ""
+              }
             >
               в индексе Яндекса
             </Badge>
-          ) : (
+          )}
+          {data.in_yandex_index === false && (
             <Badge
               variant="outline"
-              className="border-amber-300 bg-amber-50 text-amber-800"
+              className="border-red-300 bg-red-50 text-red-800"
+              title={data.yandex_excluded_reason || ""}
             >
-              не в индексе
+              исключён из индекса
+              {data.yandex_excluded_reason
+                ? ` · ${YANDEX_REASON_RU[data.yandex_excluded_reason] || data.yandex_excluded_reason}`
+                : ""}
+            </Badge>
+          )}
+          {data.in_yandex_index === null && (
+            <Badge
+              variant="outline"
+              className="border-gray-300 bg-gray-50 text-gray-600"
+              title="Webmaster ещё не проверял этот URL — нажми «Webmaster: статус каждого URL» в /studio/indexation"
+            >
+              индекс не проверен
             </Badge>
           )}
           {data.in_sitemap ? (
@@ -347,9 +462,26 @@ export default function StudioPageWorkspace() {
               HTTP {data.http_status}
             </Badge>
           )}
-          <span className="text-xs text-muted-foreground ml-auto">
-            crawl {fmtAge(data.last_crawled_at)}
-          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              crawl {fmtAge(data.last_crawled_at)}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onRecrawl}
+              disabled={recrawlPending}
+              title="Перезагрузить эту страницу — система заново скачает HTML и обновит title/h1/meta. Нужно после правки страницы."
+            >
+              <RefreshCw
+                className={cn(
+                  "h-3.5 w-3.5 mr-1.5",
+                  recrawlPending && "animate-spin",
+                )}
+              />
+              {recrawlPending ? "Загружаю…" : "Перезагрузить страницу"}
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -453,8 +585,12 @@ export default function StudioPageWorkspace() {
                   size="sm"
                   variant="outline"
                   onClick={onTriggerReview}
-                  disabled={reviewPending}
-                  title="Перезапускает LLM-ревью этой страницы. Если контент не менялся — Reviewer сам пропустит без оплаты."
+                  disabled={reviewPending || pageUnavailable}
+                  title={
+                    pageUnavailable
+                      ? "Страница не отвечает (404). Обнови URL в карточке или удали запись — ревью этой страницы запускать бессмысленно."
+                      : "Перезапускает LLM-ревью этой страницы. Если контент не менялся — Reviewer сам пропустит без оплаты."
+                  }
                 >
                   <RefreshCw
                     className={cn(
@@ -462,17 +598,17 @@ export default function StudioPageWorkspace() {
                       reviewPending && "animate-spin",
                     )}
                   />
-                  {reviewPending ? "Идёт ревью…" : "Перезапустить"}
+                  {reviewButtonLabel}
                 </Button>
               </div>
             </div>
 
             {review.skip_reason && (
               <div className="text-sm rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2">
-                Ревью пропущено: <code>{review.skip_reason}</code>
-                {review.skip_reason === "content_unchanged"
-                  ? " — содержимое страницы не менялось с прошлого ревью, мы не платим за повторный анализ."
-                  : ""}
+                Ревью пропущено
+                {SKIP_REASON_RU[review.skip_reason]
+                  ? `: ${SKIP_REASON_RU[review.skip_reason]}`
+                  : ` (${review.skip_reason})`}
               </div>
             )}
 
@@ -496,8 +632,13 @@ export default function StudioPageWorkspace() {
             </p>
             <Button
               onClick={onTriggerReview}
-              disabled={reviewPending}
+              disabled={reviewPending || pageUnavailable}
               size="sm"
+              title={
+                pageUnavailable
+                  ? "Страница не отвечает (404). Обнови URL в карточке или удали запись — ревью этой страницы запускать бессмысленно."
+                  : undefined
+              }
             >
               <Brain
                 className={cn(
@@ -505,10 +646,15 @@ export default function StudioPageWorkspace() {
                   reviewPending && "animate-pulse",
                 )}
               />
-              {reviewPending ? "Идёт ревью…" : "Запустить ревью"}
+              {startReviewButtonLabel}
             </Button>
           </CardContent>
         </Card>
+      )}
+
+      {/* Deep extract — Playwright-rendered snapshot */}
+      {siteId && (
+        <DeepExtractPanel mode="own" siteId={siteId} pageId={String(pageId)} />
       )}
 
       {/* Recommendations */}

@@ -271,6 +271,63 @@ class SiteCrawler:
             "meta": meta,
         }
 
+    async def crawl_single_page(
+        self, db: AsyncSession, site_id: UUID, url: str,
+    ) -> dict:
+        """Re-fetch a single URL and upsert its Page row. Used by the
+        per-page Studio «Обновить страницу» button — owner expects fresh
+        title/h1/meta after fixing the page, full site re-crawl every
+        time would be wasteful."""
+        headers = {
+            "User-Agent": "GrowthTower SEO Crawler/1.0 (+https://growthtower.ru)",
+            "Accept": "text/html,application/xhtml+xml",
+        }
+        async with httpx.AsyncClient(headers=headers, timeout=20) as client:
+            result = await self.fetch_page(client, url)
+            if result is None:
+                return {"status": "failed", "url": url}
+
+            parsed = urlparse(url)
+            path = parsed.path or "/"
+            now = datetime.now(timezone.utc)
+
+            stmt = pg_insert(Page).values(
+                site_id=site_id,
+                url=url,
+                path=path,
+                title=result["title"],
+                meta_description=result["meta_description"],
+                h1=result["h1"],
+                content_text=result["content_text"],
+                word_count=result["word_count"],
+                internal_links=result["internal_links"],
+                images_count=result["images_count"],
+                has_schema=result["has_schema"],
+                http_status=result["http_status"],
+                meta=result["meta"],
+                last_crawled_at=now,
+                last_seen_at=now,
+            ).on_conflict_do_update(
+                index_elements=["site_id", "url"],
+                set_={
+                    "title": result["title"],
+                    "meta_description": result["meta_description"],
+                    "h1": result["h1"],
+                    "content_text": result["content_text"],
+                    "word_count": result["word_count"],
+                    "internal_links": result["internal_links"],
+                    "images_count": result["images_count"],
+                    "has_schema": result["has_schema"],
+                    "http_status": result["http_status"],
+                    "meta": result["meta"],
+                    "last_crawled_at": now,
+                    "last_seen_at": now,
+                },
+            )
+            await db.execute(stmt)
+            await db.commit()
+            return {"status": "ok", "url": url, "http_status": result["http_status"]}
+
     async def crawl_and_store(self, db: AsyncSession, site_id: UUID) -> dict:
         """Main entry — crawl sitemap + each page, persist to DB."""
         stats = {"sitemap_urls": 0, "pages_crawled": 0, "pages_failed": 0}

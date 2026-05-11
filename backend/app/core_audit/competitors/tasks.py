@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from uuid import UUID
 
 from sqlalchemy import desc, func, select, text
@@ -50,13 +51,13 @@ def _run(coro):
 
 
 def _queue_review_chain(site_id: str, run_id: str | None) -> bool:
-    """Continue full analysis into review -> priorities -> report."""
-    from app.core_audit.review.tasks import review_site_decisions_task
+    """Continue full analysis into intent_decide -> review -> priorities -> report."""
+    from app.core_audit.pipeline.tasks import pipeline_intent_then_review_task
 
     try:
-        review_site_decisions_task.apply_async(
+        pipeline_intent_then_review_task.apply_async(
             args=[site_id],
-            kwargs={"run_id": run_id, "chain_report": True},
+            kwargs={"run_id": run_id},
         )
         return True
     except Exception as exc:  # noqa: BLE001
@@ -69,6 +70,11 @@ async def _mark_review_chain_dispatch_failed(
     site_id: str,
     run_id: str | None,
 ) -> None:
+    await emit_terminal(
+        db, site_id, "intent_decide", "skipped",
+        "Решения по запросам пропущены — проверка страниц не запустилась.",
+        run_id=run_id,
+    )
     await emit_terminal(
         db, site_id, "review", "failed",
         "Не удалось запустить проверку страниц.",
@@ -109,36 +115,112 @@ async def _skip_after_competitor_stop(
     )
 
 
-def _business_tokens(target_config: dict) -> set[str]:
-    """Union of service + geo tokens from target_config (lowercased).
+_GENERIC_QUERY_TOKENS: frozenset[str] = frozenset({
+    "прокат", "аренда", "арендовать", "забронировать", "купить",
+    "заказать", "цена", "цены", "стоимость", "туры", "тур",
+})
 
-    Used as a relevance gate for observed queries — a query must contain
-    at least one of these tokens to count as "money". This drops noise
-    like "polaris slingshot" that some user once typed and accidentally
-    landed on the site.
+
+def _term_tokens(value: str) -> set[str]:
+    """Russian/latin token splitter for business focus matching."""
+    return {
+        t for t in re.split(r"[^0-9a-zа-яё]+", str(value or "").lower())
+        if len(t) >= 3
+    }
+
+
+def _tokens_from_values(values) -> set[str]:
+    out: set[str] = set()
+    for value in values or []:
+        out.update(_term_tokens(str(value)))
+    return out
+
+
+def _business_tokens(target_config: dict) -> dict[str, object]:
+    """Build a strict query filter from business profile + strategic focus.
+
+    Competitor discovery must compare the current SEO focus, not every
+    loosely related service ever mentioned on the site. If the owner set
+    `strategic_focus`, require both product and region tokens from it
+    and exclude explicitly deprioritised directions.
     """
-    tokens: set[str] = set()
-    for key in ("services", "secondary_products", "geo_primary", "geo_secondary"):
-        for v in (target_config or {}).get(key) or []:
-            # split multi-word entries into tokens so "морские прогулки"
-            # matches queries containing either "морские" or "прогулки"
-            for t in str(v).lower().split():
-                t = t.strip(".,!?«»\"'()[]{}")
-                if len(t) >= 3:
-                    tokens.add(t)
-    return tokens
+    cfg = target_config or {}
+    focus = cfg.get("strategic_focus") or {}
+    focus_products = focus.get("products") or []
+    focus_regions = focus.get("regions") or []
+
+    product_tokens = _tokens_from_values(focus_products)
+    product_tokens.update(_term_tokens(cfg.get("primary_product") or ""))
+    if not product_tokens:
+        product_tokens.update(_tokens_from_values(cfg.get("services") or []))
+        product_tokens.update(_tokens_from_values(cfg.get("secondary_products") or []))
+    product_tokens = {
+        t for t in product_tokens
+        if t not in _GENERIC_QUERY_TOKENS
+    }
+
+    region_tokens = _tokens_from_values(focus_regions)
+    if not region_tokens:
+        region_tokens.update(_tokens_from_values(cfg.get("geo_primary") or []))
+
+    excluded_tokens = _tokens_from_values(focus.get("deprioritised") or [])
+    if region_tokens:
+        all_geo_tokens = _tokens_from_values(cfg.get("geo_primary") or [])
+        all_geo_tokens.update(_tokens_from_values(cfg.get("geo_secondary") or []))
+        excluded_tokens.update(all_geo_tokens - region_tokens)
+
+    query_signal_phrases = [
+        " ".join(str(q or "").lower().split())
+        for q in (focus.get("query_signals") or [])
+        if str(q or "").strip()
+    ]
+
+    return {
+        "product_tokens": product_tokens,
+        "region_tokens": region_tokens,
+        "excluded_tokens": excluded_tokens,
+        "query_signal_phrases": query_signal_phrases,
+        "has_strategic_focus": bool(focus_products or focus_regions),
+    }
 
 
-def _query_is_relevant(query: str, biz_tokens: set[str]) -> bool:
-    """True if query contains at least one business token."""
-    if not biz_tokens:
-        return True  # no profile yet — accept everything
-    q = query.lower()
-    return any(tok in q for tok in biz_tokens)
+def _query_is_relevant(query: str, biz_tokens) -> bool:
+    """True if query belongs to the current business/SEO focus."""
+    q = " ".join(str(query or "").lower().split())
+    if not q:
+        return False
+
+    # Backward compatibility for tests/imports that may pass the old set.
+    if isinstance(biz_tokens, set):
+        return not biz_tokens or any(tok in q for tok in biz_tokens)
+
+    filt = biz_tokens or {}
+    q_tokens = _term_tokens(q)
+    excluded = set(filt.get("excluded_tokens") or set())
+    if q_tokens & excluded:
+        return False
+
+    signal_phrases = filt.get("query_signal_phrases") or []
+    if any(phrase and phrase in q for phrase in signal_phrases):
+        return True
+
+    product_tokens = set(filt.get("product_tokens") or set())
+    if product_tokens and not (q_tokens & product_tokens):
+        return False
+
+    region_tokens = set(filt.get("region_tokens") or set())
+    if region_tokens and not (q_tokens & region_tokens):
+        return False
+
+    # Reject pure generic rental/price phrases once a focus exists.
+    if filt.get("has_strategic_focus") and q_tokens <= _GENERIC_QUERY_TOKENS:
+        return False
+
+    return True
 
 
 async def _pick_top_queries(
-    db, site_id: UUID, limit: int, *, biz_tokens: set[str] | None = None,
+    db, site_id: UUID, limit: int, *, biz_tokens=None,
 ) -> list[str]:
     """Best-effort source ranking for 'which queries to probe SERP for'.
 
@@ -206,7 +288,11 @@ async def _pick_top_queries(
         .order_by(desc(TargetCluster.business_relevance))
         .limit(need * 2)  # extra so we can de-dupe against observed
     )
-    extras = [r[0] for r in await db.execute(cl_stmt)]
+    extra_rows = await db.execute(cl_stmt)
+    extras = [
+        r[0] for r in extra_rows
+        if r[0] and _query_is_relevant(r[0], tokens)
+    ]
     merged: list[str] = list(observed)
     seen = {q.lower() for q in merged}
     for q in extras:
@@ -329,11 +415,20 @@ def competitors_discover_site_task(
                             "Сайт не найден в базе.",
                             run_id=run_id,
                         )
+                        await _skip_after_competitor_stop(
+                            db,
+                            site_id,
+                            run_id,
+                            reason="site_not_found",
+                        )
+                        if not _queue_review_chain(site_id, run_id):
+                            await _mark_review_chain_dispatch_failed(db, site_id, run_id)
                         return {"status": "skipped", "reason": "site_not_found"}
 
+                    focus_filter = _business_tokens(site.target_config or {})
                     old_queries = await _pick_top_queries(
                         db, site.id, max_queries,
-                        biz_tokens=_business_tokens(site.target_config or {}),
+                        biz_tokens=focus_filter,
                     )
 
                     # Shadow-mode: if the site has a BusinessTruth blob,
@@ -381,10 +476,34 @@ def competitors_discover_site_task(
                             "site_id": site_id,
                         }
 
+                    picker_name = (
+                        "business_truth_v2"
+                        if use_v2
+                        else (
+                            "legacy_focus_filtered"
+                            if focus_filter.get("has_strategic_focus")
+                            else "legacy"
+                        )
+                    )
                     started_extra: dict = {
                         "queries_count": len(queries),
-                        "picker": "business_truth_v2" if use_v2 else "legacy",
+                        "picker": picker_name,
                     }
+                    if (
+                        not use_v2
+                        and focus_filter.get("has_strategic_focus")
+                    ):
+                        started_extra["focus_filter"] = {
+                            "products": sorted(
+                                focus_filter.get("product_tokens") or [],
+                            ),
+                            "regions": sorted(
+                                focus_filter.get("region_tokens") or [],
+                            ),
+                            "excluded": sorted(
+                                focus_filter.get("excluded_tokens") or [],
+                            )[:10],
+                        }
                     if shadow_diff is not None:
                         started_extra["shadow_diff"] = shadow_diff
                     await log_event(
@@ -411,13 +530,24 @@ def competitors_discover_site_task(
                     await lock_site_target_config(db, site_id)
                     await db.refresh(site)
 
-                    site.competitor_domains = [c.domain for c in profile.competitors]
                     cfg = dict(site.target_config or {})
+
+                    # Respect owner's manual list. Once they've edited
+                    # `competitor_domains` from the wizard / admin endpoint,
+                    # `competitor_list_manually_edited_at` is set — and the
+                    # nightly SERP-driven discovery must NOT silently
+                    # overwrite their picks. Same for `competitor_brands`:
+                    # weekly run used to wipe wizard-entered brands too.
+                    # SERP-derived profile (per-query cache) is still
+                    # written because it's auto-collected drill-down
+                    # data, not user-curated.
+                    manual_marker = cfg.get("competitor_list_manually_edited_at")
+                    if not manual_marker:
+                        site.competitor_domains = [
+                            c.domain for c in profile.competitors
+                        ]
+                        cfg["competitor_brands"] = []
                     cfg["competitor_profile"] = profile.to_jsonb()
-                    # Clear LLM-hallucinated brand list — it's being superseded
-                    # by the real SERP-derived list. Caller can re-add true
-                    # known brands manually from the wizard.
-                    cfg["competitor_brands"] = []
                     site.target_config = cfg
 
                     await db.commit()
@@ -501,8 +631,10 @@ def competitors_discover_site_task(
                 "competitors.discover.task_failed site=%s err=%s",
                 site_id, exc,
             )
-            # Close the stage + pipeline (if open) — otherwise the UI
-            # stays in "идёт сейчас…" forever after a crash.
+            # Close the stage + cascade dependent stages — otherwise the
+            # UI stays in "идёт сейчас…" forever after a transient crash
+            # (SERP rate-limit, network glitch). Watchdog can't recover
+            # because dependent stages never receive a terminal event.
             try:
                 async with task_session() as db2:
                     await emit_terminal(
@@ -510,6 +642,14 @@ def competitors_discover_site_task(
                         f"Разведка остановлена с ошибкой: {str(exc)[:200]}",
                         run_id=run_id,
                     )
+                    await _skip_after_competitor_stop(
+                        db2,
+                        site_id,
+                        run_id,
+                        reason="discovery_crash",
+                    )
+                    if not _queue_review_chain(site_id, run_id):
+                        await _mark_review_chain_dispatch_failed(db2, site_id, run_id)
             except Exception:  # noqa: BLE001
                 pass  # best-effort — already logging the real error above
             return {"status": "error", "site_id": site_id, "err": str(exc)}
@@ -533,7 +673,6 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
     from app.core_audit.competitors.content_gap import analyze_gaps
     from app.core_audit.competitors.deep_dive import (
         analyze_competitor_site,
-        analyze_page,
     )
     from app.core_audit.competitors.opportunities import build_growth_opportunities
 
@@ -547,6 +686,13 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                         "Сайт не найден в базе.",
                         run_id=run_id,
                     )
+                    await emit_terminal(
+                        db, site_id, "opportunities", "skipped",
+                        "Точки роста пропущены — сайт не найден.",
+                        run_id=run_id,
+                    )
+                    if not _queue_review_chain(site_id, run_id):
+                        await _mark_review_chain_dispatch_failed(db, site_id, run_id)
                     return {"status": "skipped", "reason": "site_not_found"}
 
                 # Serialize target_config writers for the final persist
@@ -586,6 +732,34 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                     run_id=run_id,
                 )
 
+                # Pick a few of our own focus pages too. Comparing
+                # competitor homepages against only our homepage creates
+                # false gaps: the CTA/reviews/schema may live on the
+                # Abkhazia landing, not on `/`.
+                focus_filter = _business_tokens(site.target_config or {})
+                focus_terms = set(focus_filter.get("product_tokens") or set())
+                focus_terms.update(focus_filter.get("region_tokens") or set())
+                own_page_seed_rows = (await db.execute(
+                    select(Page.url, Page.path, Page.title, Page.h1)
+                    .where(Page.site_id == site.id)
+                    .limit(100),
+                )).all()
+
+                def _focus_score(row) -> int:
+                    text_blob = " ".join(
+                        str(v or "").lower()
+                        for v in (row.url, row.path, row.title, row.h1)
+                    )
+                    return sum(1 for term in focus_terms if term in text_blob)
+
+                own_focus_urls = [
+                    r.url for r in sorted(
+                        own_page_seed_rows,
+                        key=lambda row: (-_focus_score(row), row.path or ""),
+                    )
+                    if r.url and _focus_score(r) > 0
+                ][:3]
+
                 # Top 5 competitors — crawl in parallel so one slow site
                 # (findgid.ru observed at 10s while 4 others finished in 3s)
                 # doesn't block the pipeline.
@@ -595,14 +769,13 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                 reports_by_domain: dict[str, dict] = {}
 
                 def _run_one(c: dict) -> tuple[str, dict]:
-                    # Homepage only — enough for every structural signal we
-                    # actually use (price/CTA/reviews/schema/contacts). The
-                    # second "example_url" fetch added ~5s to the slow-site
-                    # case without changing any diff we surface in the UI.
+                    # Homepage + the ranking example URL. The example URL is
+                    # the page Yandex actually rewarded for our query, so it
+                    # is the right comparison surface for SEO advice.
                     rep = analyze_competitor_site(
                         domain=c["domain"],
-                        urls=[],
-                        max_pages=1,
+                        urls=[c.get("example_url") or ""],
+                        max_pages=2,
                     )
                     return c["domain"], rep.to_dict()
 
@@ -610,9 +783,12 @@ def competitors_deep_dive_site_task(self, site_id: str, run_id: str | None = Non
                     fut_map = {pool.submit(_run_one, c): c for c in targets}
                     # Also kick off the own-site crawl alongside the
                     # competitors — it's just one more HTTP fetch.
-                    own_url = f"https://{site.domain.removeprefix('www.')}/"
                     own_future = pool.submit(
-                        lambda: analyze_page(own_url).to_dict(),
+                        lambda: analyze_competitor_site(
+                            domain=site.domain,
+                            urls=own_focus_urls,
+                            max_pages=4,
+                        ).to_dict(),
                     )
                     done_count = 0
                     for fut in as_completed(fut_map):

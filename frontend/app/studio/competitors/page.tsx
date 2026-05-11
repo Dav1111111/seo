@@ -54,6 +54,7 @@ import {
   Quote,
 } from "lucide-react";
 import { cn, getErrorMessage } from "@/lib/utils";
+import { CompetitorDeepExtractSection } from "@/components/studio/competitor-deep-extract-section";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -74,7 +75,7 @@ const PRIORITY_LABEL: Record<string, string> = {
 const CATEGORY_LABEL: Record<string, string> = {
   new_page: "новая страница",
   strengthen_existing_page: "усилить существующую",
-  crossover_page: "объединить под один url",
+  crossover_page: "усилить или выделить страницу",
   on_page_feature: "элемент на странице",
   schema: "schema.org",
   contact: "контакты",
@@ -109,7 +110,7 @@ export default function StudioCompetitorsPage() {
   );
   const { data: gaps } = useSWR(
     siteId ? studioKey("comp_gaps", siteId) : null,
-    () => api.getContentGaps(siteId, 30),
+    () => api.getContentGaps(siteId, 50),
   );
   const { data: dive } = useSWR(
     siteId ? studioKey("comp_dive", siteId) : null,
@@ -167,10 +168,10 @@ export default function StudioCompetitorsPage() {
     setBusy("discover");
     setBanner(null);
     try {
-      const res = await api.triggerCompetitorDiscovery(siteId, 20, 10);
+      const res = await api.triggerCompetitorDiscovery(siteId, 30, 10);
       setBanner({
         kind: "ok",
-        text: `Разведка запущена · task ${res.task_id.slice(0, 8)}…. Discovery → автоматом запустит deep-dive. Результат через 1–2 минуты, страница обновится сама.`,
+        text: `Разведка запущена · task ${res.task_id.slice(0, 8)}…. После списка конкурентов автоматически пойдёт глубокий анализ. Результат через 1–2 минуты, страница обновится сама.`,
       });
       // SWR `refreshInterval` (above) handles polling while busy — no
       // manual setTimeout-mutate needed.
@@ -276,6 +277,9 @@ export default function StudioCompetitorsPage() {
   const profile = comp?.profile;
   const competitors = profile?.competitors || [];
   const queriesProbed = profile?.queries_probed ?? null;
+  const profileComputedAt = profile?.computed_at
+    ? formatDateRu(profile.computed_at)
+    : null;
   const oppsList = opps?.opportunities || [];
   const gapsList = gaps?.gaps || [];
 
@@ -297,7 +301,7 @@ export default function StudioCompetitorsPage() {
             {compLoading
               ? "загружаю…"
               : queriesProbed
-                ? `Разведано по ${queriesProbed} ${pluralRu(queriesProbed, ["запросу", "запросам", "запросам"])} · найдено ${competitors.length} ${pluralRu(competitors.length, ["конкурент", "конкурента", "конкурентов"])} · ${oppsList.length} ${pluralRu(oppsList.length, ["opportunity", "opportunities", "opportunities"])}`
+                ? `Разведано по ${queriesProbed} ${pluralRu(queriesProbed, ["запросу", "запросам", "запросам"])} · найдено ${competitors.length} ${pluralRu(competitors.length, ["конкурент", "конкурента", "конкурентов"])} · ${oppsList.length} ${pluralRu(oppsList.length, ["совет", "совета", "советов"])}${profileComputedAt ? ` · проверено ${profileComputedAt}` : ""}`
                 : "разведка ещё не запускалась"}
           </p>
         </div>
@@ -378,9 +382,9 @@ export default function StudioCompetitorsPage() {
             <CardContent className="pt-6 space-y-2">
               <div className="font-medium">Разведка ещё не запускалась</div>
               <p className="text-sm text-muted-foreground">
-                Жми «Пересобрать список» — модуль возьмёт топ-20 запросов
-                из Webmaster, отправит каждый в Яндекс Search API, соберёт
-                кто стоит в топе и кеширует SERP. Сразу после этого
+                Жми «Пересобрать список» — модуль возьмёт фокусные запросы
+                из Webmaster и карты спроса, отправит каждый в Яндекс Search API,
+                соберёт кто стоит в топе и кеширует SERP. Сразу после этого
                 автоматом запустится «Глубокий анализ»: crawl 5 лучших
                 конкурентов + расчёт opportunities. Всего 1–2 минуты.
               </p>
@@ -485,7 +489,7 @@ export default function StudioCompetitorsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {gapsList.slice(0, 30).map((g, idx) => (
+                    {gapsList.map((g, idx) => (
                       <tr key={idx} className="border-b last:border-b-0">
                         <td className="px-4 py-2 truncate max-w-[300px]">
                           {g.query}
@@ -534,6 +538,13 @@ export default function StudioCompetitorsPage() {
             </h2>
           </div>
           <DeepDiveTable own={dive.self} competitors={dive.competitors} />
+        </section>
+      )}
+
+      {/* 5. Playwright deep-extract on any competitor URL */}
+      {siteId && (
+        <section className="space-y-3">
+          <CompetitorDeepExtractSection siteId={siteId} />
         </section>
       )}
     </div>

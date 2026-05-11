@@ -65,6 +65,14 @@ celery_app.conf.beat_schedule = {
         "task": "collect_metrica_all",
         "schedule": crontab(hour=4, minute=30),  # 07:30 MSK
     },
+    # Per-URL Webmaster index status — daily 04:10 UTC (07:10 MSK),
+    # right after the bulk Webmaster pull at 04:00. Without this the
+    # `Page.in_yandex_index` flags update only on manual button clicks
+    # and the UI silently shows weeks-stale per-URL data.
+    "webmaster-url-indexation-daily": {
+        "task": "webmaster_url_indexation_all",
+        "schedule": crontab(hour=4, minute=10),  # 07:10 MSK
+    },
     # Phase 3: AI Analysis (runs after collection)
     "analyse-search-visibility-daily": {
         "task": "run_search_visibility_all",
@@ -95,6 +103,22 @@ celery_app.conf.beat_schedule = {
         "task": "run_query_clustering_all",
         "schedule": crontab(hour=6, minute=0, day_of_week=1),
     },
+    # Wordstat volume refresh — weekly (Tuesday 06:00 UTC / 09:00 MSK).
+    # Without this beat, monthly volumes only update when owner clicks
+    # "Обновить объёмы Wordstat" — values silently age past
+    # WORDSTAT_STALE_AFTER_DAYS=30 and the UI marks them stale_30d+.
+    "wordstat-refresh-weekly": {
+        "task": "wordstat_refresh_all",
+        "schedule": crontab(hour=6, minute=0, day_of_week=2),
+    },
+    # Query relevance classification — daily 04:40 UTC (07:40 MSK).
+    # Runs after collect_webmaster (04:00) so any newly observed queries
+    # get classified the same morning instead of waiting for a manual
+    # trigger.
+    "classify-queries-daily": {
+        "task": "classify_queries_all",
+        "schedule": crontab(hour=4, minute=40),
+    },
     # Query recommendations — tactical daily (08:30 MSK)
     "recommend-queries-tactical-daily": {
         "task": "run_query_tactical_all",
@@ -120,17 +144,26 @@ celery_app.conf.beat_schedule = {
         "task": "demand_map_build_all_weekly",
         "schedule": crontab(hour=3, minute=30, day_of_week=1),
     },
+    # Lateral Query Expansion — weekly LLM proposal of adjacent queries
+    # (Mondays 03:45 UTC, after demand-map so we read fresh observed data).
+    "lateral-expand-weekly": {
+        "task": "lateral_expand_all_weekly",
+        "schedule": crontab(hour=3, minute=45, day_of_week=1),
+    },
     # Competitor discovery — weekly (Tuesdays 04:00 UTC / 07:00 MSK)
     # Refreshes competitor list + auto-chains deep-dive → opportunities
     "competitors-discover-weekly": {
         "task": "competitors_discover_all_weekly",
         "schedule": crontab(hour=4, minute=0, day_of_week=2),
     },
-    # Site re-crawl — monthly (1st of each month, 02:00 UTC / 05:00 MSK)
-    # Refreshes page index, title/h1/content used for page-match scoring
-    "crawl-all-sites-monthly": {
-        "task": "crawl_all_sites_monthly",
-        "schedule": crontab(hour=2, minute=0, day_of_month=1),
+    # Site re-crawl — weekly (Sundays 02:00 UTC / 05:00 MSK).
+    # Was monthly: let title/h1/meta drift up to 30 days, and the
+    # Reviewer's composite-hash skip masked the staleness. Weekly is
+    # the right cadence for owner-edited pages while still being
+    # cheap (≈100 requests per site once a week).
+    "crawl-all-sites-weekly": {
+        "task": "crawl_all_sites_weekly",
+        "schedule": crontab(hour=2, minute=0, day_of_week=0),
     },
     # Outcome follow-up — daily (08:00 UTC / 11:00 MSK)
     # Fills delta for snapshots that matured (applied ≥14 days ago)
@@ -157,10 +190,18 @@ celery_app.conf.beat_schedule = {
 }
 
 celery_app.autodiscover_tasks([
-    "app.collectors", "app.agents", "app.fingerprint", "app.intent",
+    "app.collectors",
+    "app.agents", "app.fingerprint", "app.intent",
     "app.core_audit.review", "app.core_audit.priority", "app.core_audit.report",
     "app.core_audit.demand_map", "app.core_audit.draft_profile",
     "app.core_audit.onboarding", "app.core_audit.competitors",
     "app.core_audit.outcomes", "app.core_audit.health",
     "app.core_audit.business_truth", "app.core_audit.pipeline",
+    "app.core_audit.harmful_fix",
+    "app.core_audit.lateral",
 ])
+
+# Explicit imports for task modules whose filename isn't `tasks.py`
+# (autodiscover only scans `tasks.py` per package). Just importing the
+# module is enough — `@celery_app.task(name=...)` registers on import.
+import app.collectors.deep_extract_tasks  # noqa: F401, E402

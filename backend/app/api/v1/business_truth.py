@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.config import settings
 from app.database import get_db
 from app.models.site import Site
@@ -20,11 +21,12 @@ router = APIRouter(prefix="/admin")
 
 
 def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
-    configured = settings.ADMIN_API_KEY or ""
-    if not configured:
-        raise HTTPException(status_code=401, detail="admin api disabled")
-    if not x_admin_key or x_admin_key != configured:
-        raise HTTPException(status_code=401, detail="invalid admin key")
+    """Thin wrapper preserved for in-module Depends() callers.
+
+    All policy lives in :func:`app.api.v1.deps.require_admin` which uses
+    :func:`secrets.compare_digest` to avoid timing leaks.
+    """
+    require_admin(x_admin_key or "")
 
 
 @router.get(

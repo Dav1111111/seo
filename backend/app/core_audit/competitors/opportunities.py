@@ -242,7 +242,10 @@ def _content_gap_opportunities(
         elif is_weak:
             category = "crossover_page"
             page_url = match.url or match.path
-            title = f"Стрейтч-тема: страница «{match.title or page_url}» пока слабо покрывает «{display_query}»"
+            title = (
+                f"Страница «{match.title or page_url}» слабо покрывает "
+                f"запрос «{display_query}»"
+            )
             reasoning = (
                 f"У тебя есть близкая страница {page_url} (совпадение "
                 f"{int(match.score * 100)}%), но она не полностью "

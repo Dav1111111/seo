@@ -12,7 +12,11 @@ backend/.pytest_cache/
 backend/celerybeat-schedule
 celerybeat-schedule
 pgdata/
+backups/
 *.egg-info/
 dist/
 *.seo-bak
 .DS_Store
+# iCloud / Finder-created sync duplicates ("foo 2.lock", "report 2.md")
+* 2.*
+* 2

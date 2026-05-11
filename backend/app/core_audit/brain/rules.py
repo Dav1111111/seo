@@ -574,6 +574,97 @@ def _rule_followup_due(
     )
 
 
+def _rule_ctr_gap(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
+    """Pages ranking but under-clicking — the cheapest behavioral win.
+
+    Yandex 2026 weighs behavioral factors at 30-45% of the formula.
+    A page sitting at position 3 with 2% CTR (expected ~10%) is leaking
+    traffic on already-earned ranking. Rewriting the title and meta-
+    description for that one page typically lifts clicks 30-80% within
+    two weeks without any other work — no links, no new content.
+
+    Severity escalation:
+      critical  → 1+ critical-severity gaps (≥1000 impressions + ratio<0.35)
+      high      → ≥3 high-severity OR 1+ critical
+      medium    → ≥1 high-severity gap
+      no action → only low-severity gaps (don't bother the owner)
+    """
+    b = snap.behavioral
+    if b.ctr_gaps_total == 0:
+        return None
+
+    if b.ctr_gaps_critical > 0:
+        sev: Severity = "critical"
+    elif b.ctr_gaps_high >= 3:
+        sev = "high"
+    elif b.ctr_gaps_high >= 1 or b.ctr_gaps_medium >= 3:
+        sev = "medium"
+    elif b.ctr_gaps_medium >= 1:
+        sev = "low"
+    else:
+        return None
+
+    flagged_total = b.ctr_gaps_critical + b.ctr_gaps_high + b.ctr_gaps_medium
+    word_q = _ru_plural(flagged_total, ("запрос", "запроса", "запросов"))
+    title = (
+        f"{flagged_total} {word_q} недоклика — позиция уже есть, "
+        f"но сниппет не цепляет"
+    )
+
+    examples: list[dict[str, str]] = []
+    for g in b.sample_gaps[:5]:
+        examples.append({
+            "query": str(g.get("query", "")),
+            "details": (
+                f"позиция {g.get('avg_position', '—')}, "
+                f"CTR {g.get('actual_ctr', 0)}% при ожидаемых "
+                f"{g.get('expected_ctr', 0)}% "
+                f"({g.get('impressions', 0)} показов)"
+            ),
+        })
+
+    in_focus = False
+    if focus_tokens:
+        signals = [str(g.get("query", "")) for g in b.sample_gaps]
+        in_focus = _signals_in_focus(signals, focus_tokens)
+
+    body = (
+        f"По {flagged_total} {word_q} ты уже в топ-10, но кликают "
+        f"в 2-5 раз реже ожидаемого для этой позиции. Это значит "
+        f"сниппет (title + описание) не отвечает на интент пользователя. "
+        f"Самая дешёвая правка в SEO: переписать title под ту же страницу "
+        f"и поднять CTR без работы со ссылками или контентом. "
+        f"Под ударом ~{b.impressions_at_risk:,} показов в месяц."
+    ).replace(",", " ")
+    what_to_do = (
+        "Открой Запросы, отсортируй по показам убывая, найди топ-5 "
+        "из этого списка и для каждой целевой страницы перепиши "
+        "title в формате «{что} в {где} — от {цена} ₽» или с явной "
+        "выгодой для интента."
+    )
+
+    return Action(
+        id="behavioral:ctr_gap",
+        severity=sev,
+        title=title,
+        body_ru=body,
+        what_to_do_ru=what_to_do,
+        link_to="/studio/queries",
+        link_label="К запросам",
+        examples=examples,
+        evidence={
+            "ctr_gaps_total": b.ctr_gaps_total,
+            "ctr_gaps_critical": b.ctr_gaps_critical,
+            "ctr_gaps_high": b.ctr_gaps_high,
+            "ctr_gaps_medium": b.ctr_gaps_medium,
+            "impressions_at_risk": b.impressions_at_risk,
+        },
+        in_focus=in_focus,
+    )
+
+
 # ── Diagnostics: flag modules that haven't run yet ───────────────────
 
 
@@ -612,6 +703,17 @@ def _build_diagnostics(snap: BrainSnapshot) -> list[str]:
             "(Wordstat-объёмов). Без этого я не могу сказать, какой "
             "запрос важнее. Запусти сбор Wordstat в /studio/queries."
         )
+    # Behavioral signals diagnostic: explain why CTR-gaps are silent.
+    # The owner should know whether "no signal" means "all good" or
+    # "not enough data yet". 30+ impressions per query is the floor.
+    if snap.behavioral.ctr_gaps_total == 0 and snap.queries.total > 0:
+        out.append(
+            "Я ещё не вижу страниц с просадкой по CTR. Это либо значит, "
+            "что у тебя всё в порядке со сниппетами, либо что трафика "
+            "пока мало (нужно 30+ показов на запрос за 30 дней). Когда "
+            "Webmaster наберёт больше данных — я подсвечу страницы, "
+            "где сниппет не цепляет."
+        )
     return out
 
 
@@ -621,6 +723,7 @@ def _build_diagnostics(snap: BrainSnapshot) -> list[str]:
 _RULES = (
     _rule_indexation_coverage,
     _rule_harmful_visibility,
+    _rule_ctr_gap,
     _rule_missing_landings,
     _rule_pages_without_review,
     _rule_pending_recs,

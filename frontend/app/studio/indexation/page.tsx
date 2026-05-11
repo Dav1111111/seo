@@ -108,7 +108,7 @@ export default function StudioIndexationPage() {
   );
   const { data: urls, mutate: mutateUrls } = useSWR(
     siteId ? studioKey("indexation_urls", siteId, urlFilter) : null,
-    () => api.studioGetIndexationUrls(siteId, urlFilter, 200),
+    () => api.studioGetIndexationUrls(siteId, urlFilter, 1000),
   );
 
   async function onRefreshUrls() {
@@ -552,6 +552,8 @@ function UrlSignalTable({
 }: {
   urls: {
     total: number;
+    filtered_total: number;
+    truncated: boolean;
     items: Array<{
       page_id: string;
       url: string;
@@ -635,7 +637,13 @@ function UrlSignalTable({
         <div className="flex items-baseline justify-between gap-3 flex-wrap">
           <h2 className="font-medium">Все страницы по сигналам</h2>
           <span className="text-xs text-muted-foreground">
-            показано {Math.min(urls.items.length, 100)} из {urls.total}{urls.items.length > 100 ? " (отрисовываем первые 100)" : ""}
+            показано {urls.items.length}
+            {filter === "all"
+              ? ` из ${urls.total}`
+              : ` из ${urls.filtered_total} по фильтру (всего ${urls.total})`}
+            {urls.truncated
+              ? ` — обрезано до ${urls.items.length}, есть ещё ${urls.filtered_total - urls.items.length}`
+              : ""}
           </span>
         </div>
 
@@ -686,7 +694,7 @@ function UrlSignalTable({
                 </tr>
               </thead>
               <tbody>
-                {urls.items.slice(0, 100).map((it) => (
+                {urls.items.map((it) => (
                   <UrlRow key={it.page_id || it.url} row={it} />
                 ))}
               </tbody>

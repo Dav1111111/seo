@@ -269,7 +269,7 @@ export default function StudioQueriesPage() {
 
   const { data, error, isLoading, mutate } = useSWR(
     siteId ? studioKey("queries", siteId, sort) : null,
-    () => api.studioListQueries(siteId, sort, 200),
+    () => api.studioListQueries(siteId, sort, 1000),
   );
 
   async function onDiscover() {
@@ -399,6 +399,27 @@ export default function StudioQueriesPage() {
     if (!siteId || wsDiscoverPending) return;
     setWsDiscoverPending(true);
     setBanner(null);
+    // Pre-check: Wordstat-discovery iterates «service × geo» pairs from
+    // the site profile. Without services/geo_primary the backend job
+    // immediately no-ops — fail fast in the UI instead of silently
+    // burning a run_id.
+    try {
+      const profileResp = await api.studioGetProfile(siteId);
+      const services = profileResp.profile?.services ?? [];
+      const geoPrimary = profileResp.profile?.geo_primary ?? [];
+      if (services.length === 0 || geoPrimary.length === 0) {
+        setBanner({
+          kind: "err",
+          text: "Сначала заполни Профиль (раздел /studio/profile): нужны услуги и регион.",
+        });
+        setSafeTimeout(() => setWsDiscoverPending(false), 0);
+        return;
+      }
+    } catch (e: unknown) {
+      setBanner({ kind: "err", text: getErrorMessage(e) });
+      setSafeTimeout(() => setWsDiscoverPending(false), 0);
+      return;
+    }
     try {
       const res = await api.studioWordstatDiscover(siteId);
       if (res.deduped) {

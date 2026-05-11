@@ -36,6 +36,8 @@ from html.parser import HTMLParser
 from typing import Sequence
 from urllib.parse import urljoin
 
+from app.security.network import SSRFBlocked, safe_urlopen
+
 
 log = logging.getLogger(__name__)
 
@@ -187,11 +189,25 @@ class _HTMLExtractor(HTMLParser):
 
 
 def _fetch_html(url: str) -> tuple[str | None, str | None]:
+    # safe_urlopen validates initial URL AND every redirect Location —
+    # without per-hop validation a malicious competitor could 302 us
+    # into 169.254.169.254 (cloud metadata) or our internal LAN.
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with safe_urlopen(
+            url,
+            timeout=REQUEST_TIMEOUT,
+            headers={"User-Agent": USER_AGENT},
+        ) as resp:
             raw = resp.read(MAX_HTML_BYTES)
+    except SSRFBlocked as exc:
+        log.warning("deep_dive.ssrf_blocked url=%s reason=%s", url, exc)
+        return None, "ssrf_blocked"
     except urllib.error.HTTPError as exc:
+        # Includes the synthetic HTTPError safe_urlopen raises when a
+        # redirect target was blocked.
+        if "redirect blocked" in str(exc):
+            log.warning("deep_dive.ssrf_redirect_blocked url=%s reason=%s", url, exc)
+            return None, "ssrf_redirect_blocked"
         return None, f"http_{exc.code}"
     except urllib.error.URLError as exc:
         return None, f"url_error:{exc.reason}"

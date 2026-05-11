@@ -83,3 +83,34 @@ def test_compute_shadow_fills_deficit_via_synthesis():
     synthesized = [p for p in picks if p.source == "synthesized"]
     assert len(observed) == 1
     assert len(synthesized) == 4
+
+
+def test_strategic_focus_filter_rejects_generic_rental_queries():
+    """Competitor SERP probes must follow the active SEO focus.
+
+    For Grand Tour Spirit the focus is "buggy expeditions in Abkhazia";
+    generic car rental and deprioritised regions should not seed the
+    competitor list.
+    """
+    from app.core_audit.competitors.tasks import (
+        _business_tokens,
+        _query_is_relevant,
+    )
+
+    filt = _business_tokens({
+        "primary_product": "багги",
+        "services": ["багги", "экспедиции", "прокат"],
+        "geo_primary": ["сочи", "абхазия"],
+        "geo_secondary": ["крым", "кавказ", "геленджик"],
+        "strategic_focus": {
+            "products": ["багги-экспедиции"],
+            "regions": ["абхазия"],
+            "deprioritised": ["крым", "яхты", "вертолёты"],
+        },
+    })
+
+    assert _query_is_relevant("багги абхазия цена", filt)
+    assert _query_is_relevant("прокат багги абхазия", filt)
+    assert not _query_is_relevant("прокат в сочи", filt)
+    assert not _query_is_relevant("багги в крым", filt)
+    assert not _query_is_relevant("прокат абхазия", filt)

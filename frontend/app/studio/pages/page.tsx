@@ -35,6 +35,7 @@ import {
   ChevronRight,
   CheckCircle2,
   AlertCircle,
+  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -60,6 +61,10 @@ export default function StudioPagesIndex() {
   const { data, isLoading, error } = useSWR(
     siteId ? studioKey("pages_list", siteId, sort) : null,
     () => api.studioListPages(siteId, sort, 200),
+  );
+  const { data: searchOnly } = useSWR(
+    siteId ? studioKey("pages_search_only", siteId) : null,
+    () => api.studioGetIndexationUrls(siteId, "only_in_search", 50),
   );
 
   if (siteLoading) {
@@ -137,6 +142,46 @@ export default function StudioPagesIndex() {
         ))}
       </div>
 
+      {searchOnly && searchOnly.only_in_search > 0 && (
+        <Card className="border-amber-300 bg-amber-50/60">
+          <CardContent className="py-4 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <div className="font-medium text-amber-950">
+                  Яндекс показывает URL, которых нет в crawler/sitemap
+                </div>
+                <p className="text-sm text-amber-900/80">
+                  Найдено {searchOnly.only_in_search}{" "}
+                  {pluralRu(searchOnly.only_in_search, ["URL", "URL", "URL"])}.
+                  Они не попадут в ревью страниц, пока система не поймёт,
+                  существуют ли они на сайте и как их обрабатывать.
+                </p>
+              </div>
+              <Link
+                href="/studio/indexation"
+                className="shrink-0 rounded-md border border-amber-300 bg-white/70 px-3 py-1.5 text-xs font-medium text-amber-950 hover:bg-white"
+              >
+                Индексация
+              </Link>
+            </div>
+            <div className="space-y-1">
+              {searchOnly.items.slice(0, 5).map((row) => (
+                <a
+                  key={row.url}
+                  href={row.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-2 text-xs text-amber-950 hover:underline"
+                >
+                  <ExternalLink className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{row.url}</span>
+                </a>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Loading / error */}
       {isLoading && (
         <div className="space-y-2">
@@ -186,12 +231,22 @@ export default function StudioPagesIndex() {
                       <span className="font-medium truncate">
                         {p.title || shortPath(p.path)}
                       </span>
-                      {!p.in_index && (
+                      {p.in_yandex_index === false && (
                         <Badge
                           variant="outline"
-                          className="text-[10px] border-amber-300 text-amber-700 bg-amber-50"
+                          className="text-[10px] border-red-300 text-red-700 bg-red-50"
+                          title={p.yandex_excluded_reason || ""}
                         >
-                          не в индексе
+                          исключён из индекса
+                        </Badge>
+                      )}
+                      {p.in_yandex_index === null && (
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] border-gray-300 text-gray-600 bg-gray-50"
+                          title="Webmaster ещё не вернул статус — нажми «Webmaster: статус каждого URL» в /studio/indexation"
+                        >
+                          статус не проверен
                         </Badge>
                       )}
                       {p.http_status && p.http_status >= 400 && (

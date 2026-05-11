@@ -15,6 +15,7 @@ from app.models.chat import ChatConversation, ChatMessage
 from app.fingerprint.models import PageFingerprint
 from app.intent.models import QueryIntent, PageIntentScore, CoverageDecision
 from app.core_audit.demand_map.models import TargetCluster, TargetQuery
+from app.models.lateral_query import LateralQuery
 
 __all__ = [
     "Tenant", "Site", "Page", "SearchQuery", "DailyMetric",
@@ -24,4 +25,5 @@ __all__ = [
     "PageFingerprint",
     "QueryIntent", "PageIntentScore", "CoverageDecision",
     "TargetCluster", "TargetQuery",
+    "LateralQuery",
 ]

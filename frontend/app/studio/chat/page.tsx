@@ -36,9 +36,11 @@ import {
   Info,
   Plus,
   MessageCircle,
+  Download,
+  Target,
 } from "lucide-react";
 
-import { api } from "@/lib/api";
+import { api, type ChatMode } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
 import { useSite } from "@/lib/site-context";
 import { Card, CardContent } from "@/components/ui/card";
@@ -54,8 +56,11 @@ import {
 type ChatTurn = {
   role: "user" | "assistant";
   content: string;
+  // Set when the LLM hit max_tokens — UI badges the bubble + offers
+  // «Продолжить». Without it a partial answer would silently feed
+  // back into the next turn's history as if it were complete.
+  truncated?: boolean;
 };
-
 
 const STARTER_QUESTIONS = [
   "С чего мне начать на этой неделе?",
@@ -66,6 +71,25 @@ const STARTER_QUESTIONS = [
   "Какие конкретно услуги у меня без отдельной страницы?",
 ];
 
+const DISCUSSION_STARTER_QUESTIONS = [
+  "Какие у меня повторяющиеся проблемы? Сгруппируй их по темам.",
+  "Самая большая группа однотипных рекомендаций — что это и стоит ли с неё начать?",
+  "Давай разберём, с каких 3 рекомендаций мне начать и почему.",
+  "Помоги понять, что реально мешает индексации, а что просто шум.",
+  "Разбери все рекомендации и предложи порядок работ на неделю.",
+  "Что лучше делать первым: страницы, индексацию или запросы?",
+];
+
+const BATTLE_PLAN_PROMPT =
+  "Собери боевой SEO-план под цель топ-5: выбери максимум 5 самых сильных действий по реальным данным. Для каждого дай страницу или модуль, причину, конкретную правку, ожидаемый эффект и как проверить результат.";
+
+const BATTLE_PLAN_STARTER_QUESTIONS = [
+  "Собери боевой SEO-план на эту неделю.",
+  "Какие 5 действий сильнее всего приблизят меня к топ-5?",
+  "Разложи план: страницы, конкуренты, индексация, запросы и проверка результата.",
+  "Что делать первым, чтобы получить максимальный SEO-эффект?",
+];
+
 
 export default function StudioChatPage() {
   const { currentSite, loading: siteLoading } = useSite();
@@ -73,13 +97,22 @@ export default function StudioChatPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const conversationId = searchParams.get("c");
+  const modeFromUrl = normaliseChatMode(searchParams.get("m"));
 
   // Local thread state. Hydrated from DB when `conversationId` is set.
   const [history, setHistory] = useState<ChatTurn[]>([]);
   const [pending, setPending] = useState(false);
   const [draft, setDraft] = useState("");
+  const [chatMode, setChatMode] = useState<ChatMode>(modeFromUrl);
+  const [inFlightMode, setInFlightMode] = useState<ChatMode | null>(null);
+  const [exportingRecommendations, setExportingRecommendations] = useState(false);
+  const [downloadErr, setDownloadErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [totalCost, setTotalCost] = useState(0);
+  // Last text the owner tried to send. Held so the «Повторить» button
+  // on the error banner can re-fire it without retyping. `null` while
+  // there's no failed attempt waiting for a retry.
+  const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null);
   // Phase E step 2: when the LLM picked propose_strategic_focus the
   // server returns a structured proposal. Stash it in state, render
   // the modal, only on «Применить» does anything reach DB.
@@ -88,6 +121,21 @@ export default function StudioChatPage() {
   );
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const currentChatUrl = useCallback(
+    (id: string | null = conversationId, mode: ChatMode = chatMode) =>
+      buildChatUrl(id, mode),
+    [chatMode, conversationId],
+  );
+
+  const chooseChatMode = useCallback(
+    (mode: ChatMode) => {
+      if (pending) return;
+      setChatMode(mode);
+      router.replace(currentChatUrl(conversationId, mode), { scroll: false });
+    },
+    [conversationId, currentChatUrl, pending, router],
+  );
 
   // List of past conversations for the sidebar — refreshes after every
   // turn so a brand-new conversation appears immediately at the top.
@@ -131,6 +179,15 @@ export default function StudioChatPage() {
     }
   }, [activeConversation, conversationId]);
 
+  // URL is the source of truth for the current response mode. Do not
+  // resync while a request is in flight: the running request already
+  // captured its mode and the toggle is disabled until it returns.
+  useEffect(() => {
+    if (!pending) {
+      setChatMode(modeFromUrl);
+    }
+  }, [modeFromUrl, pending]);
+
   // Auto-scroll to bottom on new turns / pending state.
   useEffect(() => {
     const el = scrollRef.current;
@@ -144,21 +201,25 @@ export default function StudioChatPage() {
   }, [conversationId]);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, modeOverride?: ChatMode) => {
       const message = text.trim();
       if (!message || pending || !siteId) return;
       setErr(null);
+      setLastFailedMessage(null);
       // Optimistic user bubble. The assistant turn arrives after the
       // round-trip; on error we keep the user bubble visible so retry
       // is possible.
       setHistory((h) => [...h, { role: "user", content: message }]);
       setDraft("");
       setPending(true);
+      const requestMode = modeOverride ?? chatMode;
+      setInFlightMode(requestMode);
       try {
         const res = await api.studioBrainFreeChat(
           siteId,
           message,
           conversationId,
+          requestMode,
         );
         // Show whichever the model returned. If it picked the focus
         // tool with no accompanying text, fall back to a placeholder
@@ -169,16 +230,47 @@ export default function StudioChatPage() {
           ?? (res.proposal
             ? `📌 Предложил установить фокус: «${res.proposal.label}». ${res.proposal.rationale}`.trim()
             : "");
-        setHistory((h) => [
-          ...h,
-          { role: "assistant", content: assistantText },
-        ]);
-        setTotalCost((c) => c + (res.cost_usd || 0));
+        if (res.deduped) {
+          // Server saw the same message replayed within 60s and served
+          // the cached reply. Replace the optimistic user bubble with
+          // the one already on the server (no double-send), append the
+          // cached assistant reply only if not already present.
+          setHistory((h) => {
+            // Drop trailing optimistic user bubble — server already
+            // had the previous one persisted.
+            const trimmed =
+              h.length && h[h.length - 1].role === "user"
+                ? h.slice(0, -1)
+                : h;
+            const last = trimmed[trimmed.length - 1];
+            if (last?.role === "assistant" && last.content === assistantText) {
+              return trimmed;
+            }
+            return [
+              ...trimmed,
+              {
+                role: "assistant",
+                content: assistantText,
+                truncated: !!res.truncated,
+              },
+            ];
+          });
+        } else {
+          setHistory((h) => [
+            ...h,
+            {
+              role: "assistant",
+              content: assistantText,
+              truncated: !!res.truncated,
+            },
+          ]);
+          setTotalCost((c) => c + (res.cost_usd || 0));
+        }
         // If this was the first message in a brand-new conversation,
         // the server just minted the id — pin it in the URL so a
         // refresh / share preserves the thread.
         if (!conversationId && res.conversation_id) {
-          router.replace(`/studio/chat?c=${res.conversation_id}`);
+          router.replace(currentChatUrl(res.conversation_id, requestMode));
         }
         // Phase E: if the response carries a focus proposal, open
         // the confirmation dialog. NOTHING is written to DB until
@@ -192,12 +284,23 @@ export default function StudioChatPage() {
         if (conversationId) await mutateActive();
       } catch (e: unknown) {
         setErr(getErrorMessage(e));
+        setLastFailedMessage(message);
       } finally {
         setPending(false);
+        setInFlightMode(null);
         inputRef.current?.focus();
       }
     },
-    [conversationId, pending, siteId, router, mutateList, mutateActive],
+    [
+      chatMode,
+      conversationId,
+      currentChatUrl,
+      pending,
+      siteId,
+      router,
+      mutateList,
+      mutateActive,
+    ],
   );
 
   const onKeyDown = useCallback(
@@ -222,9 +325,39 @@ export default function StudioChatPage() {
     await mutateList();
     if (conversationId === id) {
       // We just nuked the open conversation; back to blank slate.
-      router.replace("/studio/chat");
+      router.replace(currentChatUrl(null));
     }
   }
+
+  const downloadRecommendations = useCallback(async () => {
+    if (!siteId || exportingRecommendations) return;
+    setDownloadErr(null);
+    setExportingRecommendations(true);
+    try {
+      const blob = await api.studioDownloadRecommendations(siteId);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `recommendations-${safeFilePart(currentSite?.domain || "site")}.md`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setDownloadErr(getErrorMessage(e));
+    } finally {
+      setExportingRecommendations(false);
+    }
+  }, [currentSite?.domain, exportingRecommendations, siteId]);
+
+  const requestBattlePlan = useCallback(() => {
+    if (pending || !siteId) return;
+    setChatMode("battle_plan");
+    router.replace(currentChatUrl(conversationId, "battle_plan"), {
+      scroll: false,
+    });
+    send(BATTLE_PLAN_PROMPT, "battle_plan");
+  }, [conversationId, currentChatUrl, pending, router, send, siteId]);
 
   if (siteLoading) {
     return (
@@ -253,21 +386,58 @@ export default function StudioChatPage() {
 
   const showStarters =
     !conversationId && history.length === 0 && !pending && !loadingConversation;
+  const starterQuestions =
+    chatMode === "battle_plan"
+      ? BATTLE_PLAN_STARTER_QUESTIONS
+      : chatMode === "discussion"
+        ? DISCUSSION_STARTER_QUESTIONS
+        : STARTER_QUESTIONS;
+  const displayMode = inFlightMode ?? chatMode;
 
   return (
     <div className="p-4 sm:p-6 max-w-6xl flex flex-col gap-4 h-[calc(100vh-4rem)]">
       {/* Header */}
       <div>
-        <Link
-          href="/studio"
-          className="inline-flex items-center text-xs text-muted-foreground hover:text-foreground mb-1 cursor-pointer"
-        >
-          <ArrowLeft className="h-3 w-3 mr-1" /> К Студии
-        </Link>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <Sparkles className="h-6 w-6 text-primary" />
-          Помощник
-        </h1>
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <Link
+              href="/studio"
+              className="inline-flex items-center text-xs text-muted-foreground hover:text-foreground mb-1 cursor-pointer"
+            >
+              <ArrowLeft className="h-3 w-3 mr-1" /> К Студии
+            </Link>
+            <h1 className="text-2xl font-bold flex items-center gap-2">
+              <Sparkles className="h-6 w-6 text-primary" />
+              Помощник
+            </h1>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              onClick={requestBattlePlan}
+              disabled={pending || !siteId}
+              title="Собрать боевой SEO-план: максимум 5 действий, причина, эффект и проверка"
+              className="shrink-0"
+            >
+              <Target className="h-3.5 w-3.5" />
+              Боевой план
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={downloadRecommendations}
+              disabled={exportingRecommendations || !siteId}
+              title="Собрать актуальные рекомендации без повторов в один Markdown-файл"
+              className="shrink-0"
+            >
+              <Download className="h-3.5 w-3.5" />
+              {exportingRecommendations ? "Собираю…" : "Скачать рекомендации"}
+            </Button>
+          </div>
+        </div>
         <p className="text-sm text-muted-foreground mt-1">
           Спрашивай свободно — про индексацию, запросы, страницы, что
           показывает Webmaster, что такое любой термин. Помощник видит
@@ -284,7 +454,7 @@ export default function StudioChatPage() {
               Мои чаты
             </span>
             <Link
-              href="/studio/chat"
+              href={currentChatUrl(null)}
               className="inline-flex items-center gap-1 text-xs text-primary hover:underline cursor-pointer"
               title="Начать новый чат"
             >
@@ -309,6 +479,7 @@ export default function StudioChatPage() {
                     key={c.id}
                     conv={c}
                     active={c.id === conversationId}
+                    href={currentChatUrl(c.id)}
                     onDelete={() => deleteConversation(c.id)}
                   />
                 ))}
@@ -345,7 +516,7 @@ export default function StudioChatPage() {
                     Можно начать с этих вопросов:
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {STARTER_QUESTIONS.map((q, i) => (
+                    {starterQuestions.map((q, i) => (
                       <button
                         key={i}
                         type="button"
@@ -372,43 +543,150 @@ export default function StudioChatPage() {
             {pending && (
               <div className="flex items-start gap-2 text-muted-foreground">
                 <Sparkles className="h-4 w-4 mt-0.5 text-primary animate-pulse" />
-                <span className="italic text-sm">помощник думает…</span>
+                <span className="italic text-sm">
+                  {displayMode === "battle_plan"
+                    ? "помощник собирает боевой план…"
+                    : displayMode === "discussion"
+                    ? "помощник разбирает ситуацию…"
+                    : "помощник думает…"}
+                </span>
               </div>
             )}
 
             {err && (
+              <div className="rounded-md border border-red-300 bg-red-50 text-red-900 px-3 py-2 text-sm flex items-center justify-between gap-3">
+                <span className="flex-1">Не получилось спросить: {err}</span>
+                {lastFailedMessage && !pending && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const retry = lastFailedMessage;
+                      setLastFailedMessage(null);
+                      setErr(null);
+                      // Drop the orphan optimistic user bubble before
+                      // resending, otherwise the same message would
+                      // appear twice in the thread.
+                      setHistory((h) =>
+                        h.length && h[h.length - 1].role === "user"
+                          ? h.slice(0, -1)
+                          : h,
+                      );
+                      send(retry);
+                    }}
+                    className="shrink-0 rounded-md border border-red-400 bg-white px-3 py-1 text-xs font-medium hover:bg-red-100"
+                  >
+                    Повторить
+                  </button>
+                )}
+              </div>
+            )}
+            {downloadErr && (
               <div className="rounded-md border border-red-300 bg-red-50 text-red-900 px-3 py-2 text-sm">
-                Не получилось спросить: {err}
+                Не получилось скачать рекомендации: {downloadErr}
               </div>
             )}
           </div>
 
           {/* Composer */}
-          <div className="border-t px-3 py-3 flex items-end gap-2">
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="Напиши свой вопрос. Enter — отправить, Shift+Enter — перенос строки."
-              disabled={pending}
-              className={cn(
-                "flex-1 min-w-0 resize-none rounded-md border bg-background",
-                "text-sm px-3 py-2 leading-snug max-h-40",
-                "focus:outline-none focus:ring-2 focus:ring-primary/40",
-                "disabled:opacity-50",
-              )}
-            />
-            <Button
-              type="button"
-              size="default"
-              onClick={() => send(draft)}
-              disabled={pending || !draft.trim()}
-              aria-label="Отправить"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
+          <div className="border-t px-3 py-3 space-y-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div
+                className="inline-flex rounded-md border bg-background p-0.5"
+                role="group"
+                aria-label="Режим ответа"
+              >
+                <button
+                  type="button"
+                  onClick={() => chooseChatMode("answer")}
+                  disabled={pending}
+                  aria-pressed={chatMode === "answer"}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded px-2.5 py-1",
+                    "text-xs transition-colors",
+                    chatMode === "answer"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                    pending ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+                  )}
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  Короткий ответ
+                </button>
+                <button
+                  type="button"
+                  onClick={() => chooseChatMode("discussion")}
+                  disabled={pending}
+                  aria-pressed={chatMode === "discussion"}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded px-2.5 py-1",
+                    "text-xs transition-colors",
+                    chatMode === "discussion"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                    pending ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+                  )}
+                >
+                  <MessageCircle className="h-3.5 w-3.5" />
+                  Обсуждение
+                </button>
+                <button
+                  type="button"
+                  onClick={() => chooseChatMode("battle_plan")}
+                  disabled={pending}
+                  aria-pressed={chatMode === "battle_plan"}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded px-2.5 py-1",
+                    "text-xs transition-colors",
+                    chatMode === "battle_plan"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                    pending ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+                  )}
+                >
+                  <Target className="h-3.5 w-3.5" />
+                  Боевой план
+                </button>
+              </div>
+              <span className="text-[11px] text-muted-foreground leading-snug">
+                {chatMode === "battle_plan"
+                  ? "До 5 действий: причина, правка, эффект и проверка."
+                  : chatMode === "discussion"
+                  ? "Разбор вариантов, приоритетов и уточняющих вопросов."
+                  : "Прямой ответ по фактам без лишнего разбора."}
+              </span>
+            </div>
+            <div className="flex items-end gap-2">
+              <textarea
+                ref={inputRef}
+                rows={1}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder={
+                  chatMode === "battle_plan"
+                    ? "Спроси про боевой план, топ-страницы, конкурентов или проверку результата."
+                    : chatMode === "discussion"
+                    ? "Опиши, что хочешь разобрать. Enter — отправить, Shift+Enter — перенос строки."
+                    : "Напиши свой вопрос. Enter — отправить, Shift+Enter — перенос строки."
+                }
+                disabled={pending}
+                className={cn(
+                  "flex-1 min-w-0 resize-none rounded-md border bg-background",
+                  "text-sm px-3 py-2 leading-snug max-h-40",
+                  "focus:outline-none focus:ring-2 focus:ring-primary/40",
+                  "disabled:opacity-50",
+                )}
+              />
+              <Button
+                type="button"
+                size="default"
+                onClick={() => send(draft)}
+                disabled={pending || !draft.trim()}
+                aria-label="Отправить"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </Card>
       </div>
@@ -422,7 +700,7 @@ export default function StudioChatPage() {
         </span>
         {conversationId && (
           <Link
-            href="/studio/chat"
+            href={currentChatUrl(null)}
             className="inline-flex items-center gap-1 hover:text-foreground cursor-pointer"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -465,6 +743,7 @@ export default function StudioChatPage() {
 function ConversationListItem({
   conv,
   active,
+  href,
   onDelete,
 }: {
   conv: {
@@ -475,6 +754,7 @@ function ConversationListItem({
     created_at: string;
   };
   active: boolean;
+  href: string;
   onDelete: () => void;
 }) {
   const ts = conv.last_message_at || conv.created_at;
@@ -490,7 +770,7 @@ function ConversationListItem({
         )}
       >
         <Link
-          href={`/studio/chat?c=${conv.id}`}
+          href={href}
           className="flex-1 min-w-0 cursor-pointer"
         >
           <div className="flex items-start gap-1.5">
@@ -561,6 +841,14 @@ function ChatBubble({ turn }: { turn: ChatTurn }) {
         )}
       >
         {turn.content}
+        {turn.truncated && (
+          <div
+            className="mt-2 -mb-1 -mx-1 rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-2 py-1 text-xs"
+            title="Модель упёрлась в лимит ответа — это не вся мысль. Спроси «продолжи» или сократи вопрос."
+          >
+            ⚠ ответ обрезан на лимите токенов — спроси «продолжи»
+          </div>
+        )}
       </div>
     </div>
   );
@@ -593,4 +881,28 @@ function pluralRu(n: number, forms: [string, string, string]): string {
   if (n10 === 1 && n100 !== 11) return forms[0];
   if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return forms[1];
   return forms[2];
+}
+
+
+function normaliseChatMode(value: string | null): ChatMode {
+  if (value === "discussion") return "discussion";
+  if (value === "battle_plan") return "battle_plan";
+  return "answer";
+}
+
+
+function buildChatUrl(conversationId: string | null, mode: ChatMode): string {
+  const params = new URLSearchParams();
+  if (conversationId) params.set("c", conversationId);
+  params.set("m", mode);
+  return `/studio/chat?${params.toString()}`;
+}
+
+function safeFilePart(value: string): string {
+  const cleaned = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9а-яё._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "site";
 }

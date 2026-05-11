@@ -158,6 +158,7 @@ async def test_skip_competitor_stages_emits_all_gated_terminals(
             "business_truth",
             "competitor_discovery", "competitor_deep_dive",
             "opportunities",
+            "intent_decide",
         ]},
         run_id=run_id,
     )
@@ -216,6 +217,7 @@ async def test_skip_after_primary_failure_emits_all_downstream_terminals(
         "business_truth",
         "competitor_discovery", "competitor_deep_dive",
         "opportunities",
+        "intent_decide",
         "review", "priorities", "report",
     ]
     await log_event(
@@ -254,6 +256,7 @@ async def test_skip_after_primary_failure_emits_all_downstream_terminals(
     assert ("competitor_discovery", "skipped") in by_stage
     assert ("competitor_deep_dive", "skipped") in by_stage
     assert ("opportunities", "skipped") in by_stage
+    assert ("intent_decide", "skipped") in by_stage
     assert ("review", "skipped") in by_stage
     assert ("priorities", "skipped") in by_stage
     assert ("report", "skipped") in by_stage

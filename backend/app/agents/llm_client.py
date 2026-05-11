@@ -19,6 +19,12 @@ from typing import Any
 
 import anthropic
 
+from app.agents.openai_fallback import (
+    call_plain_openai,
+    call_with_optional_tools_openai,
+    call_with_tool_openai,
+    is_anthropic_balance_error,
+)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -105,15 +111,27 @@ def call_with_tool(
     ]
     messages = [{"role": "user", "content": user_message}]
 
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_blocks,
-        tools=[tool],
-        tool_choice={"type": "tool", "name": tool["name"]},
-        messages=messages,
-    ) as stream:
-        response = stream.get_final_message()
+    try:
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_blocks,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": tool["name"]},
+            messages=messages,
+        ) as stream:
+            response = stream.get_final_message()
+    except Exception as exc:  # noqa: BLE001
+        if is_anthropic_balance_error(exc):
+            logger.warning("Anthropic balance exhausted — falling back to OpenAI")
+            return call_with_tool_openai(
+                model_tier=model_tier,
+                system=system,
+                user_message=user_message,
+                tool=tool,
+                max_tokens=max_tokens,
+            )
+        raise
 
     usage = response.usage
     cost = _compute_cost(model, usage)
@@ -126,6 +144,7 @@ def call_with_tool(
         "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
         "cost_usd": cost,
         "prompt_hash": _prompt_hash(system, messages),
+        "provider": "anthropic",
     }
 
     logger.info(
@@ -171,16 +190,28 @@ def call_plain(
     ]
     messages = [{"role": "user", "content": user_message}]
 
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_blocks,
-        messages=messages,
-    ) as stream:
-        response = stream.get_final_message()
+    try:
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_blocks,
+            messages=messages,
+        ) as stream:
+            response = stream.get_final_message()
+    except Exception as exc:  # noqa: BLE001
+        if is_anthropic_balance_error(exc):
+            logger.warning("Anthropic balance exhausted — falling back to OpenAI")
+            return call_plain_openai(
+                model_tier=model_tier,
+                system=system,
+                user_message=user_message,
+                max_tokens=max_tokens,
+            )
+        raise
 
     usage = response.usage
     cost = _compute_cost(model, usage)
+    stop_reason = getattr(response, "stop_reason", None)
     usage_stats = {
         "model": model,
         "input_tokens": usage.input_tokens,
@@ -189,15 +220,19 @@ def call_plain(
         "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
         "cost_usd": cost,
         "prompt_hash": _prompt_hash(system, messages),
+        "stop_reason": stop_reason,
+        "truncated": stop_reason == "max_tokens",
+        "provider": "anthropic",
     }
 
     logger.info(
-        "LLM call (plain): model=%s tokens=%d+%d cost=$%.5f cache_read=%d",
+        "LLM call (plain): model=%s tokens=%d+%d cost=$%.5f cache_read=%d stop=%s",
         model,
         usage.input_tokens,
         usage.output_tokens,
         cost,
         usage_stats["cache_read_tokens"],
+        stop_reason,
     )
 
     text_parts: list[str] = []
@@ -234,21 +269,38 @@ def call_with_optional_tools(
     ]
     messages = [{"role": "user", "content": user_message}]
 
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_blocks,
-        tools=tools,
-        # `auto`: model chooses. We DON'T set tool_choice={"type":"tool",...}
-        # because that forces a tool every time — owner's normal questions
-        # should still get a plain answer.
-        tool_choice={"type": "auto"},
-        messages=messages,
-    ) as stream:
-        response = stream.get_final_message()
+    try:
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_blocks,
+            tools=tools,
+            # `auto`: model chooses. We DON'T set tool_choice={"type":"tool",...}
+            # because that forces a tool every time — owner's normal questions
+            # should still get a plain answer.
+            tool_choice={"type": "auto"},
+            messages=messages,
+        ) as stream:
+            response = stream.get_final_message()
+    except Exception as exc:  # noqa: BLE001
+        if is_anthropic_balance_error(exc):
+            logger.warning("Anthropic balance exhausted — falling back to OpenAI")
+            return call_with_optional_tools_openai(
+                model_tier=model_tier,
+                system=system,
+                user_message=user_message,
+                tools=tools,
+                max_tokens=max_tokens,
+            )
+        raise
 
     usage = response.usage
     cost = _compute_cost(model, usage)
+    # Stop reason matters for chat: `max_tokens` means the model was cut
+    # off mid-thought. Without surfacing this to caller, the truncated
+    # text would be saved as a "normal" assistant turn and feed back
+    # into the next prompt as if it were a complete answer.
+    stop_reason = getattr(response, "stop_reason", None)
     usage_stats = {
         "model": model,
         "input_tokens": usage.input_tokens,
@@ -257,6 +309,9 @@ def call_with_optional_tools(
         "cache_read_tokens": getattr(usage, "cache_read_input_tokens", 0) or 0,
         "cost_usd": cost,
         "prompt_hash": _prompt_hash(system, messages),
+        "stop_reason": stop_reason,
+        "truncated": stop_reason == "max_tokens",
+        "provider": "anthropic",
     }
 
     text_parts: list[str] = []
@@ -273,8 +328,9 @@ def call_with_optional_tools(
 
     text = "".join(text_parts) or None
     logger.info(
-        "LLM call (optional-tools): model=%s tokens=%d+%d cost=$%.5f tool=%s",
+        "LLM call (optional-tools): model=%s tokens=%d+%d cost=$%.5f tool=%s stop=%s",
         model, usage.input_tokens, usage.output_tokens, cost,
         tool_use["name"] if tool_use else "none",
+        stop_reason,
     )
     return {"text": text, "tool_use": tool_use}, usage_stats

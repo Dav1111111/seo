@@ -150,6 +150,30 @@ SEASONAL_TOURISM_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Pre-season window: prepare BEFORE the peak. Yandex re-ranks gradually;
+# behavioral data and freshness compound over 4-8 weeks. By the peak
+# month it's already too late to ship a new landing — surface the work
+# in the run-up. Pre-season boost is HIGHER than peak boost because
+# preparation matters more than mid-season reaction.
+SUMMER_PRE_SEASON_MONTHS = frozenset({2, 3, 4})    # Feb-Apr → May-Aug peak
+SUMMER_PEAK_MONTHS = frozenset({5, 6, 7, 8})
+WINTER_PRE_SEASON_MONTHS = frozenset({9, 10})      # Sep-Oct → Nov-Feb peak
+WINTER_PEAK_MONTHS = frozenset({11, 12, 1, 2})
+
+SEASONAL_PRE_SEASON_BOOST = 0.10                 # higher: preparation matters more
+
+SUMMER_TOURISM_RE = re.compile(
+    # \bлет\w+ matches лет/о/а/ом/ний/няя/ние (covers "летние туры")
+    r"\bлет\w+|\bпляж\w*|\bкупать\w*|\bавгуст\w*|\bиюн\w*|\bиюл\w*|\bмор[ея]\b"
+    r"|\bводопад\w*|\bмайск\w*|\bотдых\w*|\bканикул\w*",
+    re.IGNORECASE | re.UNICODE,
+)
+WINTER_TOURISM_RE = re.compile(
+    r"\bзим[аеу]\w*|\bснег\w*|\bгорнолыжн\w*|\bлыж\w*|\bроз[аы]\s+хутор"
+    r"|\bновогодн\w*|\bдекабр\w*|\bянвар\w*|\bрожд[еа]ств\w*|\bкатани\w*",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 # ── Deferred/applied status behavior ──────────────────────────────────
 DEFERRED_SCORE_MULTIPLIER = 0.5                  # deferred recs halved, not excluded

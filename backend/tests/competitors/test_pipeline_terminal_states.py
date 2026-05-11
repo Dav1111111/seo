@@ -251,6 +251,48 @@ async def test_queued_pipeline_collapses_failure_status(db, test_site: Site):
     assert [e.status for e in pipe_end] == ["started", "failed"]
 
 
+async def test_queued_pipeline_done_with_optional_skips(db, test_site: Site):
+    """Queued full analysis can skip optional branches and still finish
+    successfully when the downstream analytical stages complete."""
+    run = uuid.uuid4()
+    queued = [
+        "crawl",
+        "webmaster",
+        "competitor_discovery",
+        "intent_decide",
+        "review",
+        "report",
+    ]
+    await log_event(
+        db,
+        test_site.id,
+        "pipeline",
+        "started",
+        "trigger",
+        extra={"queued": queued},
+        run_id=run,
+    )
+
+    await emit_terminal(db, test_site.id, "crawl", "done", "crawl", run_id=run)
+    await emit_terminal(db, test_site.id, "webmaster", "done", "wm", run_id=run)
+    await emit_terminal(
+        db,
+        test_site.id,
+        "competitor_discovery",
+        "skipped",
+        "too few money queries",
+        run_id=run,
+    )
+    await emit_terminal(
+        db, test_site.id, "intent_decide", "done", "decisions", run_id=run,
+    )
+    await emit_terminal(db, test_site.id, "review", "done", "review", run_id=run)
+    await emit_terminal(db, test_site.id, "report", "done", "report", run_id=run)
+
+    pipe = await _events(db, test_site.id, stage="pipeline")
+    assert [e.status for e in pipe] == ["started", "done"]
+
+
 async def test_reconcile_open_pipelines_backfills_missing_terminal(db, test_site: Site):
     """Historical race: queued stages finished before pipeline:started was
     persisted, so no terminal got written. Reconcile should backfill it."""

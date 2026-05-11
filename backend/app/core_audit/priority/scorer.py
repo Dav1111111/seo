@@ -30,13 +30,20 @@ from app.core_audit.priority.constants import (
     SCHEMA_CONFIDENCE_FLOOR,
     SEASONAL_BOOST,
     SEASONAL_MONTHS,
+    SEASONAL_PRE_SEASON_BOOST,
     SEASONAL_TOURISM_RE,
     SIGNAL_CERTAINTY,
     SIGNAL_EASE_OVERRIDE,
     SIGNAL_KEYED_EASE_OVERRIDE,
+    SUMMER_PEAK_MONTHS,
+    SUMMER_PRE_SEASON_MONTHS,
+    SUMMER_TOURISM_RE,
     WEIGHT_CONFIDENCE,
     WEIGHT_EASE,
     WEIGHT_IMPACT,
+    WINTER_PEAK_MONTHS,
+    WINTER_PRE_SEASON_MONTHS,
+    WINTER_TOURISM_RE,
 )
 from app.core_audit.priority.dto import ScoreBreakdown
 
@@ -107,8 +114,18 @@ def score_recommendation(ctx: ScorerContext) -> ScoreBreakdown | None:
 
     notes: list[str] = []
 
-    # Seasonality boost — applied post-composition (transparent in notes)
-    if _seasonal_match(ctx):
+    # Seasonality boost — applied post-composition (transparent in notes).
+    # Pre-season window gets a higher boost than peak season because
+    # preparation work compounds (Yandex re-ranks gradually over weeks).
+    season_kind, season_boost = _seasonal_classification(ctx)
+    if season_kind:
+        score = min(100.0, score * (1.0 + season_boost))
+        notes.append("seasonal_boost")  # backward compat — existing tests
+        notes.append(f"season:{season_kind}")
+    elif _seasonal_match(ctx):
+        # Legacy path for any non-summer/winter pattern hit by the
+        # original SEASONAL_TOURISM_RE regex (kept so old behavior
+        # never regresses).
         score = min(100.0, score * (1.0 + SEASONAL_BOOST))
         notes.append("seasonal_boost")
 
@@ -251,3 +268,34 @@ def _seasonal_match(ctx: ScorerContext) -> bool:
         return False
     q = ctx.top_query or ""
     return bool(SEASONAL_TOURISM_RE.search(q))
+
+
+def _seasonal_classification(ctx: ScorerContext) -> tuple[str | None, float]:
+    """Classify a recommendation by season + return the boost amount.
+
+    Returns one of:
+      ("summer_pre_season", SEASONAL_PRE_SEASON_BOOST)
+      ("summer_peak",       SEASONAL_BOOST)
+      ("winter_pre_season", SEASONAL_PRE_SEASON_BOOST)
+      ("winter_peak",       SEASONAL_BOOST)
+      (None, 0.0)
+    """
+    today = ctx.today or date.today()
+    month = today.month
+    q = ctx.top_query or ""
+    if not q:
+        return None, 0.0
+
+    if SUMMER_TOURISM_RE.search(q):
+        if month in SUMMER_PRE_SEASON_MONTHS:
+            return "summer_pre_season", SEASONAL_PRE_SEASON_BOOST
+        if month in SUMMER_PEAK_MONTHS:
+            return "summer_peak", SEASONAL_BOOST
+
+    if WINTER_TOURISM_RE.search(q):
+        if month in WINTER_PRE_SEASON_MONTHS:
+            return "winter_pre_season", SEASONAL_PRE_SEASON_BOOST
+        if month in WINTER_PEAK_MONTHS:
+            return "winter_peak", SEASONAL_BOOST
+
+    return None, 0.0

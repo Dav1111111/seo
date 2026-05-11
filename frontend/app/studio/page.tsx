@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 
 import { BrainPlanCard } from "@/components/studio/brain-plan-card";
+import { RunFullAnalysisButton } from "@/components/studio/run-full-analysis-button";
 import { StrategicFocusBanner } from "@/components/studio/strategic-focus-banner";
 
 /**
@@ -135,14 +136,17 @@ export default function StudioIndexPage() {
             эффект до и после правок.
           </p>
         </div>
-        <Link
-          href="/studio/chat"
-          className="inline-flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 hover:bg-primary/10 px-3 py-2 text-sm font-medium text-primary transition-colors cursor-pointer"
-          title="Свободный чат с помощником: задавай вопросы про индексацию, запросы, любые термины — он видит всё что собрано по сайту"
-        >
-          <MessageCircle className="h-4 w-4" />
-          Спросить помощника
-        </Link>
+        <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-start">
+          <Link
+            href="/studio/chat"
+            className="inline-flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 hover:bg-primary/10 px-3 py-2 text-sm font-medium text-primary transition-colors cursor-pointer"
+            title="Свободный чат с помощником: задавай вопросы про индексацию, запросы, любые термины — он видит всё что собрано по сайту"
+          >
+            <MessageCircle className="h-4 w-4" />
+            Спросить помощника
+          </Link>
+          <RunFullAnalysisButton />
+        </div>
       </div>
 
       {/* V2 etap 7 Phase E — strategic focus banner. Hidden when

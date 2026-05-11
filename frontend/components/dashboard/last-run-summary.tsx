@@ -133,28 +133,28 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
             icon={Target}
             value={oppsCount ?? "—"}
             label="точек роста"
-            link="/competitors"
+            link="/studio/competitors"
             tone="primary"
           />
           <MetricTile
             icon={Swords}
             value={compFound ?? "—"}
             label="конкурентов"
-            link="/competitors"
+            link="/studio/competitors"
             tone="amber"
           />
           <MetricTile
             icon={TrendingDown}
             value={crawled ?? "—"}
             label="сайтов разобрано"
-            link="/competitors"
+            link="/studio/competitors"
             tone="slate"
           />
           <MetricTile
             icon={FileText}
             value={ownPages ?? "—"}
             label="твоих страниц"
-            link="/competitors"
+            link="/studio/competitors"
             tone="slate"
           />
         </div>
@@ -192,18 +192,19 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
           <StageChip stage={discovery}                           label="разведка" />
           <StageChip stage={dive}                                label="глубокий анализ" />
           <StageChip stage={opps}                                label="точки роста" />
+          <StageChip stage={byStage.get("intent_decide")}         label="решения" />
           <StageChip stage={byStage.get("review")}               label="проверка страниц" />
           <StageChip stage={byStage.get("priorities")}           label="приоритеты" />
           <StageChip stage={byStage.get("report")}               label="отчёт" />
         </div>
 
         <div className="pt-2 flex gap-2 flex-wrap">
-          <Link href="/competitors">
+          <Link href="/studio/competitors">
             <Button size="sm">
               Посмотреть что делать <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </Link>
-          <Link href="/priorities">
+          <Link href="/studio/">
             <Button size="sm" variant="outline">
               Приоритеты по страницам и запросам <ArrowRight className="ml-2 h-4 w-4" />
             </Button>

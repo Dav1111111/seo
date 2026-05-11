@@ -32,10 +32,17 @@ LEGACY_STAGE_ALIASES = {
 
 
 def _pipeline_terminal_status(statuses: list[str]) -> str:
-    """Collapse queued-stage terminals into one pipeline terminal."""
+    """Collapse queued-stage terminals into one pipeline terminal.
+
+    Optional branches can legitimately skip (for example competitor
+    discovery when Webmaster has too few money queries). A queued
+    pipeline should only be reported as skipped when every queued stage
+    skipped; mixed done+skipped means the full analysis completed with
+    optional branches omitted.
+    """
     if any(status == "failed" for status in statuses):
         return "failed"
-    if any(status == "skipped" for status in statuses):
+    if statuses and all(status == "skipped" for status in statuses):
         return "skipped"
     return "done"
 

@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.config import settings
 from app.core_audit.demand_map.models import TargetCluster, TargetQuery
 from app.database import get_db
@@ -45,12 +46,13 @@ router = APIRouter(prefix="/admin")
 
 
 def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
-    """Header-based gate. Empty server-side key blocks everything."""
-    configured = settings.ADMIN_API_KEY or ""
-    if not configured:
-        raise HTTPException(status_code=401, detail="admin api disabled")
-    if not x_admin_key or x_admin_key != configured:
-        raise HTTPException(status_code=401, detail="invalid admin key")
+    """Header-based gate. Empty server-side key blocks everything.
+
+    Thin wrapper preserved for in-module Depends() callers — actual
+    policy (constant-time compare via ``secrets.compare_digest``) lives
+    in :func:`app.api.v1.deps.require_admin`.
+    """
+    require_admin(x_admin_key or "")
 
 
 # ---------- Pydantic bodies -------------------------------------------------

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     YANDEX_WEBMASTER_HOST_ID: str = ""
     YANDEX_METRICA_COUNTER_ID: str = ""
 
-    # Anthropic
+    # Anthropic (primary)
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = ""  # Cloudflare Worker proxy URL (e.g. https://anthropic-proxy.xxx.workers.dev)
     # Flipped daily to Sonnet 4.6 — latest, stronger Russian + reasoning.
@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     AI_DAILY_MODEL: str = "claude-sonnet-4-6"
     AI_COMPLEX_MODEL: str = "claude-sonnet-4-6"
     AI_MONTHLY_BUDGET_USD: float = 10.0
+
+    # OpenAI (fallback when Anthropic balance is exhausted).
+    # NOTE: OpenAI geo-blocks requests from Russia. Set OPENAI_BASE_URL
+    # to a Cloudflare/Vercel proxy hosted outside RU (mirror the
+    # ANTHROPIC_BASE_URL setup) — without a proxy the fallback will
+    # fail with 403 unsupported_country_region_territory.
+    OPENAI_API_KEY: str = ""
+    OPENAI_BASE_URL: str = ""
 
     # Telegram
     TELEGRAM_BOT_TOKEN: str = ""

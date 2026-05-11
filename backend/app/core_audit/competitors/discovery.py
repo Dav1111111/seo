@@ -138,6 +138,10 @@ class CompetitorProfile:
     query_serps: dict[str, list[dict]] = dataclasses.field(default_factory=dict)
 
     def to_jsonb(self) -> dict:
+        # `computed_at` lets the brain decide whether to surface this
+        # snapshot as «свежее» or warn the LLM about stale source data.
+        # Without it, brain would treat month-old SERP scrapes as fresh.
+        from datetime import datetime, timezone
         return {
             "site_id": self.site_id,
             "own_domain": self.own_domain,
@@ -148,6 +152,7 @@ class CompetitorProfile:
             "cost_usd": round(self.cost_usd, 4),
             "errors": dict(self.errors),
             "query_serps": self.query_serps,
+            "computed_at": datetime.now(timezone.utc).isoformat(),
         }
 
 

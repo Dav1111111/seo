@@ -18,6 +18,7 @@ const STAGE_LABEL: Record<string, string> = {
   competitor_discovery: "разведка конкурентов",
   competitor_deep_dive: "глубокий анализ",
   opportunities: "точки роста",
+  intent_decide: "решения покрытия",
   review: "проверка страниц",
   report: "отчёт",
   priorities: "приоритеты",

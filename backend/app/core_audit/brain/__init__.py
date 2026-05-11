@@ -24,6 +24,7 @@ from app.core_audit.brain.rules import (
     build_plan,
 )
 from app.core_audit.brain.chat import chat_about_action
+from app.core_audit.brain.battle_plan import battle_plan_result
 from app.core_audit.brain.free_chat import free_chat
 
 __all__ = [
@@ -33,5 +34,6 @@ __all__ = [
     "Plan",
     "build_plan",
     "chat_about_action",
+    "battle_plan_result",
     "free_chat",
 ]
