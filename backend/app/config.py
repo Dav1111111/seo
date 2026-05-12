@@ -99,14 +99,31 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_config(self):
+        # Fail-fast on a malformed provider switch regardless of env —
+        # otherwise the typo "openAI" silently falls through the
+        # llm_client router and ends up calling Anthropic in prod.
+        provider = (self.LLM_PROVIDER or "anthropic").strip().lower()
+        if provider not in ("anthropic", "openai"):
+            raise ValueError(
+                f"LLM_PROVIDER={self.LLM_PROVIDER!r} is invalid; "
+                "must be 'anthropic' or 'openai'"
+            )
+
         if (self.APP_ENV or "").strip().lower() not in _PRODUCTION_ENVS:
             return self
 
+        # Provider-aware required set. When LLM_PROVIDER=openai we don't
+        # contact Anthropic at all, so its key isn't needed — but
+        # OPENAI_API_KEY then becomes mandatory (without it the first
+        # LLM call would explode in openai_fallback.get_openai_client).
+        llm_required = (
+            "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
+        )
         required = (
             "DATABASE_URL",
             "DATABASE_URL_SYNC",
             "REDIS_URL",
-            "ANTHROPIC_API_KEY",
+            llm_required,
             "ADMIN_API_KEY",
             "SECRET_KEY",
             "JWT_SECRET",

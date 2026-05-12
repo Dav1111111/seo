@@ -207,6 +207,50 @@ def _check_anthropic_haiku() -> CheckResult:
     return _check_anthropic(settings.AI_DAILY_MODEL)
 
 
+# ── OpenAI LLM ─────────────────────────────────────────────────────────
+
+def _check_openai(model_name: str) -> CheckResult:
+    """Mirror of `_check_anthropic` for the OpenAI provider path.
+
+    Used by health UI when `LLM_PROVIDER=openai` is active. Same
+    contract: smallest possible real call to prove auth + network +
+    proxy + model all work end-to-end. Cost: fractions of a cent.
+    OPENAI_BASE_URL is honoured (Vercel/Cloudflare proxy in RU).
+    """
+    def body():
+        miss = _requires_missing(("OPENAI_API_KEY",))
+        if miss:
+            return False, None, f"missing:{miss}"
+        from openai import OpenAI
+        client_kwargs: dict[str, Any] = {"api_key": settings.OPENAI_API_KEY}
+        if settings.OPENAI_BASE_URL:
+            client_kwargs["base_url"] = settings.OPENAI_BASE_URL
+        client = OpenAI(timeout=8.0, **client_kwargs)
+        resp = client.chat.completions.create(
+            model=model_name,
+            max_completion_tokens=8,
+            messages=[{"role": "user", "content": "Say 'ok'"}],
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        usage = resp.usage
+        return True, {
+            "model": resp.model,
+            "output": text[:50],
+            "input_tokens": getattr(usage, "prompt_tokens", 0),
+            "output_tokens": getattr(usage, "completion_tokens", 0),
+        }, None
+
+    return _timed(body)
+
+
+def _check_openai_gpt54() -> CheckResult:
+    return _check_openai("gpt-5.4")
+
+
+def _check_openai_gpt54_mini() -> CheckResult:
+    return _check_openai("gpt-5.4-mini")
+
+
 # ── Yandex Cloud (AI Studio) ───────────────────────────────────────────
 
 def _yc_post(path: str, body: dict, *, timeout: float = 8.0) -> tuple[int, dict | None, str | None]:
@@ -501,7 +545,10 @@ CONNECTORS: list[Connector] = [
         requires=("REDIS_URL",),
     ),
 
-    # LLM
+    # LLM — entries are declared for BOTH providers; the active set is
+    # filtered at module load time by `LLM_PROVIDER` so health UI only
+    # tests the path we actually use. Without the filter, switching the
+    # provider leaves stale red dots that mean nothing.
     Connector(
         id="llm.anthropic.sonnet",
         category="llm",
@@ -517,6 +564,22 @@ CONNECTORS: list[Connector] = [
         description_ru="Дешёвая LLM для массовых задач — кластеризация, классификация, краткие тексты.",
         check=_check_anthropic_haiku,
         requires=("ANTHROPIC_API_KEY",),
+    ),
+    Connector(
+        id="llm.openai.gpt54",
+        category="llm",
+        name="OpenAI · gpt-5.4",
+        description_ru="Главная LLM для онбординг-чата и BusinessTruth (когда LLM_PROVIDER=openai).",
+        check=_check_openai_gpt54,
+        requires=("OPENAI_API_KEY",),
+    ),
+    Connector(
+        id="llm.openai.gpt54_mini",
+        category="llm",
+        name="OpenAI · gpt-5.4-mini",
+        description_ru="Дешёвая LLM для массовых задач — классификация запросов, краткие тексты.",
+        check=_check_openai_gpt54_mini,
+        requires=("OPENAI_API_KEY",),
     ),
 
     # Yandex Cloud (AI Studio) — single API key covers all
@@ -581,6 +644,24 @@ CONNECTORS: list[Connector] = [
     ),
 ]
 
+
+def _filter_by_active_llm_provider(items: list[Connector]) -> list[Connector]:
+    """Keep only the LLM-provider entries we'll actually call.
+
+    Health UI exists to answer one question: «is what I'm USING working
+    right now?». Showing red dots for the inactive provider muddies that
+    signal — owner sees red and thinks platform is broken, when it's just
+    a path we explicitly disabled via `LLM_PROVIDER`.
+    """
+    provider = (settings.LLM_PROVIDER or "anthropic").strip().lower()
+    if provider == "openai":
+        drop_prefix = "llm.anthropic."
+    else:
+        drop_prefix = "llm.openai."
+    return [c for c in items if not c.id.startswith(drop_prefix)]
+
+
+CONNECTORS = _filter_by_active_llm_provider(CONNECTORS)
 
 CONNECTORS_BY_ID: dict[str, Connector] = {c.id: c for c in CONNECTORS}
 
