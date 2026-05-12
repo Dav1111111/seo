@@ -158,3 +158,43 @@ def test_enricher_returns_input_when_no_findings():
     out = run_python_checks_with_findings(ri, TOURISM_TOUR_OPERATOR)
     enriched = enrich_with_llm(out.result, ri, findings=[])
     assert enriched is out.result
+
+
+def test_enricher_propagates_plain_ru_into_recommendation():
+    """plain_ru flows: tool_input → LLMRewrite → Recommendation merge."""
+    ri = _ri()
+    out = run_python_checks_with_findings(ri, TOURISM_TOUR_OPERATOR)
+    assert any(r.source_finding_id == "title_length" for r in out.result.recommendations)
+
+    plain = (
+        "После правки заголовок страницы станет короче и яснее — "
+        "посетитель сразу поймёт, о каком туре идёт речь. "
+        "Это повышает доверие в выдаче поисковика."
+    )
+    fake_tool_input = {
+        "rewrites": [{
+            "finding_id": "title_length",
+            "before_text": ri.title,
+            "after_text": "Тур на Рицу — цены и программа",
+            "reasoning_ru": "Сокращено до 30 символов, ключ в начале.",
+            "plain_ru": plain,
+        }],
+        "h2_drafts": [],
+        "link_proposals": [],
+        "detected_cargo_cult_schemas": [],
+    }
+    fake_usage = {
+        "cost_usd": 0.003,
+        "input_tokens": 800,
+        "output_tokens": 120,
+        "model": "claude-haiku-4-5-20251001",
+    }
+    with patch(
+        "app.core_audit.review.llm.runner.call_with_tool",
+        return_value=(fake_tool_input, fake_usage),
+        create=True,
+    ):
+        enriched = enrich_with_llm(out.result, ri, out.findings)
+
+    title_rec = next(r for r in enriched.recommendations if r.source_finding_id == "title_length")
+    assert title_rec.plain_ru == plain

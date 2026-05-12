@@ -43,6 +43,10 @@ def _parse_response(tool_input: dict[str, Any]) -> LLMEnrichment:
             before_text=r.get("before_text"),
             after_text=str(r.get("after_text", "")),
             reasoning_ru=str(r.get("reasoning_ru", "")),
+            # plain_ru is required by the tool schema but tolerated as
+            # optional here so a missing/empty field doesn't fail the
+            # whole rewrite — caller stores None and backfill fills later.
+            plain_ru=(str(r["plain_ru"]) if r.get("plain_ru") else None),
         )
         for r in (tool_input.get("rewrites") or [])
         if r.get("finding_id") and r.get("after_text")

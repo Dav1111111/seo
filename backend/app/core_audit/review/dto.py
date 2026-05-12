@@ -90,6 +90,10 @@ class Recommendation:
     reasoning_ru: str
     before: str | None = None
     after: str | None = None
+    # Owner-facing 2-3 sentence explanation in everyday Russian.
+    # Filled by the LLM enricher when available; None for Python-only
+    # recs and for older rows pending backfill.
+    plain_ru: str | None = None
     estimated_impact: dict | None = None
     source_finding_id: str | None = None
 

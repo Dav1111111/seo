@@ -22,6 +22,12 @@ SYSTEM_ENRICH = """\
 3. НИКОГДА не выдумывай факты: цены, адреса, телефоны, программу тура, время выезда, \
 имена гидов, № РТО, ИНН. Если факт не присутствует в <page_content> или <queries> — \
 не вставляй его. Вместо выдуманной цены пиши «[уточнить цену]» в after_text.
+3a. Для КАЖДОГО finding обязательно заполни plain_ru — 2-3 коротких предложения \
+на простом русском, без жаргона. Объясни: \
+1) что владелец увидит/получит после правки (без терминов Schema/JSON-LD/canonical/hreflang \
+— их парафразируй: «невидимый ярлык, объясняющий поисковику, что это»), \
+2) почему это важно для его клиентов/посетителей. \
+Не цитируй цифры, которых нет в данных. Без «улучшит позиции на 30%».
 4. link_proposals: используй ТОЛЬКО target_url из <link_candidates>. Любой URL вне списка \
 = провал задачи.
 5. Schema: для туров/экскурсий рекомендуй Product + Offer + AggregateRating. \
@@ -54,12 +60,16 @@ ENRICH_TOOL: dict = {
                 "description": "One entry per actionable finding the LLM chose to rewrite.",
                 "items": {
                     "type": "object",
-                    "required": ["finding_id", "after_text", "reasoning_ru"],
+                    "required": ["finding_id", "after_text", "reasoning_ru", "plain_ru"],
                     "properties": {
                         "finding_id": {"type": "string"},
                         "before_text": {"type": "string", "maxLength": 1000},
                         "after_text": {"type": "string", "maxLength": 1000},
                         "reasoning_ru": {"type": "string", "maxLength": 500},
+                        # plain_ru — owner-facing explanation in everyday
+                        # Russian. 2-3 sentences max; system prompt rule #3a
+                        # forbids jargon and unsubstantiated numbers.
+                        "plain_ru": {"type": "string", "maxLength": 600},
                     },
                 },
             },

@@ -64,6 +64,9 @@ import {
   Info,
   Brain,
   RefreshCw,
+  Sparkles,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { cn, getErrorMessage } from "@/lib/utils";
 
@@ -188,6 +191,97 @@ export default function StudioPageWorkspace() {
   // key = rec_id, value = label of the action we're firing
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  // plain_ru explain state. `explaining[recId] === true` while
+  // studioExplainRec is in flight (either auto-fired on load or via
+  // the per-card button). On success the response is merged into the
+  // SWR cache so the rest of the card re-renders without a refetch.
+  // We track auto-fired rec_ids in a ref so re-renders don't re-fire
+  // them — owners shouldn't see «Перевожу…» flicker repeatedly.
+  const [explaining, setExplaining] = useState<Record<string, boolean>>({});
+  const autoExplainedRef = useRef<Set<string>>(new Set());
+
+  // Run a fixed-concurrency pool over a queue of async tasks. We use
+  // it for auto-explain so 20 unexplained recs don't fan out 20 LLM
+  // calls at once. Cap=4 matches the «don't flood gpt» note.
+  async function runWithConcurrency<T>(
+    items: T[],
+    limit: number,
+    worker: (item: T) => Promise<void>,
+  ): Promise<void> {
+    let cursor = 0;
+    const lane = async () => {
+      while (cursor < items.length) {
+        const idx = cursor++;
+        await worker(items[idx]);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(limit, items.length) }, () => lane()),
+    );
+  }
+
+  // Fire studioExplainRec for one rec and patch the SWR cache so the
+  // card flips from «Объяснить простым языком» / spinner to the new
+  // plain_ru without a network round-trip. We deliberately avoid a
+  // full `mutate()` revalidate to keep the result snappy and not nuke
+  // any other in-flight optimistic state.
+  async function explainRec(recId: string) {
+    if (explaining[recId]) return;
+    setExplaining((m) => ({ ...m, [recId]: true }));
+    try {
+      const res = await api.studioExplainRec(recId);
+      await mutate(
+        (current) => {
+          if (!current?.review) return current;
+          return {
+            ...current,
+            review: {
+              ...current.review,
+              recommendations: current.review.recommendations.map((r) =>
+                r.rec_id === recId ? { ...r, plain_ru: res.plain_ru } : r,
+              ),
+            },
+          };
+        },
+        { revalidate: false },
+      );
+    } catch (e: unknown) {
+      // Quietly drop the failure — owner can retry via the manual
+      // button, and the headline error banner is reserved for
+      // user-initiated actions (apply / defer / dismiss).
+      console.warn("studioExplainRec failed", recId, getErrorMessage(e));
+    } finally {
+      setExplaining((m) => {
+        const next = { ...m };
+        delete next[recId];
+        return next;
+      });
+    }
+  }
+
+  // Auto-fire explain on load (and after the recs list changes) for
+  // any rec that still has plain_ru === null. We guard with
+  // autoExplainedRef so a re-render — e.g. after one of the explain
+  // calls finishes and mutates the cache — doesn't re-queue the same
+  // rec_id. Concurrency is capped to 4 to keep LLM fan-out modest.
+  const recsForExplain = data?.review?.recommendations;
+  useEffect(() => {
+    if (!recsForExplain) return;
+    const targets = recsForExplain
+      .filter((r) => !r.plain_ru)
+      .map((r) => r.rec_id)
+      .filter((id) => !autoExplainedRef.current.has(id));
+    if (targets.length === 0) return;
+    for (const id of targets) autoExplainedRef.current.add(id);
+    // Fire-and-forget — we do not block render on this.
+    void runWithConcurrency(targets, 4, (id) => explainRec(id));
+    // explainRec is a closure over setExplaining/mutate; those are
+    // stable enough for this effect's purpose. We intentionally key
+    // off recsForExplain only — adding explainRec would re-fire every
+    // render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recsForExplain]);
 
   async function onTriggerReview() {
     if (!siteId || !pageId || reviewPending) return;
@@ -689,9 +783,11 @@ export default function StudioPageWorkspace() {
               key={r.rec_id}
               rec={r}
               busy={busy[r.rec_id] || null}
+              explaining={!!explaining[r.rec_id]}
               onAction={(status) =>
                 changeRecStatus(r.rec_id, status, data.url)
               }
+              onExplain={() => explainRec(r.rec_id)}
             />
           ))}
         </div>
@@ -791,7 +887,9 @@ function PageSummary({ summary }: { summary: Record<string, unknown> }) {
 function RecCard({
   rec,
   busy,
+  explaining,
   onAction,
+  onExplain,
 }: {
   rec: {
     rec_id: string;
@@ -801,12 +899,25 @@ function RecCard({
     before_text: string | null;
     after_text: string | null;
     reasoning_ru: string;
+    plain_ru: string | null;
     priority_score: number | null;
   };
   busy: string | null;
+  // True while studioExplainRec is in flight for this rec — driven
+  // either by the auto-fire effect on page load or by the manual
+  // «Объяснить простым языком» button.
+  explaining: boolean;
   onAction: (s: "applied" | "deferred" | "dismissed") => void;
+  onExplain: () => void;
 }) {
   const ps = PRIORITY_STYLE[rec.priority] || PRIORITY_STYLE.medium;
+  // Technical details (raw reasoning_ru + before/after diff) are
+  // collapsed by default — owners read plain_ru, not these. The
+  // pre-plain_ru world rendered reasoning_ru as primary; we keep it
+  // accessible but demoted.
+  const [showDetails, setShowDetails] = useState(false);
+  const hasTechnicalDetails =
+    !!rec.reasoning_ru || !!rec.before_text || !!rec.after_text;
   return (
     <Card
       className={cn(
@@ -848,28 +959,76 @@ function RecCard({
           </span>
         </div>
 
-        <p className="text-sm leading-snug">{rec.reasoning_ru}</p>
+        {/* Primary owner-facing copy: plain_ru. Replaces the old
+            reasoning_ru-as-headline rendering. While we're translating
+            for the first time we show a muted progress line; if neither
+            plain_ru nor in-flight, owner can fire it manually. */}
+        {rec.plain_ru ? (
+          <p className="text-base font-medium leading-snug">{rec.plain_ru}</p>
+        ) : explaining ? (
+          <p className="text-sm text-muted-foreground italic inline-flex items-center gap-1.5">
+            <Sparkles className="h-3.5 w-3.5 animate-pulse" />
+            Перевожу на простой язык…
+          </p>
+        ) : (
+          <div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onExplain}
+              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+              Объяснить простым языком
+            </Button>
+          </div>
+        )}
 
-        {(rec.before_text || rec.after_text) && (
-          <div className="grid sm:grid-cols-2 gap-2 text-xs">
-            {rec.before_text && (
-              <div className="rounded-md border bg-red-50/40 border-red-200 p-2">
-                <div className="text-[10px] uppercase tracking-wide text-red-800/80 mb-1">
-                  Было
-                </div>
-                <div className="whitespace-pre-wrap break-words">
-                  {rec.before_text}
-                </div>
-              </div>
-            )}
-            {rec.after_text && (
-              <div className="rounded-md border bg-emerald-50/40 border-emerald-200 p-2">
-                <div className="text-[10px] uppercase tracking-wide text-emerald-800/80 mb-1">
-                  Предлагается
-                </div>
-                <div className="whitespace-pre-wrap break-words">
-                  {rec.after_text}
-                </div>
+        {hasTechnicalDetails && (
+          <div className="border-t pt-2">
+            <button
+              type="button"
+              onClick={() => setShowDetails((v) => !v)}
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              {showDetails ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              )}
+              Технические детали
+            </button>
+            {showDetails && (
+              <div className="mt-2 space-y-3">
+                {rec.reasoning_ru && (
+                  <p className="text-sm leading-snug text-muted-foreground">
+                    {rec.reasoning_ru}
+                  </p>
+                )}
+                {(rec.before_text || rec.after_text) && (
+                  <div className="grid sm:grid-cols-2 gap-2 text-xs">
+                    {rec.before_text && (
+                      <div className="rounded-md border bg-red-50/40 border-red-200 p-2">
+                        <div className="text-[10px] uppercase tracking-wide text-red-800/80 mb-1">
+                          Было
+                        </div>
+                        <div className="whitespace-pre-wrap break-words">
+                          {rec.before_text}
+                        </div>
+                      </div>
+                    )}
+                    {rec.after_text && (
+                      <div className="rounded-md border bg-emerald-50/40 border-emerald-200 p-2">
+                        <div className="text-[10px] uppercase tracking-wide text-emerald-800/80 mb-1">
+                          Предлагается
+                        </div>
+                        <div className="whitespace-pre-wrap break-words">
+                          {rec.after_text}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

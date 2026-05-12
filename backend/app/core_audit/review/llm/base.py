@@ -9,11 +9,18 @@ from app.core_audit.review.findings import CheckFinding
 
 @dataclass(frozen=True)
 class LLMRewrite:
-    """LLM-generated rewrite for a specific Python finding."""
+    """LLM-generated rewrite for a specific Python finding.
+
+    `plain_ru` is the owner-facing 2-3 sentence explanation in everyday
+    Russian. Optional at parse time so a malformed/older response that
+    omits it doesn't crash _parse_response — the merge step then leaves
+    plain_ru as None on the resulting Recommendation row.
+    """
     finding_id: str
     before_text: str | None
     after_text: str
     reasoning_ru: str
+    plain_ru: str | None = None
 
 
 @dataclass(frozen=True)

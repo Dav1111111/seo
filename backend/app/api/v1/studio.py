@@ -4154,4 +4154,98 @@ async def download_deep_extract_screenshot(
     return FileResponse(path, media_type="image/png")
 
 
+# ── Plain-Russian explanations for recommendations ────────────────────
+#
+# Owners click «Объясни мне по-человечески» on a rec; the backend runs
+# one cheap-tier LLM translation pass and stores the result on
+# `PageReviewRecommendation.plain_ru`. The column is filled lazily and
+# is cached forever — re-requests return the stored text with no LLM
+# call. See `app.core_audit.review.explain` for the LLM prompt and
+# `app.core_audit.review.backfill_plain_ru` for the one-shot historical
+# fill. The column is added by a sibling migration; this handler does
+# not depend on the migration being present at import time, only at
+# call time.
+
+
+class RecommendationExplainOut(BaseModel):
+    """Response of POST /admin/studio/recommendations/{rec_id}/explain.
+
+    `cached=True` means the rec already had `plain_ru` populated and
+    we returned it verbatim without spending an LLM token. `cost_usd`
+    is 0 in the cached path. The id is echoed so the frontend can
+    confidently splice the text back into the optimistic list state."""
+    id: uuid.UUID
+    plain_ru: str
+    cached: bool
+    cost_usd: float
+
+
+@router.post(
+    "/recommendations/{rec_id}/explain",
+    response_model=RecommendationExplainOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def explain_recommendation(
+    rec_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> RecommendationExplainOut:
+    """On-demand plain-Russian translation of a single recommendation.
+
+    Strict idempotency: if the rec already has a non-empty `plain_ru`,
+    we never call the LLM — the owner can hit this endpoint as often
+    as the UI allows without burning budget. The first hit dispatches
+    one cheap-tier call (Haiku / gpt-5.4-mini), persists the result,
+    and returns it.
+
+    404 when the rec id doesn't exist; 502 when the LLM returns an
+    empty string (network glitch, malformed tool_use response). The
+    second case explicitly does NOT write an empty `plain_ru` so a
+    retry will hit the LLM again instead of locking in the bad reply.
+    """
+    rec = await db.get(PageReviewRecommendation, rec_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="recommendation not found")
+
+    existing = (rec.plain_ru or "").strip()
+    if existing:
+        return RecommendationExplainOut(
+            id=rec.id,
+            plain_ru=existing,
+            cached=True,
+            cost_usd=0.0,
+        )
+
+    # The LLM SDK call is sync (see `llm_client.call_with_tool`'s docs
+    # — Anthropic/OpenAI SDKs both block). Same `anyio.to_thread`
+    # pattern as the deep-extract analyzer above (~line 4100).
+    import anyio
+    from app.core_audit.review.explain import translate_to_plain_ru
+
+    try:
+        plain_ru, usage = await anyio.to_thread.run_sync(
+            lambda: translate_to_plain_ru(rec),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM translation failed: {exc}",
+        ) from exc
+
+    if not plain_ru:
+        raise HTTPException(
+            status_code=502,
+            detail="LLM returned empty plain_ru",
+        )
+
+    rec.plain_ru = plain_ru
+    await db.commit()
+
+    return RecommendationExplainOut(
+        id=rec.id,
+        plain_ru=plain_ru,
+        cached=False,
+        cost_usd=float(usage.get("cost_usd") or 0.0),
+    )
+
+
 __all__ = ["router"]

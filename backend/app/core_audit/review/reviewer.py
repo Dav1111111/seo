@@ -325,6 +325,7 @@ class Reviewer:
                 before_text=rec.before,
                 after_text=rec.after,
                 reasoning_ru=rec.reasoning_ru,
+                plain_ru=rec.plain_ru,
                 estimated_impact=rec.estimated_impact,
                 user_status="pending",
             ))

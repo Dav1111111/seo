@@ -93,6 +93,10 @@ def _merge_recommendations(
             reasoning_ru=rw.reasoning_ru or original.reasoning_ru,
             before=original.before or rw.before_text,
             after=rw.after_text or original.after,
+            # plain_ru is the owner-facing explanation; prefer the new
+            # LLM-generated value, but don't blank out a previous one
+            # if the model occasionally omits it.
+            plain_ru=rw.plain_ru or original.plain_ru,
         ))
         consumed.add(rw.finding_id)
 

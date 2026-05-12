@@ -1047,6 +1047,11 @@ export const api = {
           before_text: string | null;
           after_text: string | null;
           reasoning_ru: string;
+          // plain_ru: owner-facing plain-language explanation of the
+          // recommendation. Null when not yet generated — the studio
+          // page workspace auto-fires studioExplainRec to fill it in,
+          // and also offers a manual «Объяснить простым языком» button.
+          plain_ru: string | null;
           priority_score: number | null;
           impact_score: number | null;
           confidence_score: number | null;
@@ -1110,6 +1115,23 @@ export const api = {
     apiDownload(`/studio/sites/${siteId}/recommendations/export`, {
       base: "admin",
     }),
+
+  // Generate (or fetch cached) owner-facing «plain language» explanation
+  // of a recommendation. Server contract: idempotent — if plain_ru is
+  // already persisted, returns it with cached=true and cost_usd=0.
+  // Otherwise calls the LLM, persists the result, and charges cost_usd.
+  // UI: studio /pages/[page_id] fires this automatically on load for
+  // any rec where plain_ru is null, and also exposes a manual button.
+  studioExplainRec: (recId: string) =>
+    apiFetch<{
+      id: string;
+      plain_ru: string;
+      cached: boolean;
+      cost_usd: number;
+    }>(
+      `/studio/recommendations/${recId}/explain`,
+      { method: "POST", base: "admin" },
+    ),
 
   // V2 etap 7 Phase C+D+E — free chat about whole site, persisted
   // in DB. Pass `conversation_id=null` to start a new thread; the

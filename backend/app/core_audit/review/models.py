@@ -105,6 +105,10 @@ class PageReviewRecommendation(Base, TimestampMixin):
     before_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     after_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     reasoning_ru: Mapped[str] = mapped_column(Text, nullable=False)
+    # plain_ru — owner-facing 2-3 sentence explanation in everyday Russian.
+    # Sits alongside the technical reasoning_ru; nullable because rows
+    # written before the LLM produced it are backfilled out-of-band.
+    plain_ru: Mapped[str | None] = mapped_column(Text, nullable=True)
     estimated_impact: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     user_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
