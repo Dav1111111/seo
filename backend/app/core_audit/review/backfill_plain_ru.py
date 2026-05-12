@@ -25,7 +25,7 @@ import sys
 import uuid
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core_audit.review.explain import translate_to_plain_ru
@@ -69,7 +69,18 @@ async def backfill_recommendations(
     ``errors`` (list of ``{rec_id, error}`` dicts). The endpoint and
     the CLI both print this dict.
     """
-    stmt = select(PageReviewRecommendation).where(
+    # Read as plain tuples — NOT as ORM rows. With ORM rows + asyncpg
+    # the framework lazy-touches the row on first attribute access
+    # after the loop yielded once (any `await` resets the row state),
+    # which raises MissingGreenlet on subsequent iterations. Plain
+    # tuples are detached values — safe to pass to worker threads.
+    stmt = select(
+        PageReviewRecommendation.id,
+        PageReviewRecommendation.category,
+        PageReviewRecommendation.reasoning_ru,
+        PageReviewRecommendation.before_text,
+        PageReviewRecommendation.after_text,
+    ).where(
         or_(
             PageReviewRecommendation.plain_ru.is_(None),
             PageReviewRecommendation.plain_ru == "",
@@ -79,25 +90,20 @@ async def backfill_recommendations(
         stmt = stmt.where(PageReviewRecommendation.site_id == site_id)
     stmt = stmt.limit(limit)
 
-    rows = (await db.execute(stmt)).scalars().all()
+    rows = (await db.execute(stmt)).all()  # list[Row(id, cat, …)]
 
     processed = 0
     total_cost = 0.0
     errors: list[dict[str, Any]] = []
 
-    for rec in rows:
+    for rec_id, category, reasoning_ru, before_text, after_text in rows:
         try:
-            # Pre-extract the four fields the LLM needs as plain strings
-            # BEFORE handing off to the worker thread — async-engine
-            # attribute access from a non-event-loop thread raises
-            # MissingGreenlet. Plain dict is safe to cross thread boundary.
             payload = {
-                "category": rec.category,
-                "reasoning_ru": rec.reasoning_ru,
-                "before_text": rec.before_text,
-                "after_text": rec.after_text,
+                "category": category,
+                "reasoning_ru": reasoning_ru,
+                "before_text": before_text,
+                "after_text": after_text,
             }
-            rec_id = rec.id  # capture for logging without re-touching ORM
             # `translate_to_plain_ru` is sync (the underlying
             # Anthropic / OpenAI SDK calls are blocking). Run it in a
             # worker thread so we don't park the event loop.
@@ -112,7 +118,13 @@ async def backfill_recommendations(
                     "error": "empty plain_ru returned by LLM",
                 })
                 continue
-            rec.plain_ru = plain_ru
+            # Targeted UPDATE — no ORM row to expire, no lazy-load
+            # surprises. Idempotent: re-running on the same id is OK.
+            await db.execute(
+                update(PageReviewRecommendation)
+                .where(PageReviewRecommendation.id == rec_id)
+                .values(plain_ru=plain_ru)
+            )
             await db.commit()
             processed += 1
             total_cost += float(usage.get("cost_usd") or 0.0)
