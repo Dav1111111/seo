@@ -29,6 +29,7 @@ import { fmtAge, pluralRu } from "@/lib/format";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { FocusPill } from "@/components/studio/focus-pill";
 import {
   FileText,
   ArrowLeft,
@@ -56,15 +57,24 @@ function shortPath(p: string): string {
 export default function StudioPagesIndex() {
   const { currentSite, loading: siteLoading } = useSite();
   const siteId = currentSite?.id || "";
-  const [sort, setSort] = useState<SortMode>("recent_review");
+  // `sort === null` ⇒ default to focus-first when a focus is set,
+  // otherwise the backend's existing "recent_review" ordering wins.
+  const [sort, setSort] = useState<SortMode | null>(null);
+  const effectiveSort: SortMode = sort ?? "recent_review";
 
   const { data, isLoading, error } = useSWR(
-    siteId ? studioKey("pages_list", siteId, sort) : null,
-    () => api.studioListPages(siteId, sort, 200),
+    siteId ? studioKey("pages_list", siteId, effectiveSort) : null,
+    () => api.studioListPages(siteId, effectiveSort, 200),
   );
   const { data: searchOnly } = useSWR(
     siteId ? studioKey("pages_search_only", siteId) : null,
     () => api.studioGetIndexationUrls(siteId, "only_in_search", 50),
+  );
+
+  // Strategic focus — banner header + default focus-first ordering.
+  const { data: focus } = useSWR(
+    siteId ? studioKey("strategic_focus", siteId) : null,
+    () => api.studioGetStrategicFocus(siteId),
   );
 
   if (siteLoading) {
@@ -122,6 +132,22 @@ export default function StudioPagesIndex() {
             : "загружаю…"}
         </p>
       </div>
+
+      {/* Strategic-focus banner — shown only when a focus is set AND
+          at least one returned page lands in the focus zone. */}
+      {focus && (data?.items.some((p) => p.in_focus) ?? false) && (
+        <div
+          className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-sm flex items-start gap-2"
+          title="Управление фокусом — /studio/profile"
+        >
+          <span className="font-medium text-primary whitespace-nowrap">
+            Сейчас в фокусе:
+          </span>
+          <span className="flex-1">
+            {focus.label}. Не в фокусе — серым.
+          </span>
+        </div>
+      )}
 
       {/* Sort */}
       <div className="flex items-center gap-1 text-sm flex-wrap">
@@ -218,19 +244,30 @@ export default function StudioPagesIndex() {
       {/* List */}
       {data && data.total > 0 && (
         <div className="space-y-2">
-          {data.items.map((p) => (
+          {(sort === null
+            ? [...data.items].sort(
+                (a, b) => Number(!!b.in_focus) - Number(!!a.in_focus),
+              )
+            : data.items
+          ).map((p) => (
             <Link
               key={p.page_id}
               href={`/studio/pages/${p.page_id}`}
               className="block"
             >
-              <Card className="hover:border-primary/50 transition-colors">
+              <Card
+                className={cn(
+                  "hover:border-primary/50 transition-colors",
+                  focus && !p.in_focus && "opacity-60",
+                )}
+              >
                 <CardContent className="py-3 flex items-center gap-3">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium truncate">
                         {p.title || shortPath(p.path)}
                       </span>
+                      <FocusPill in_focus={p.in_focus} />
                       {p.in_yandex_index === false && (
                         <Badge
                           variant="outline"

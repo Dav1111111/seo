@@ -349,16 +349,32 @@ export default function StudioIndexationPage() {
         !isRunning &&
         data?.status !== "failed" && (
           <>
-            {/* Big number summary */}
+            {/* Big number summary — single source of truth is the live
+                count of Webmaster-confirmed indexed pages. Search API
+                count is shown only when it disagrees (event-based reads
+                can lag hours/days). */}
             <Card>
               <CardContent className="pt-6 flex items-baseline gap-4 flex-wrap">
                 <div>
                   <div className="text-4xl font-semibold">
-                    {data?.pages_found ?? 0}
+                    {data?.pages_in_index_live ?? 0}
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">
                     страниц в индексе Яндекса
                   </div>
+                  <div className="text-[11px] text-muted-foreground/80 mt-0.5">
+                    источник: Webmaster URL-probes
+                  </div>
+                  {typeof data?.pages_in_index_searchapi === "number" &&
+                    data.pages_in_index_searchapi !==
+                      (data?.pages_in_index_live ?? 0) && (
+                      <div className="text-xs text-muted-foreground mt-2">
+                        по проверке Search API:{" "}
+                        <span className="font-medium tabular-nums">
+                          {data.pages_in_index_searchapi}
+                        </span>
+                      </div>
+                    )}
                 </div>
                 <div className="ml-auto text-right">
                   <div className="text-xs text-muted-foreground">

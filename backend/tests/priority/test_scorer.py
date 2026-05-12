@@ -109,6 +109,17 @@ def test_schema_above_floor_survives():
     assert result is not None
 
 
+def _has_seasonal_note(notes: tuple[str, ...]) -> bool:
+    """Either the legacy `seasonal_boost` (regex fallback path) or
+    one of the new `season:{kind}` notes from the summer/winter
+    classifier counts as seasonal. Tests should not care which
+    path triggered, only that the boost was applied."""
+    return any(
+        n == "seasonal_boost" or n.startswith("season:")
+        for n in notes
+    )
+
+
 def test_seasonal_boost_in_april():
     # April + seasonal query → boost
     april = score_recommendation(_ctx(
@@ -119,8 +130,8 @@ def test_seasonal_boost_in_april():
         today=date(2026, 1, 17),
         top_query="пляжный отдых летом 2026",
     ))
-    assert "seasonal_boost" in april.notes
-    assert "seasonal_boost" not in january.notes
+    assert _has_seasonal_note(april.notes)
+    assert not _has_seasonal_note(january.notes)
     assert april.priority_score > january.priority_score
 
 
@@ -130,7 +141,7 @@ def test_seasonal_skip_for_non_seasonal_query():
         today=date(2026, 4, 17),
         top_query="виза в турцию",                # no seasonal keywords
     ))
-    assert "seasonal_boost" not in s.notes
+    assert not _has_seasonal_note(s.notes)
 
 
 def test_deferred_halves_score():

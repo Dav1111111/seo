@@ -44,7 +44,7 @@ class SearchVisibilityAgent(BaseAgent):
 Дата: {context.analysis_date}
 
 ЧТО ИЩЕШЬ В ДАННЫХ:
-1. Люди стали реже видеть сайт в поиске (показы упали больше чем на 30%)
+1. Люди стали реже видеть сайт в поиске (показы существенно упали)
 2. Люди видят сайт, но не кликают (мало кликов при хорошей позиции)
 3. Есть запросы где сайт показывается, но ни одного клика — значит описание в поиске не привлекает
 4. Есть запросы где сайт близко к первой странице — можно дотянуть и получить трафик
@@ -60,6 +60,7 @@ class SearchVisibilityAgent(BaseAgent):
 - Мелкие колебания позиций на 1-2 пункта — это нормально
 
 Используй confidence 0.8+ только при чётких доказательствах.
+Если сомневаешься — ставь 0.5, не 0.7. Лучше скромный confidence, чем выдуманная уверенность.
 Выводи через report_issues. ВСЁ ПРОСТЫМ РУССКИМ ЯЗЫКОМ."""
 
     async def load_data(self, db: AsyncSession, context: AgentContext) -> dict:
@@ -146,6 +147,24 @@ class SearchVisibilityAgent(BaseAgent):
             imp_change = round((curr_imp - prev_imp) / max(prev_imp, 1) * 100, 1) if prev_imp else None
             clk_change = round((curr_clk - prev_clk) / max(prev_clk, 1) * 100, 1) if prev_clk else None
 
+            # Python-side qualitative CTR flag — keep raw benchmark numbers
+            # out of the prompt so they cannot leak as fabricated facts.
+            ctr_flag = "—"
+            try:
+                pos_int = int(round(curr_pos))
+                if 1 <= pos_int <= 10:
+                    expected_frac = EXPECTED_CTR.get(pos_int)
+                    if expected_frac:
+                        actual_frac = (curr_ctr or 0) / 100.0
+                        if actual_frac < expected_frac * 0.6:
+                            ctr_flag = "CTR заметно ниже среднего по позиции"
+                        elif actual_frac < expected_frac:
+                            ctr_flag = "CTR ниже среднего по позиции"
+                        else:
+                            ctr_flag = "CTR в норме"
+            except (TypeError, ValueError):
+                pass
+
             rows.append({
                 "query": query,
                 "curr_imp": curr_imp,
@@ -158,23 +177,30 @@ class SearchVisibilityAgent(BaseAgent):
                 "imp_change": imp_change,
                 "clk_change": clk_change,
                 "days": int(c.get("days_count") or 0),
+                "ctr_flag": ctr_flag,
             })
 
         # Sort by impression for context, but put biggest drops first
         rows.sort(key=lambda r: r["curr_imp"], reverse=True)
+
+        # Update header to include the new qualitative column.
+        lines[-1] = (
+            "query | curr_impressions | curr_clicks | curr_ctr% | curr_position | "
+            "prev_impressions | prev_clicks | prev_position | impression_change% | click_change% | ctr_flag"
+        )
 
         for r in rows[:100]:  # cap at 100 rows for token budget
             lines.append(
                 f"{r['query']} | {r['curr_imp']} | {r['curr_clk']} | "
                 f"{r['curr_ctr']}% | {r['curr_pos']} | "
                 f"{r['prev_imp']} | {r['prev_clk']} | {r['prev_pos']} | "
-                f"{r['imp_change']}% | {r['clk_change']}% | days={r['days']}"
+                f"{r['imp_change']}% | {r['clk_change']}% | days={r['days']} | {r['ctr_flag']}"
             )
 
         lines += [
             "",
-            "EXPECTED CTR BY POSITION (benchmark):",
-            ", ".join(f"pos{k}={v*100:.0f}%" for k, v in EXPECTED_CTR.items()),
+            "Колонка ctr_flag посчитана в Python: ориентируйся на неё, не цитируй конкретных процентов "
+            "CTR в качестве «нормы» — у соседних сайтов на этой позиции CTR обычно выше, точную цифру по этому сайту мы не измеряли.",
             "",
             "Analyse the above and call report_issues with all findings.",
         ]

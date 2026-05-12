@@ -117,10 +117,13 @@ def score_recommendation(ctx: ScorerContext) -> ScoreBreakdown | None:
     # Seasonality boost — applied post-composition (transparent in notes).
     # Pre-season window gets a higher boost than peak season because
     # preparation work compounds (Yandex re-ranks gradually over weeks).
+    # When the new summer/winter classifier matches we record only the
+    # specific kind (`season:{kind}`) — the legacy `seasonal_boost`
+    # note is reserved for the regex-only fallback below so the two
+    # paths stay distinguishable in logs and tests.
     season_kind, season_boost = _seasonal_classification(ctx)
     if season_kind:
         score = min(100.0, score * (1.0 + season_boost))
-        notes.append("seasonal_boost")  # backward compat — existing tests
         notes.append(f"season:{season_kind}")
     elif _seasonal_match(ctx):
         # Legacy path for any non-summer/winter pattern hit by the

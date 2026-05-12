@@ -61,17 +61,41 @@ const SEV_DOT: Record<string, string> = {
   low: "bg-emerald-500",
 };
 
-function formatAge(iso: string): string {
+// Pick the OLDEST of the three data-source anchors — that's the
+// real "as of when" of the plan. `computed_at` is just the moment
+// the SQL ran, which is always "now" and misleading. Returns the
+// ISO timestamp plus how stale it is in days (rounded down).
+function oldestDataAnchor(
+  webmaster: string | null,
+  wordstat: string | null,
+  crawl: string | null,
+): { iso: string; ageDays: number } | null {
+  const isos = [webmaster, wordstat, crawl].filter(
+    (x): x is string => typeof x === "string" && x.length > 0,
+  );
+  if (isos.length === 0) return null;
+  let oldestMs = Number.POSITIVE_INFINITY;
+  let oldestIso = "";
+  for (const iso of isos) {
+    const ms = new Date(iso).getTime();
+    if (!Number.isFinite(ms)) continue;
+    if (ms < oldestMs) {
+      oldestMs = ms;
+      oldestIso = iso;
+    }
+  }
+  if (!oldestIso) return null;
+  const ageDays = Math.floor((Date.now() - oldestMs) / (1000 * 60 * 60 * 24));
+  return { iso: oldestIso, ageDays };
+}
+
+function formatDataAnchor(iso: string): string {
   try {
-    const diff = Date.now() - new Date(iso).getTime();
-    const sec = Math.round(diff / 1000);
-    if (sec < 60) return "только что";
-    const min = Math.round(sec / 60);
-    if (min < 60) return `${min} мин назад`;
-    const hr = Math.round(min / 60);
-    if (hr < 24) return `${hr} ч назад`;
-    const days = Math.round(hr / 24);
-    return `${days} дн назад`;
+    return new Date(iso).toLocaleDateString("ru-RU", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
   } catch {
     return iso;
   }
@@ -148,10 +172,45 @@ export function BrainPlanCard() {
               нажать. Без воды.
             </p>
           </div>
-          <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            обновлено {formatAge(data.computed_at)}
-          </span>
+          {(() => {
+            // Data-freshness badge — anchored to the OLDEST of the
+            // three source pulls. `computed_at` is when the SQL ran
+            // (always "now"); it hides the fact that underlying data
+            // can be 2 weeks stale. >7 days old → yellow warning.
+            const anchor = oldestDataAnchor(
+              data.last_webmaster_at ?? null,
+              data.last_wordstat_at ?? null,
+              data.last_crawl_at ?? null,
+            );
+            if (!anchor) {
+              return (
+                <span className="text-xs text-muted-foreground inline-flex items-center gap-1">
+                  <Clock className="h-3 w-3" />
+                  данные ещё не собирались
+                </span>
+              );
+            }
+            const stale = anchor.ageDays >= 7;
+            return (
+              <span
+                className={cn(
+                  "text-xs inline-flex items-center gap-1 rounded-md px-2 py-0.5",
+                  stale
+                    ? "border border-amber-300 bg-amber-50 text-amber-900"
+                    : "text-muted-foreground",
+                )}
+                title={`webmaster: ${data.last_webmaster_at ?? "—"}\nwordstat: ${data.last_wordstat_at ?? "—"}\ncrawl: ${data.last_crawl_at ?? "—"}`}
+              >
+                <Clock className="h-3 w-3" />
+                данные собраны: {formatDataAnchor(anchor.iso)}
+                {stale && (
+                  <span className="ml-1 font-medium">
+                    · пора пересобрать данные
+                  </span>
+                )}
+              </span>
+            );
+          })()}
         </div>
 
         {noActions ? (

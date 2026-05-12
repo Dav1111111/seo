@@ -273,8 +273,23 @@ class TaskGeneratorAgent:
         """Small LLM call for meta_rewrite: query + site → title/description/H1."""
         site_context = self._describe_site(site)
         current_year = date.today().year
-        expected_ctr = EXPECTED_CTR.get(int(opp["position"]), 0.02) * 100
+        # CTR delta is computed Python-side; the prompt receives a qualitative
+        # description, not raw expected-CTR percentages.
         actual_ctr = (opp["clicks"] / max(opp["impressions"], 1) * 100) if opp["impressions"] else 0
+        expected_ctr_frac = EXPECTED_CTR.get(int(opp["position"]), 0.02)
+        actual_ctr_frac = (opp["clicks"] / max(opp["impressions"], 1)) if opp["impressions"] else 0
+        if actual_ctr_frac < expected_ctr_frac * 0.6:
+            ctr_note = (
+                "у соседних сайтов в твоей нише CTR на этой позиции выше — "
+                "точную цифру по тебе пока не измеряли, но описание в поиске явно слабое"
+            )
+        elif actual_ctr_frac < expected_ctr_frac:
+            ctr_note = (
+                "CTR ниже среднего по нише на этой позиции; точную цифру по тебе пока "
+                "не измеряли, описание можно усилить"
+            )
+        else:
+            ctr_note = "CTR в пределах нормы для этой позиции"
 
         system = f"""Ты SEO-копирайтер для российского туристического рынка с опытом 10+ лет.
 Пишешь meta-теги ПОД ЯНДЕКС (не Google — правила отличаются).
@@ -285,7 +300,7 @@ class TaskGeneratorAgent:
 1. Ключевой запрос в первых 30 символах (Яндекс учитывает левое вхождение)
 2. Город/регион ОБЯЗАТЕЛЬНО (Сочи / Абхазия / Красная Поляна / Адлер)
 3. Год {current_year} для коммерческих запросов (туры, экскурсии, цены)
-4. Цена "от X₽" если есть конкретная цифра
+4. Цена "от X₽" — ТОЛЬКО если она уже есть в текущем title/description. Если цены нет — пиши `[уточнить цену]`, не выдумывай число.
 5. Один триггер: "с гидом" / "без очередей" / "с трансфером" / "ежедневно"
 6. Разделитель — "|" или "—", НЕ дефис
 7. ЗАПРЕТ: CAPS, "!", эмодзи, слова "лучший/уникальный/незабываемый" без конкретики
@@ -293,14 +308,14 @@ class TaskGeneratorAgent:
 ТРЕБОВАНИЯ К DESCRIPTION (140-160 символов):
 1. Первые 100 символов — главный оффер (обрезается на мобильных)
 2. Структура: [что] + [где] + [цена/длительность] + [УТП] + [CTA]
-3. УТП конкретное: "трансфер от отеля", "группа до 8 чел", "работаем с 2014"
+3. УТП конкретное: бери только то, что подтверждено описанием сайта (трансфер / размер группы / год основания). Не выдумывай.
 4. CTA в императиве: "Забронируйте", "Выберите дату", "Посмотрите программу"
-5. Цифры: "3 водопада", "8 часов", "от 2500₽"
+5. Цифры — только если они уже есть в исходных данных страницы. Иначе ставь `[уточнить]`.
 
 ТРЕБОВАНИЯ К H1:
 1. НЕ дублирует title дословно (Яндекс считает переспамом)
 2. На 10-20 символов длиннее title, описательнее
-3. Один раз основной ключ + LSI-синоним (экскурсия/тур/поездка)
+3. Один раз основной ключ + синоним основного слова (экскурсия/тур/поездка)
 4. Без года и цены
 
 ПРАВИЛО АНТИ-ГАЛЛЮЦИНАЦИИ: пиши только услуги из описания сайта."""
@@ -308,12 +323,13 @@ class TaskGeneratorAgent:
         user_msg = f"""Запрос: "{opp['query']}"
 Кластер: {opp.get('cluster') or '—'}
 Позиция в Яндексе: {opp['position']:.1f}
-Показов за 14 дней: {opp['impressions']} | Кликов: {opp['clicks']} | CTR: {actual_ctr:.1f}% (ожидается на поз.{int(opp['position'])}: {expected_ctr:.0f}%)
+Показов за 14 дней: {opp['impressions']} | Кликов: {opp['clicks']} | CTR (по тебе): {actual_ctr:.1f}%
+Контекст по CTR: {ctr_note}
 
 Текущий title: "{opp.get('current_title') or '(страница не найдена)'}"
 Текущий description: "{opp.get('current_description') or '(пусто)'}"
 
-ЗАДАЧА: Перепиши так, чтобы поднять позицию в топ-5 и CTR минимум до ожидаемого.
+ЗАДАЧА: Перепиши так, чтобы поднять позицию в топ-5 и улучшить описание в поиске.
 Вызови generate_meta."""
         try:
             raw, usage = call_with_tool(
@@ -402,17 +418,20 @@ H1: {opp.get('page_h1') or '—'}
 ОБЯЗАТЕЛЬНЫЕ ТЕМЫ (минимум 4 из 6):
 - Цена (что входит/не входит)
 - Логистика (откуда забирают, длительность, возврат)
-- Документы (паспорт, для Абхазии — внутренний или загран)
+- Документы — общая тема, без выдуманных требований
 - Для кого подходит (дети, пожилые, физподготовка)
 - Что взять с собой
 - Отмена и возврат денег
 
 ФОРМАТ ОТВЕТОВ (30-60 слов каждый):
-1. ПЕРВОЕ предложение — прямой ответ (Да / Нет / Стоимость X₽ / Длится N часов)
-2. Конкретные цифры, не "обычно" и "в большинстве случаев"
+1. ПЕРВОЕ предложение — прямой ответ (Да / Нет / краткий факт). Числа (цена, длительность) — только если они есть в исходных данных страницы. Иначе формулируй мягко: "уточните на сайте/по телефону".
+2. Конкретные цифры — только если они подтверждены данными страницы.
 3. Без воды: не пиши "мы стараемся", "как правило"
 
-ПРАВИЛО: основано на услугах из описания сайта, не выдумывай."""
+ПРАВИЛО АНТИ-ГАЛЛЮЦИНАЦИИ:
+- Основано на услугах из описания сайта, не выдумывай.
+- Не выдумывай документные требования (виза, паспорт, страховка), если их нет в контенте страницы; пиши «уточните на нашем сайте/по телефону».
+- Не выдумывай конкретные цены, время выезда, размер группы, если этих данных нет."""
         user_msg = f"""Страница: {opp['page_url']}
 Тема: {opp.get('page_topic', opp.get('page_title', ''))}
 
@@ -530,32 +549,45 @@ H1: {opp.get('page_h1') or '—'}
         }
 
     def _describe_site(self, site: Site) -> str:
-        """Build a concise site description for LLM context."""
+        """Build a concise site description for LLM context.
+
+        Reads facts from Site.target_config / Site.understanding rather than
+        hardcoding business details (prices, office address, founding year),
+        which would otherwise leak as fabricated facts into every prompt.
+        """
         domain = site.domain
         display = site.display_name or domain
 
-        # Hardcoded descriptions for known sites (manually curated context)
-        known = {
-            "xn----jtbbjdhsdbbg3ce9iub.xn--p1ai": (
-                "Южный Континент — экскурсионное бюро в Сочи с 2014 года. "
-                "Проводит экскурсии и туры: Красная Поляна, 33 водопада, Абхазия (Золотое кольцо, Рица, Гагра, Новый Афон), "
-                "морские прогулки, джиппинг, Ведьмино ущелье, VIP-туры. Цены 700-5000₽. "
-                "Группы от 6 до 50 человек. Бесплатный трансфер из отелей Сочи."
-            ),
-            "grandtourspirit.ru": (
-                "Grand Tour Spirit (GTS) — премиальный клуб активного отдыха в Сочи. "
-                "Флагман — багги-экспедиции по Абхазии (маршруты 1-5 дней): урочище Гизла, Кушонский перевал, "
-                "Ауадхара (альпийские луга), Сухум-Кодор, Кисловодск-Архыз, Крым. "
-                "Также яхты, вертолёты, консьерж-сервис, VIP-трансферы, мероприятия. "
-                "Цены экспедиций 24 900 - 359 900₽. Офис в Олимпийском парке."
-            ),
-        }
+        target_config = getattr(site, "target_config", None) or {}
+        understanding = getattr(site, "understanding", None) or {}
 
-        if domain in known:
-            return known[domain]
+        # Prefer an owner-confirmed narrative if one exists.
+        narrative = (
+            (target_config.get("narrative_ru") if isinstance(target_config, dict) else None)
+            or (understanding.get("narrative_ru") if isinstance(understanding, dict) else None)
+        )
+        if isinstance(narrative, str) and narrative.strip():
+            return narrative.strip()
 
-        # Fallback: generic
-        return f"{display} ({domain}) — туристический сайт в России."
+        # Otherwise build a minimal template from declared services / regions.
+        services_list: list[str] = []
+        regions_list: list[str] = []
+        if isinstance(target_config, dict):
+            raw_services = target_config.get("services") or target_config.get("products") or []
+            raw_regions = target_config.get("regions") or target_config.get("geo") or []
+            if isinstance(raw_services, list):
+                services_list = [str(s).strip() for s in raw_services if str(s).strip()]
+            if isinstance(raw_regions, list):
+                regions_list = [str(r).strip() for r in raw_regions if str(r).strip()]
+
+        parts: list[str] = [f"сайт {display} ({domain})"]
+        if services_list:
+            parts.append("услуги: " + ", ".join(services_list[:6]))
+        if regions_list:
+            parts.append("регионы: " + ", ".join(regions_list[:6]))
+        if len(parts) == 1:
+            parts.append("туристический сайт в России")
+        return ". ".join(parts) + "."
 
     def _build_task_base(self, opp: dict) -> dict:
         """Build Task fields from opportunity data."""
@@ -595,7 +627,8 @@ H1: {opp.get('page_h1') or '—'}
             base["title"] = f"Добавить Schema.org ({schema_type}) на {opp['page_url'].split('/')[-1] or '/'}"
             base["description"] = (
                 f"На странице нет структурированной разметки. Добавьте JSON-LD с типом {schema_type} "
-                f"— Яндекс сможет показывать цены/рейтинг в выдаче (rich snippet) = +30% CTR. "
+                f"— Яндекс сможет показывать цены/рейтинг в выдаче (rich snippet). "
+                f"Обычно повышает кликабельность; величину покажем после замера через 14 дней. "
                 f"Готовый код прилагается."
             )
         elif t == "faq_add":

@@ -94,7 +94,11 @@ def find_matched_url(
     for doc in docs:
         d = (doc.domain or "").lower().strip()
         d = d.removeprefix("www.")
-        if d == norm_domain or d.endswith("." + norm_domain) or norm_domain.endswith("." + d):
+        # Only accept exact match or subdomain-of-our-domain. The reverse
+        # branch `norm_domain.endswith("." + d)` admitted any SerpDoc with
+        # `domain="ru"` as ours, because "grandtourspirit.ru".endswith(".ru")
+        # is True — we never own a parent of our own domain.
+        if d == norm_domain or d.endswith("." + norm_domain):
             return MatchedPageInfo(
                 url=doc.url,
                 position=doc.position,
@@ -128,20 +132,27 @@ SYSTEM_PROMPT = """\
   без общих фраз про «нерелевантный контент».
 
   fix_title — новая формулировка title (или null если title не
-  проблема). Должен явно содержать продукт + регион + туристический
-  контекст. Длина 50-65 символов.
+  проблема). Должен явно содержать продукт + туристический контекст.
+  Регион указывай ТОЛЬКО если он встречается в `narrative_ru` бизнеса
+  или в `services`/`geo_primary` — иначе пиши `[укажи регион]` как
+  плейсхолдер (по аналогии с `[уточнить цену]` в стандартных правилах
+  переписывания). Длина 50-65 символов.
 
-  fix_h1 — новый H1 (или null). Менее формальный чем title.
+  fix_h1 — новый H1 (или null). Менее формальный чем title. То же
+  правило с регионом: только из профиля или плейсхолдер.
 
-  fix_meta_description — новый meta description (или null).
+  fix_meta_description — новый meta description (или null). Регион
+  только из профиля или плейсхолдер.
 
   fix_content_change_ru — что переписать в самом тексте страницы.
   Конкретно: «убрать абзац про X», «добавить упоминание Y»,
   «переименовать раздел Z». Не «улучшить контент» — не помогает.
 
   schema_recommendation — какую schema.org разметку добавить (или
-  null если не нужно). Например «Schema TouristTrip с явным
-  destination=Абхазия».
+  null если не нужно). Для туров/экскурсий рекомендуй
+  «Product + Offer + AggregateRating». НЕ рекомендуй TouristTrip,
+  TouristAttraction, TouristDestination, Event, TravelAction — Яндекс
+  их игнорирует и в rich snippets не показывает.
 
   noindex_recommended — true ТОЛЬКО если страница вообще не нужна
   на сайте (служебная, технический мусор, дубль). Иначе false.
@@ -171,15 +182,26 @@ DIAGNOSE_TOOL = {
             },
             "fix_title": {
                 "type": ["string", "null"],
-                "description": "Новый title 50-65 символов или null",
+                "description": (
+                    "Новый title 50-65 символов или null. Регион "
+                    "указывай ТОЛЬКО если он встречается в профиле "
+                    "бизнеса (narrative_ru / services / geo); иначе "
+                    "используй плейсхолдер `[укажи регион]`."
+                ),
             },
             "fix_h1": {
                 "type": ["string", "null"],
-                "description": "Новый H1 или null",
+                "description": (
+                    "Новый H1 или null. Регион только из профиля или "
+                    "плейсхолдер `[укажи регион]`."
+                ),
             },
             "fix_meta_description": {
                 "type": ["string", "null"],
-                "description": "Новый meta description или null",
+                "description": (
+                    "Новый meta description или null. Регион только "
+                    "из профиля или плейсхолдер `[укажи регион]`."
+                ),
             },
             "fix_content_change_ru": {
                 "type": ["string", "null"],
@@ -187,7 +209,13 @@ DIAGNOSE_TOOL = {
             },
             "schema_recommendation": {
                 "type": ["string", "null"],
-                "description": "Какую schema.org разметку добавить",
+                "description": (
+                    "Какую schema.org разметку добавить. Для туров/"
+                    "экскурсий рекомендуй Product + Offer + "
+                    "AggregateRating. НЕ рекомендуй TouristTrip/"
+                    "TouristAttraction/TouristDestination/Event/"
+                    "TravelAction — Яндекс их игнорирует."
+                ),
             },
             "noindex_recommended": {
                 "type": "boolean",

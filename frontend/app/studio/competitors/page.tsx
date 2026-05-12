@@ -55,6 +55,52 @@ import {
 } from "lucide-react";
 import { cn, getErrorMessage } from "@/lib/utils";
 import { CompetitorDeepExtractSection } from "@/components/studio/competitor-deep-extract-section";
+import { FocusPill } from "@/components/studio/focus-pill";
+
+// Build focus-token list from the active StudioStrategicFocus. Mirrors
+// the backend helper in studio.py (_focus_tokens_for_site): lowercased,
+// deduped, longest tokens first so «крым» doesn't accidentally match
+// when focus is «крымская экспедиция». Empty list ⇒ everything is
+// treated as out-of-focus and no pills render.
+function buildFocusTokens(
+  focus:
+    | {
+        products: string[];
+        regions: string[];
+        query_signals: string[];
+      }
+    | null
+    | undefined,
+): string[] {
+  if (!focus) return [];
+  const raw: string[] = [];
+  for (const arr of [
+    focus.products,
+    focus.regions,
+    focus.query_signals,
+  ]) {
+    for (const item of arr ?? []) {
+      const s = (item || "").trim().toLowerCase();
+      if (s) raw.push(s);
+    }
+  }
+  raw.sort((a, b) => b.length - a.length);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of raw) {
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+function textInFocus(text: string | null | undefined, tokens: string[]): boolean {
+  if (!tokens.length || !text) return false;
+  const h = text.trim().toLowerCase();
+  if (!h) return false;
+  return tokens.some((t) => h.includes(t));
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -123,6 +169,15 @@ export default function StudioCompetitorsPage() {
       refreshInterval: () => (busy !== null ? 4000 : 0),
     },
   );
+
+  // Strategic focus — drives the banner + default focus-first sort.
+  // No backend `in_focus` field on these endpoints; computed locally
+  // from focus tokens against each item's identifying text.
+  const { data: focus } = useSWR(
+    siteId ? studioKey("strategic_focus", siteId) : null,
+    () => api.studioGetStrategicFocus(siteId),
+  );
+  const focusTokens = buildFocusTokens(focus);
 
   // V2 etap 6 — missing landing pages. Independent of competitor data:
   // it derives from `sites.understanding` + Page table, not SERPs. Same
@@ -275,13 +330,42 @@ export default function StudioCompetitorsPage() {
   }
 
   const profile = comp?.profile;
-  const competitors = profile?.competitors || [];
+  const rawCompetitors = profile?.competitors || [];
   const queriesProbed = profile?.queries_probed ?? null;
   const profileComputedAt = profile?.computed_at
     ? formatDateRu(profile.computed_at)
     : null;
-  const oppsList = opps?.opportunities || [];
+  const rawOpps = opps?.opportunities || [];
   const gapsList = gaps?.gaps || [];
+
+  // Tag each list with in_focus + focus-first stable sort. Focus is
+  // matched against the competitor's domain, the opportunity's title
+  // + example queries (richer text than the title alone). When no
+  // focus is set, in_focus stays false and order is unchanged.
+  const competitors = rawCompetitors
+    .map((c) => ({
+      ...c,
+      in_focus:
+        textInFocus(c.domain, focusTokens)
+        || textInFocus(c.example_title, focusTokens)
+        || textInFocus(c.example_query, focusTokens),
+    }));
+  const oppsList = rawOpps.map((o) => ({
+    ...o,
+    in_focus:
+      textInFocus(o.title_ru, focusTokens)
+      || textInFocus(o.reasoning_ru, focusTokens)
+      || ((o.evidence?.example_queries as string[] | undefined) || []).some(
+        (q) => textInFocus(q, focusTokens),
+      ),
+  }));
+  if (focus) {
+    competitors.sort((a, b) => Number(!!b.in_focus) - Number(!!a.in_focus));
+    oppsList.sort((a, b) => Number(!!b.in_focus) - Number(!!a.in_focus));
+  }
+  const anyInFocus =
+    competitors.some((c) => c.in_focus)
+    || oppsList.some((o) => o.in_focus);
 
   return (
     <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
@@ -358,6 +442,22 @@ export default function StudioCompetitorsPage() {
         </div>
       </div>
 
+      {/* Strategic-focus banner — only when focus is set AND at least
+          one competitor or opportunity lands in the focus zone. */}
+      {focus && anyInFocus && (
+        <div
+          className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-sm flex items-start gap-2"
+          title="Управление фокусом — /studio/profile"
+        >
+          <span className="font-medium text-primary whitespace-nowrap">
+            Сейчас в фокусе:
+          </span>
+          <span className="flex-1">
+            {focus.label}. Не в фокусе — серым.
+          </span>
+        </div>
+      )}
+
       {/* Banner */}
       {banner && (
         <div
@@ -413,6 +513,7 @@ export default function StudioCompetitorsPage() {
                 opp={o}
                 applied={appliedSet.has(o.id)}
                 onApply={() => onApplyOpp(o.id, o.evidence)}
+                focusActive={!!focus}
               />
             ))}
           </div>
@@ -442,7 +543,11 @@ export default function StudioCompetitorsPage() {
           </div>
           <div className="space-y-2">
             {competitors.map((c) => (
-              <CompetitorRow key={c.domain} comp={c} />
+              <CompetitorRow
+                key={c.domain}
+                comp={c}
+                focusActive={!!focus}
+              />
             ))}
           </div>
         </section>
@@ -557,6 +662,7 @@ function OpportunityCard({
   opp,
   applied,
   onApply,
+  focusActive,
 }: {
   opp: {
     id: string;
@@ -567,16 +673,24 @@ function OpportunityCard({
     reasoning_ru: string;
     suggested_action_ru: string;
     evidence: Record<string, unknown>;
+    in_focus?: boolean;
   };
   applied: boolean;
   onApply: () => void;
+  focusActive: boolean;
 }) {
   const ps = PRIORITY_STYLE[opp.priority] || PRIORITY_STYLE.medium;
   const pageUrl = (opp.evidence?.matched_page_url as string) || null;
   const exampleQueries = (opp.evidence?.example_queries as string[]) || [];
 
   return (
-    <Card className={cn(applied && "opacity-70")}>
+    <Card
+      className={cn(
+        applied && "opacity-70",
+        // Mute out-of-focus opportunities only when a focus is active.
+        focusActive && !opp.in_focus && "opacity-60",
+      )}
+    >
       <CardContent className="pt-5 space-y-2">
         <div className="flex items-baseline gap-2 flex-wrap">
           <span
@@ -591,6 +705,7 @@ function OpportunityCard({
             {CATEGORY_LABEL[opp.category] || opp.category}
           </span>
           <span className="font-medium">{opp.title_ru}</span>
+          <FocusPill in_focus={opp.in_focus} />
           {applied && (
             <Badge
               variant="outline"
@@ -643,6 +758,7 @@ function OpportunityCard({
 
 function CompetitorRow({
   comp,
+  focusActive,
 }: {
   comp: {
     domain: string;
@@ -652,14 +768,17 @@ function CompetitorRow({
     example_url: string;
     example_title: string;
     example_query: string;
+    in_focus?: boolean;
   };
+  focusActive: boolean;
 }) {
   return (
-    <Card>
+    <Card className={cn(focusActive && !comp.in_focus && "opacity-60")}>
       <CardContent className="py-3 flex items-center gap-3 flex-wrap">
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 flex-wrap">
             <span className="font-medium">{comp.domain}</span>
+            <FocusPill in_focus={comp.in_focus} />
             {comp.best_position <= 3 && (
               <Badge
                 variant="outline"

@@ -87,6 +87,59 @@ async def _site_or_404(db: AsyncSession, site_id: uuid.UUID) -> Site:
     return site
 
 
+# ── Strategic focus — list-item «в фокусе» tagger ─────────────────────
+#
+# Mirrors the substring-match logic in core_audit.brain.rules._focus_tokens
+# /_signals_in_focus so list pages (queries / harmful / pages) can mark
+# rows as `in_focus=True` without pulling in the brain module. Kept
+# identical to brain's behaviour: lowercased, deduped, longest tokens
+# first to avoid «крым» matching when focus is «крымская экспедиция».
+#
+# We deliberately re-implement instead of importing from brain to keep
+# the studio request hot-path decoupled from brain's heavier imports.
+# Six lines, no logic to drift.
+
+
+def _focus_tokens_for_site(site: Site) -> list[str]:
+    """Flat lowercased token list from site.target_config.strategic_focus.
+    Empty list if no focus is set — callers should treat that as
+    "every item is out-of-focus = no pills / no banner anywhere".
+    """
+    from app.core_audit.strategic_focus import from_target_config
+
+    focus = from_target_config(site.target_config or {})
+    if focus is None:
+        return []
+    out: list[str] = []
+    for collection in (focus.products, focus.regions, focus.query_signals):
+        for item in collection or []:
+            s = (item or "").strip().lower()
+            if s:
+                out.append(s)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for s in sorted(out, key=len, reverse=True):
+        if s in seen:
+            continue
+        seen.add(s)
+        deduped.append(s)
+    return deduped
+
+
+def _text_in_focus(text: str | None, tokens: list[str]) -> bool:
+    """True iff any focus token substring-matches the lowercased text.
+    Same morphology-friendly partial-match as brain's _signals_in_focus."""
+    if not tokens or not text:
+        return False
+    haystack = text.strip().lower()
+    if not haystack:
+        return False
+    for t in tokens:
+        if t in haystack:
+            return True
+    return False
+
+
 # ── PR-S2 · Queries module ────────────────────────────────────────────
 
 class QueryRow(BaseModel):
@@ -112,6 +165,10 @@ class QueryRow(BaseModel):
     relevance_set_by: str | None      # rules / llm / user
     relevance_set_at: datetime | None
     relevance_reason_ru: str | None
+    # Strategic-focus tag (2026-05-13): True iff this query's text
+    # substring-matches any focus token. False when no focus is set
+    # (i.e. site hasn't opted in) so the UI doesn't show pills.
+    in_focus: bool = False
 
 
 class QueriesResponse(BaseModel):
@@ -144,7 +201,8 @@ async def list_queries(
       alpha     — query_text asc (predictable for UI)
       position  — best position asc (closest to top first)
     """
-    await _site_or_404(db, site_id)
+    site = await _site_or_404(db, site_id)
+    focus_tokens = _focus_tokens_for_site(site)
 
     # Load ALL queries — coverage counters MUST count the full site, not
     # the sliced top-N. Same goes for the `position` sort: position
@@ -259,6 +317,7 @@ async def list_queries(
                 relevance_set_by=q.relevance_set_by,
                 relevance_set_at=q.relevance_set_at,
                 relevance_reason_ru=q.relevance_reason_ru,
+                in_focus=_text_in_focus(q.query_text, focus_tokens),
             )
         )
 
@@ -457,6 +516,8 @@ class HarmfulQueryItem(BaseModel):
     # runs «Разобрать причины» — that triggers the Celery task.
     harmful_diagnosis: dict | None = None
     harmful_diagnosed_at: datetime | None = None
+    # Strategic-focus tag (2026-05-13): see QueryRow.in_focus.
+    in_focus: bool = False
 
 
 class HarmfulVisibilityResponse(BaseModel):
@@ -515,7 +576,8 @@ async def list_harmful_visibility(
     Recommended actions are rule-based (LLM-free) since relevance was
     already decided by the classifier.
     """
-    await _site_or_404(db, site_id)
+    site = await _site_or_404(db, site_id)
+    focus_tokens = _focus_tokens_for_site(site)
 
     # Pull only spam/disputed rows for this site.
     rows = (await db.execute(
@@ -588,6 +650,7 @@ async def list_harmful_visibility(
             suggested_action_ru=_suggested_action(q.relevance, position),
             harmful_diagnosis=q.harmful_diagnosis,
             harmful_diagnosed_at=q.harmful_diagnosed_at,
+            in_focus=_text_in_focus(q.query_text, focus_tokens),
         ))
 
     counts["total"] = counts["spam"] + counts["disputed"]
@@ -796,6 +859,13 @@ class IndexationState(BaseModel):
     last_check_at: datetime | None
     status: str            # "fresh" | "stale_7d+" | "never_checked" | "running" | "failed"
     pages_found: int | None
+    # Single source of truth for the big-headline number — live count of
+    # `Page.in_yandex_index=True` rows (fed by Webmaster URL probes).
+    # `pages_in_index_searchapi` is the same metric measured via the
+    # Search API event (can lag hours/days). UI shows the secondary
+    # number only when they disagree.
+    pages_in_index_live: int
+    pages_in_index_searchapi: int | None
     pages: list[IndexedPage]
     diagnosis: IndexationDiagnosis | None
     is_running: bool
@@ -828,6 +898,19 @@ async def get_indexation(
     """
     site = await _site_or_404(db, site_id)
 
+    # Live count of pages flagged as in-index by per-URL Webmaster
+    # probes. This is the authoritative big-headline number — it
+    # updates as soon as the Webmaster pull lands, no event-replay
+    # lag. The Search API event-based count is kept as a secondary
+    # tile because it can disagree by hours/days.
+    pages_in_index_live = int((await db.execute(
+        select(sa_func.count())
+        .where(
+            Page.site_id == site_id,
+            Page.in_yandex_index.is_(True),
+        ),
+    )).scalar_one() or 0)
+
     # Latest indexation event — terminal OR started.
     result = await db.execute(
         select(AnalysisEvent)
@@ -846,7 +929,9 @@ async def get_indexation(
             domain=site.domain,
             last_check_at=None,
             status="never_checked",
-            pages_found=None,
+            pages_found=pages_in_index_live if pages_in_index_live else None,
+            pages_in_index_live=pages_in_index_live,
+            pages_in_index_searchapi=None,
             pages=[],
             diagnosis=None,
             is_running=False,
@@ -861,7 +946,9 @@ async def get_indexation(
             domain=site.domain,
             last_check_at=latest.ts,
             status="running",
-            pages_found=None,
+            pages_found=pages_in_index_live if pages_in_index_live else None,
+            pages_in_index_live=pages_in_index_live,
+            pages_in_index_searchapi=None,
             pages=[],
             diagnosis=None,
             is_running=True,
@@ -869,7 +956,10 @@ async def get_indexation(
         )
 
     extra = latest.extra or {}
-    pages_found = extra.get("pages_found")
+    pages_in_index_searchapi: int | None = None
+    raw_pages_found = extra.get("pages_found")
+    if isinstance(raw_pages_found, int):
+        pages_in_index_searchapi = raw_pages_found
     raw_pages = extra.get("pages") or []
     pages = [
         IndexedPage(
@@ -899,12 +989,18 @@ async def get_indexation(
         cutoff = datetime.now(timezone.utc) - timedelta(days=INDEXATION_STALE_AFTER_DAYS)
         status = "fresh" if latest.ts >= cutoff else "stale_7d+"
 
+    # `pages_found` retains its historical meaning as the big-headline
+    # number, but now sources from the live count. Frontend reads
+    # `pages_in_index_live` / `pages_in_index_searchapi` for the
+    # explicit per-source split.
     return IndexationState(
         site_id=str(site_id),
         domain=site.domain,
         last_check_at=latest.ts,
         status=status,
-        pages_found=pages_found,
+        pages_found=pages_in_index_live,
+        pages_in_index_live=pages_in_index_live,
+        pages_in_index_searchapi=pages_in_index_searchapi,
         pages=pages,
         diagnosis=diagnosis,
         is_running=False,
@@ -1378,6 +1474,9 @@ class PageListItem(BaseModel):
     n_recommendations: int       # total recs on latest review
     n_pending: int               # recs still in user_status="pending"
     n_applied: int               # recs in user_status="applied"
+    # Strategic-focus tag (2026-05-13): True iff the page's url+title
+    # substring-matches any focus token. False when no focus is set.
+    in_focus: bool = False
 
 
 class PageListResponse(BaseModel):
@@ -1414,6 +1513,7 @@ async def list_pages(
                       work is concentrated).
     """
     site = await _site_or_404(db, site_id)
+    focus_tokens = _focus_tokens_for_site(site)
 
     pages = (await db.execute(
         select(Page).where(Page.site_id == site.id),
@@ -1503,6 +1603,9 @@ async def list_pages(
             n_recommendations=counts["total"] if counts else 0,
             n_pending=counts["pending"] if counts else 0,
             n_applied=counts["applied"] if counts else 0,
+            in_focus=_text_in_focus(
+                f"{page.url or ''} {page.title or ''}", focus_tokens,
+            ),
         ))
 
     if sort == "recent_review":
@@ -2552,6 +2655,16 @@ class BrainPlanOut(BaseModel):
     diagnostics: list[str]
     computed_at: datetime
     focus_label: str | None = None  # owner's «Сейчас работаем над…» if any
+    # Data-freshness anchors. `computed_at` is the moment the plan was
+    # built (always "now"), which is misleading: the underlying tables
+    # can be 2 weeks stale. The three fields below let the UI surface
+    # the OLDEST of them as "данные собраны: …" and warn the owner.
+    # - `last_webmaster_at` — MAX(Page.yandex_index_checked_at)
+    # - `last_wordstat_at`  — MAX(SearchQuery.relevance_set_at)
+    # - `last_crawl_at`     — MAX(Page.last_crawled_at)
+    last_webmaster_at: datetime | None = None
+    last_wordstat_at: datetime | None = None
+    last_crawl_at: datetime | None = None
 
 
 _EXPORT_PRIORITY_RANK = {
@@ -2778,6 +2891,21 @@ async def get_brain_plan(
     snap = await build_snapshot(db, site)
     plan = build_plan(snap, target_config=site.target_config or {})
 
+    # Data-freshness anchors — MAX() over the columns that feed the
+    # plan. Cheap (two indexed aggregates) and they answer the only
+    # honest question: "as of when?". `last_webmaster_at` rides on
+    # the snapshot already (per-URL probe); the other two we pull
+    # here so the brain module stays untouched.
+    last_webmaster_at = snap.indexation.last_checked_at
+    last_wordstat_at = (await db.execute(
+        select(sa_func.max(SearchQuery.relevance_set_at))
+        .where(SearchQuery.site_id == site_id),
+    )).scalar_one_or_none()
+    last_crawl_at = (await db.execute(
+        select(sa_func.max(Page.last_crawled_at))
+        .where(Page.site_id == site_id),
+    )).scalar_one_or_none()
+
     return BrainPlanOut(
         site_id=plan.site_id,
         domain=plan.domain,
@@ -2806,6 +2934,9 @@ async def get_brain_plan(
         diagnostics=plan.diagnostics,
         computed_at=snap.computed_at,
         focus_label=plan.focus_label,
+        last_webmaster_at=last_webmaster_at,
+        last_wordstat_at=last_wordstat_at,
+        last_crawl_at=last_crawl_at,
     )
 
 
@@ -3561,6 +3692,13 @@ class DeepExtractRow(BaseModel):
     schema_blocks: list[dict] | None
     has_screenshot_desktop: bool
     has_screenshot_mobile: bool
+    # AI summary cached on the row + when it was generated. The
+    # timestamp lives in `layout_meta["ai_summary_at"]` (we don't
+    # want to ship a migration just for one nullable column). When
+    # absent — i.e. the summary was written before this code shipped —
+    # we leave it `None` and the UI treats that as "freshness unknown".
+    ai_summary_md: str | None = None
+    ai_summary_at: str | None = None
 
 
 @router.post(
@@ -3627,6 +3765,15 @@ async def trigger_deep_extract_competitor(
 
 
 def _row_to_extract(row) -> DeepExtractRow:
+    # `ai_summary_at` lives in the `layout_meta` JSONB blob — we set
+    # it from `analyze_deep_extract` at the moment the summary is
+    # generated. Pre-existing rows have no marker; frontend treats
+    # `null` as "freshness unknown" and prompts a re-analyze.
+    layout_meta = row.layout_meta or {}
+    ai_summary_at: str | None = None
+    raw_ts = layout_meta.get("ai_summary_at") if isinstance(layout_meta, dict) else None
+    if isinstance(raw_ts, str) and raw_ts:
+        ai_summary_at = raw_ts
     return DeepExtractRow(
         id=str(row.id),
         url=row.url,
@@ -3651,6 +3798,8 @@ def _row_to_extract(row) -> DeepExtractRow:
         schema_blocks=row.schema_blocks,
         has_screenshot_desktop=bool(row.screenshot_desktop_path),
         has_screenshot_mobile=bool(row.screenshot_mobile_path),
+        ai_summary_md=row.ai_summary_md,
+        ai_summary_at=ai_summary_at,
     )
 
 
@@ -4111,6 +4260,15 @@ async def analyze_deep_extract(
         raise HTTPException(status_code=502, detail="LLM returned empty summary")
 
     row.ai_summary_md = summary_md
+    # Stamp the generation moment into `layout_meta` so the UI can
+    # show "AI-резюме совпадает со снимком" / "AI старее снимка —
+    # пересоздай". No new column, no migration — `layout_meta` is
+    # JSONB and already nullable. SQLAlchemy needs a new dict to
+    # detect the mutation (in-place edits aren't tracked).
+    now_iso = datetime.now(timezone.utc).isoformat()
+    existing_layout = dict(row.layout_meta or {})
+    existing_layout["ai_summary_at"] = now_iso
+    row.layout_meta = existing_layout
     await db.commit()
 
     return DeepExtractAnalyzeOut(

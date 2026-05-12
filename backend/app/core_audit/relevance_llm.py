@@ -125,6 +125,17 @@ CLASSIFY_TOOL = {
                                 "shown to the site owner."
                             ),
                         },
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": (
+                                "Self-reported confidence 0..1. Low "
+                                "confidence on 'own' verdicts triggers "
+                                "a server-side fallback to 'unclassified' "
+                                "when the site profile is thin."
+                            ),
+                        },
                     },
                     "required": ["idx", "relevance", "reason_ru"],
                 },
@@ -133,6 +144,24 @@ CLASSIFY_TOOL = {
         "required": ["results"],
     },
 }
+
+
+# Threshold under which an LLM 'own' verdict against a thin profile is
+# coerced to 'unclassified' — the model has nothing to ground its answer
+# in, so accepting it risks polluting the harmful/own pipeline.
+_OWN_CONFIDENCE_FLOOR = 0.7
+
+
+def _profile_is_thin(profile: ProfileSlice, narrative_ru: str) -> bool:
+    """Profile is 'thin' when narrative is empty AND services list is short.
+
+    With no narrative_ru and < 2 services the LLM has almost nothing
+    to anchor a non-obvious 'own' verdict against, so we tighten the
+    confidence floor before persisting that verdict as canonical.
+    """
+    narrative_empty = not (narrative_ru or "").strip()
+    services_thin = len(profile.services or []) < 2
+    return narrative_empty and services_thin
 
 
 def _build_user_message(
@@ -214,6 +243,8 @@ def classify_by_llm(
     verdicts: dict[int, RelevanceVerdict] = {}
     seen_idx: set[int] = set()
 
+    profile_thin = _profile_is_thin(profile, narrative_ru)
+
     for entry in raw_results:
         if not isinstance(entry, dict):
             continue
@@ -227,6 +258,15 @@ def classify_by_llm(
             continue
         if idx in seen_idx:
             continue
+
+        # Optional self-reported confidence — used for the thin-profile
+        # 'own' coercion below. Missing/malformed → treat as 1.0 so we
+        # don't penalise existing well-behaved prompts.
+        try:
+            confidence = float(entry.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            confidence = 1.0
+
         if relevance not in RELEVANCE_VALUES or relevance == "unclassified":
             # Coerce unexpected values to disputed so nothing
             # silently lands in the «own» bucket.
@@ -236,6 +276,26 @@ def classify_by_llm(
             )
             relevance = "disputed"
             reason = reason or "LLM вернул неожиданный класс — пометили как спорный"
+
+        # Low-confidence 'own' verdicts against a thin profile are not
+        # safe to persist as canonical — the LLM had nothing to ground
+        # them in. Fall back to 'unclassified' so the owner reviews.
+        if (
+            relevance == "own"
+            and profile_thin
+            and confidence < _OWN_CONFIDENCE_FLOOR
+        ):
+            log.info(
+                "relevance_llm.thin_profile_own_coerced "
+                "idx=%d query=%r confidence=%.2f",
+                idx, queries[idx], confidence,
+            )
+            relevance = "unclassified"
+            reason = (
+                reason
+                + " [низкая уверенность LLM при пустом профиле — нужна ручная проверка]"
+            ).strip()
+
         seen_idx.add(idx)
         verdicts[idx] = RelevanceVerdict(
             relevance=relevance,

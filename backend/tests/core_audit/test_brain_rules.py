@@ -235,17 +235,18 @@ def test_harmful_silent_when_no_classifier_run() -> None:
 
 def test_harmful_severity_scales() -> None:
     """26 spam + 11 disputed on grandtourspirit (37 of 41 ⇒ ~90% of
-    classified) → critical. A small share on a healthy site → medium.
-    Thresholds: ≥20 bad OR ≥40% share = critical, ≥8 OR ≥20% = high,
-    else medium. Picking 2 + 1 on a 50-query site (6% of classified)
-    keeps small below the high cutoff — exactly the «calm site» case
-    we want."""
+    classified) → critical. A small handful of bad on a healthy site
+    → low (below medium's count and share thresholds). New ladder
+    (2026-05-13): critical requires BOTH bad≥20 AND share≥40 (or
+    share≥70 on classified≥5); high needs bad≥8 OR share≥30; medium
+    needs bad≥5 OR share≥20; everything else is low."""
     big = build_plan(_snap(own=4, spam=26, disputed=11))
+    # 3 bad / 50 classified = 6% — well below every threshold.
     small = build_plan(_snap(own=47, spam=2, disputed=1))
     big_a = _by_id(big.actions, "queries:harmful")
     small_a = _by_id(small.actions, "queries:harmful")
     assert big_a and big_a.severity == "critical"
-    assert small_a and small_a.severity == "medium"
+    assert small_a and small_a.severity == "low"
     assert big_a.evidence["spam"] == 26
     assert big_a.evidence["disputed"] == 11
     # Phase A: title is conversational («Яндекс не понимает кто ты»),
@@ -479,6 +480,95 @@ def test_phase_a_indexation_examples_are_real_urls() -> None:
     assert all(u in labels for u in urls)
     # All URL examples carry kind="url" so UI renders them clickable.
     assert all(ex["kind"] == "url" for ex in a.examples)
+
+
+# ── New ladder + hysteresis regressions (2026-05-13) ───────────────
+
+
+def test_harmful_six_of_fifteen_is_not_critical() -> None:
+    """6 spam / 15 classified (40% share) used to ring as critical
+    because share alone (≥40%) was enough. With the new AND-gated
+    critical rule plus the small-sample clamp, 6-of-15 is medium —
+    a real but proportionate signal. Crucially: NOT critical."""
+    # own=9, spam=6: bad=6, classified=15, share≈40%
+    plan = build_plan(_snap(own=9, spam=6))
+    a = _by_id(plan.actions, "queries:harmful")
+    assert a is not None
+    assert a.severity == "medium"
+    assert a.severity != "critical"
+
+
+def test_harmful_full_small_site_is_high_not_medium() -> None:
+    """5 of 5 classified queries are spam — 100% harm on a 5-query
+    site. Old rule clamped this to medium because classified<15.
+    New rule: when share≥70% on classified≥5, allow `high` (but
+    cap at high — small absolute count still keeps it out of
+    critical territory)."""
+    plan = build_plan(_snap(spam=5))
+    a = _by_id(plan.actions, "queries:harmful")
+    assert a is not None
+    assert a.severity == "high"
+
+
+def test_pending_recs_in_focus_from_url() -> None:
+    """When at least one pending rec lives on a focus-matching URL,
+    the action picks up `in_focus=True` so the focus-aware sort
+    promotes it ahead of out-of-focus items at the same severity."""
+    snap = _snap(
+        recs_pending=2,
+        recs_high_priority_pending=1,
+    )
+    # Snapshot helper doesn't expose top_pending_recommendations —
+    # set it directly on the review facts so the rule can read URLs.
+    snap.review.top_pending_recommendations = [
+        {"url": "https://example.ru/excursions/krym/buggy", "rec_id": "1"},
+        {"url": "https://example.ru/about", "rec_id": "2"},
+    ]
+    plan = build_plan(
+        snap,
+        target_config={
+            "strategic_focus": {"products": ["крым"], "regions": [], "query_signals": []},
+        },
+    )
+    a = _by_id(plan.actions, "review:pending_recs")
+    assert a is not None
+    assert a.in_focus is True
+
+
+def test_indexation_fallback_when_buckets_dont_sum() -> None:
+    """If `pages_total` doesn't line up with the breakdown buckets
+    we fall back to subtraction (clamped at 0) and log the
+    discrepancy. The action still fires with a sane count rather
+    than crashing or showing a negative number."""
+    snap = _snap(pages_total=20, pages_in_index=5, pages_excluded=2, pages_unknown=3)
+    plan = build_plan(snap)
+    a = _by_id(plan.actions, "indexation:not_indexed")
+    # Subtraction: 20 - 5 - 2 - 3 = 10
+    assert a is not None
+    assert a.evidence["not_indexed"] == 10
+
+
+def test_decision_tree_hysteresis_at_strong_boundary() -> None:
+    """Pages oscillating around score 4.0 should not flip LEAVE ↔
+    STRENGTHEN day to day. Inside the borderline band (±0.25 of
+    STRONG_SCORE) both directions resolve to LEAVE with
+    `borderline=True` in evidence."""
+    from app.core_audit.decision_tree import (
+        BORDERLINE_BAND, STRONG_SCORE, WEAK_SCORE_MIN, _is_borderline,
+    )
+
+    # Hairline above and below the cutoff both count as borderline.
+    assert _is_borderline(STRONG_SCORE + 0.1, STRONG_SCORE) is True
+    assert _is_borderline(STRONG_SCORE - 0.1, STRONG_SCORE) is True
+    # Far below the cutoff is not borderline.
+    assert _is_borderline(STRONG_SCORE - 1.0, STRONG_SCORE) is False
+    # Same band on the weak boundary.
+    assert _is_borderline(WEAK_SCORE_MIN + 0.2, WEAK_SCORE_MIN) is True
+    assert _is_borderline(WEAK_SCORE_MIN - 0.2, WEAK_SCORE_MIN) is True
+    # Edge of band: exactly at BORDERLINE_BAND still counts.
+    assert _is_borderline(STRONG_SCORE + BORDERLINE_BAND, STRONG_SCORE) is True
+    # None propagates as not-borderline.
+    assert _is_borderline(None, STRONG_SCORE) is False
 
 
 def test_evidence_carries_real_counts_not_prose() -> None:

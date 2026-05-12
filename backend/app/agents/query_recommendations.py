@@ -21,6 +21,37 @@ from app.models.search_query import SearchQuery
 
 logger = logging.getLogger(__name__)
 
+# Industry CTR-by-position benchmark — used ONLY in Python to compute a
+# qualitative "ниже среднего / в норме" flag. NEVER pass these raw numbers
+# into the LLM prompt: the owner would see invented percentages as if they
+# were measured on their own site.
+_EXPECTED_CTR_BY_POS = {
+    1: 0.28, 2: 0.15, 3: 0.11, 4: 0.08, 5: 0.07,
+    6: 0.05, 7: 0.04, 8: 0.03, 9: 0.03, 10: 0.02,
+}
+
+
+def _ctr_qualitative(position: float, ctr_pct: float) -> str:
+    """Compare actual CTR to industry benchmark for the given position.
+
+    Returns a short qualitative phrase (no percentages) for the LLM prompt.
+    """
+    try:
+        pos_int = int(round(position))
+    except (TypeError, ValueError):
+        return ""
+    if pos_int < 1 or pos_int > 10:
+        return ""
+    expected_frac = _EXPECTED_CTR_BY_POS.get(pos_int)
+    if not expected_frac:
+        return ""
+    actual_frac = (ctr_pct or 0) / 100.0
+    if actual_frac < expected_frac * 0.6:
+        return "CTR заметно ниже среднего по позиции"
+    if actual_frac < expected_frac:
+        return "CTR ниже среднего по позиции"
+    return "CTR в пределах нормы"
+
 
 class TacticalQueryAgent(BaseAgent):
     """Daily agent: finds per-query optimization opportunities."""
@@ -40,8 +71,8 @@ class TacticalQueryAgent(BaseAgent):
    → Рекомендация: "Перепишите заголовок страницы, добавьте ключевое слово в H1"
 2. Запросы с высокими показами но 0 кликов (люди видят, но не нажимают)
    → Рекомендация: "Перепишите описание страницы в поиске — сделайте его привлекательнее"
-3. Запросы с CTR сильно ниже нормы для их позиции
-   → Позиция 3 обычно даёт 11% кликов. Если у вас 2% — описание в поиске плохое
+3. Запросы с CTR сильно ниже нормы для их позиции (флаг «CTR ниже среднего» в таблице ниже)
+   → Не цитируй конкретных процентов — у соседних сайтов в нише на этой позиции CTR обычно выше, точную цифру по тебе пока не измеряли. Рекомендуй переписать описание в поиске.
 4. Новые быстрорастущие запросы (показы растут от недели к неделе)
    → Рекомендация: "Появился новый запрос — создайте или улучшите страницу под него"
 
@@ -126,7 +157,7 @@ class TacticalQueryAgent(BaseAgent):
             f"Всего запросов: {len(curr)}",
             "",
             "ЗАПРОСЫ (отсортированы по показам):",
-            "запрос | кластер | показы | клики | CTR% | позиция | дней_данных | пред_показы | пред_позиция",
+            "запрос | кластер | показы | клики | CTR% | позиция | дней_данных | пред_показы | пред_позиция | флаг_ctr",
         ]
 
         for q in curr:
@@ -141,15 +172,15 @@ class TacticalQueryAgent(BaseAgent):
             p_imp = int(p.get("impressions") or 0)
             p_pos = round(float(p.get("avg_position") or 0), 1) if p.get("avg_position") else "—"
 
+            ctr_flag = _ctr_qualitative(pos, ctr) or "—"
+
             lines.append(
-                f"{q['query_text']} | {cluster} | {imp} | {clk} | {ctr}% | {pos} | {days} | {p_imp} | {p_pos}"
+                f"{q['query_text']} | {cluster} | {imp} | {clk} | {ctr}% | {pos} | {days} | {p_imp} | {p_pos} | {ctr_flag}"
             )
 
         lines += [
             "",
-            "БЕНЧМАРК CTR ПО ПОЗИЦИЯМ:",
-            "Поз.1=28%, Поз.2=15%, Поз.3=11%, Поз.4=8%, Поз.5=7%, Поз.6=5%, Поз.7=4%, Поз.8=3%, Поз.9=3%, Поз.10=2%",
-            "",
+            "Колонка «флаг_ctr» уже посчитана в Python: ориентируйся на неё, не цитируй конкретных процентов.",
             "Найди возможности для роста и выдай рекомендации через report_issues.",
             "Тип issue_type = 'new_opportunity' для всех.",
         ]
@@ -176,9 +207,9 @@ class StrategicQueryAgent(BaseAgent):
 2. Сильные кластеры для усиления (хорошие позиции, можно доминировать)
    → "Направление 'абхазия' — 10 запросов в топ-10. Добавьте ещё 3 статьи чтобы закрепиться"
 3. Кластеры с низким CTR (хорошие позиции, мало кликов)
-   → "Запросы по 'горные туры' в топ-5, но кликают только 2%. Перепишите описания"
+   → "Запросы по 'горные туры' в топ-5, но кликают редко (CTR ниже среднего по позиции). Перепишите описания"
 4. Растущие кластеры (показы растут)
-   → "Направление 'активный отдых' растёт на 40%. Усильте контент"
+   → "Направление 'активный отдых' растёт по числу показов в течение нескольких недель. Усильте контент"
 
 ФОРМАТ:
 - Заголовок: стратегический, про направление бизнеса

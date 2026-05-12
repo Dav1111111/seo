@@ -25,6 +25,11 @@ export interface DeepExtractRow {
   schema_blocks: Array<Record<string, any>> | null;
   has_screenshot_desktop: boolean;
   has_screenshot_mobile: boolean;
+  // AI summary + when it was generated. `ai_summary_at` is null on
+  // legacy rows (set before this freshness field landed) — the panel
+  // treats null as "freshness unknown" and nudges a re-analyze.
+  ai_summary_md: string | null;
+  ai_summary_at: string | null;
 }
 
 // Default site ID — in Phase 9 this becomes dynamic
@@ -628,6 +633,9 @@ export const api = {
         relevance_set_by: "rules" | "llm" | "user" | null;
         relevance_set_at: string | null;
         relevance_reason_ru: string | null;
+        // 2026-05-13: strategic_focus tag. True iff query_text matches
+        // any focus token; false when no focus is set.
+        in_focus: boolean;
       }>;
       coverage: {
         total: number;
@@ -711,6 +719,8 @@ export const api = {
           skipped?: "no_match" | "no_page_in_db";
         } | null;
         harmful_diagnosed_at: string | null;
+        // 2026-05-13: strategic_focus tag — see studioListQueries.
+        in_focus: boolean;
       }>;
     }>(`/studio/sites/${siteId}/queries/harmful`, { base: "admin" }),
 
@@ -765,6 +775,12 @@ export const api = {
 
   // ── PR-S3 · Indexation module ────────────────────────────────────
   // Backend: backend/app/api/v1/studio.py (IndexationState model).
+  // `pages_in_index_live` is the authoritative big-headline number
+  // (live COUNT of Webmaster-confirmed indexed pages). The Search API
+  // event count is kept as `pages_in_index_searchapi` for the
+  // secondary tile; UI hides it when they agree. `pages_found` is the
+  // legacy field — now mirrors the live count, retained for backward
+  // compat (other call sites still read it).
   studioGetIndexation: (siteId: string) =>
     apiFetch<{
       site_id: string;
@@ -772,6 +788,8 @@ export const api = {
       last_check_at: string | null;
       status: "fresh" | "stale_7d+" | "never_checked" | "running" | "failed";
       pages_found: number | null;
+      pages_in_index_live: number;
+      pages_in_index_searchapi: number | null;
       pages: Array<{ url: string; title: string; position: number }>;
       diagnosis: {
         verdict: string;
@@ -884,6 +902,8 @@ export const api = {
         n_recommendations: number;
         n_pending: number;
         n_applied: number;
+        // 2026-05-13: strategic_focus tag — see studioListQueries.
+        in_focus: boolean;
       }>;
     }>(
       `/studio/sites/${siteId}/pages?sort=${sort}&limit=${limit}`,
@@ -1087,12 +1107,18 @@ export const api = {
 
   // V2 etap 7 — brain. Synthesised «do this first» plan from all
   // module data. Pure SQL + Russian rules, no LLM.
+  // `computed_at` is the moment the plan was built (always "now") and
+  // is therefore misleading for freshness. UI uses the data-source
+  // anchors below to show "данные собраны: …" / a stale-warning badge.
   studioGetBrainPlan: (siteId: string) =>
     apiFetch<{
       site_id: string;
       domain: string;
       computed_at: string;
       diagnostics: string[];
+      last_webmaster_at: string | null;
+      last_wordstat_at: string | null;
+      last_crawl_at: string | null;
       actions: Array<{
         id: string;
         severity: "critical" | "high" | "medium" | "low";

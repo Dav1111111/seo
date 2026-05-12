@@ -136,7 +136,7 @@ def _tokens_from_values(values) -> set[str]:
     return out
 
 
-def _business_tokens(target_config: dict) -> dict[str, object]:
+def _business_tokens(target_config: dict, *, site_id: str | None = None) -> dict[str, object]:
     """Build a strict query filter from business profile + strategic focus.
 
     Competitor discovery must compare the current SEO focus, not every
@@ -154,10 +154,24 @@ def _business_tokens(target_config: dict) -> dict[str, object]:
     if not product_tokens:
         product_tokens.update(_tokens_from_values(cfg.get("services") or []))
         product_tokens.update(_tokens_from_values(cfg.get("secondary_products") or []))
+
+    # Remember whether the original (pre-filter) product token set had any
+    # entries. When primary_product is a generic stop-word like "тур" the
+    # strip-on-_GENERIC_QUERY_TOKENS below wipes everything out and we used
+    # to silently fall through to region-only matching, admitting every
+    # Sochi query as competitor signal.
+    had_product_input = bool(product_tokens)
     product_tokens = {
         t for t in product_tokens
         if t not in _GENERIC_QUERY_TOKENS
     }
+    product_tokens_emptied_by_filter = had_product_input and not product_tokens
+    if product_tokens_emptied_by_filter:
+        log.warning(
+            "competitors.business_tokens.products_emptied_by_generic_filter "
+            "site=%s primary_product=%r — discovery will fail closed.",
+            site_id, cfg.get("primary_product"),
+        )
 
     region_tokens = _tokens_from_values(focus_regions)
     if not region_tokens:
@@ -181,6 +195,9 @@ def _business_tokens(target_config: dict) -> dict[str, object]:
         "excluded_tokens": excluded_tokens,
         "query_signal_phrases": query_signal_phrases,
         "has_strategic_focus": bool(focus_products or focus_regions),
+        # Empty token set fails closed: better to skip discovery than to
+        # admit every Sochi query as competitor signal.
+        "fail_closed": product_tokens_emptied_by_filter,
     }
 
 
@@ -191,10 +208,21 @@ def _query_is_relevant(query: str, biz_tokens) -> bool:
         return False
 
     # Backward compatibility for tests/imports that may pass the old set.
+    # Use token-set intersection (not substring) so primary_product="тур"
+    # doesn't substring-match "литература" / "структура" / "турция".
     if isinstance(biz_tokens, set):
-        return not biz_tokens or any(tok in q for tok in biz_tokens)
+        if not biz_tokens:
+            return True
+        return bool(_term_tokens(q) & biz_tokens)
 
     filt = biz_tokens or {}
+
+    # Fail-closed: when product tokens were wiped by the generic filter
+    # (e.g. primary_product="тур"), refuse every query instead of falling
+    # through to region-only matching.
+    if filt.get("fail_closed"):
+        return False
+
     q_tokens = _term_tokens(q)
     excluded = set(filt.get("excluded_tokens") or set())
     if q_tokens & excluded:

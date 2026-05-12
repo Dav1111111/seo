@@ -145,7 +145,14 @@ function DeepExtractView({
   const failed = extract.status !== "completed";
   const [analyzing, setAnalyzing] = useState(false);
   const [summary, setSummary] = useState<string | null>(
-    (extract as any).ai_summary_md || null,
+    extract.ai_summary_md || null,
+  );
+  // Track when this summary was generated so we can flag stale AI
+  // resumes vs the underlying snapshot. Updated on successful
+  // /analyze. Stays in sync with `extract.ai_summary_at` from the
+  // server for cached/idle renders.
+  const [summaryAt, setSummaryAt] = useState<string | null>(
+    extract.ai_summary_at || null,
   );
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
 
@@ -156,12 +163,69 @@ function DeepExtractView({
     try {
       const res = await api.studioAnalyzeDeepExtract(siteId, extract.id);
       setSummary(res.summary_md);
+      // Cached server-side responses include `model: "cached"`; in
+      // that case we don't have a fresh server timestamp here, so
+      // we keep whatever we already had. For a real LLM call this is
+      // effectively "now" — matches what the server just persisted.
+      if (res.model && res.model !== "cached") {
+        setSummaryAt(new Date().toISOString());
+      }
     } catch (e) {
       setAnalyzeErr(e instanceof Error ? e.message : "не удалось разобрать");
     } finally {
       setAnalyzing(false);
     }
   }
+
+  // ── AI summary freshness vs snapshot ─────────────────────────────
+  // Compare the summary's generation moment with `extracted_at`. If
+  // the snapshot was refreshed after the summary, the summary is
+  // describing a stale page — nudge the owner to re-generate.
+  const summaryFreshness = (():
+    | { kind: "synced"; label: string }
+    | { kind: "stale"; label: string }
+    | { kind: "unknown"; label: string }
+    | null => {
+    if (!summary) return null;
+    if (!summaryAt) {
+      return {
+        kind: "unknown",
+        label:
+          "AI-резюме сгенерировано давно — точное время неизвестно. Если снимок недавно обновлялся, кликни «Перезапросить».",
+      };
+    }
+    const summaryTs = new Date(summaryAt).getTime();
+    const snapTs = new Date(extract.extracted_at).getTime();
+    if (!Number.isFinite(summaryTs) || !Number.isFinite(snapTs)) {
+      return { kind: "unknown", label: "Свежесть AI-резюме не определена." };
+    }
+    // ≤60s gap counts as "same moment" — accounts for the gap
+    // between snapshot insert and the summary LLM call.
+    if (Math.abs(snapTs - summaryTs) <= 60_000) {
+      return { kind: "synced", label: "AI-резюме совпадает со снимком" };
+    }
+    if (snapTs > summaryTs) {
+      const ageDays = Math.max(
+        1,
+        Math.round((snapTs - summaryTs) / (1000 * 60 * 60 * 24)),
+      );
+      // Russian plural forms for "день/дня/дней" — keeps the label
+      // grammatical at 1, 2-4, 5+ days.
+      const mod10 = ageDays % 10;
+      const mod100 = ageDays % 100;
+      let dayWord: string;
+      if (mod10 === 1 && mod100 !== 11) dayWord = "день";
+      else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20))
+        dayWord = "дня";
+      else dayWord = "дней";
+      return {
+        kind: "stale",
+        label: `AI-резюме сделано ${ageDays} ${dayWord} назад, снимок обновлён позже — кликни «Перезапросить».`,
+      };
+    }
+    // Summary newer than snapshot — odd but harmless; just say synced.
+    return { kind: "synced", label: "AI-резюме совпадает со снимком" };
+  })();
   const ctas = extract.cta_inventory || [];
   const aboveFoldCtas = ctas.filter((c) => c.above_fold);
   const palette = extract.css_palette || [];
@@ -422,6 +486,20 @@ function DeepExtractView({
 
             {analyzeErr && (
               <p className="text-xs text-red-700 dark:text-red-400">{analyzeErr}</p>
+            )}
+
+            {summary && summaryFreshness && (
+              <div
+                className={
+                  summaryFreshness.kind === "stale"
+                    ? "rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+                    : summaryFreshness.kind === "synced"
+                    ? "rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-1.5 text-xs text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"
+                    : "rounded-md border border-muted bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground"
+                }
+              >
+                {summaryFreshness.label}
+              </div>
             )}
 
             {summary ? (

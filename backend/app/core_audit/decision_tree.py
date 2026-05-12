@@ -31,6 +31,24 @@ MIN_QUERIES_INFO = 5
 STRONG_SCORE = 4.0
 WEAK_SCORE_MIN = 2.0
 
+# Hysteresis band around the STRONG_SCORE / WEAK_SCORE_MIN boundaries.
+# Page scores drift between collection runs (e.g. 4.05 → 3.95 → 4.02);
+# without a deadband, the recommended action flips LEAVE ↔ STRENGTHEN
+# day to day. Inside the band we hold the current action and tag the
+# decision with `borderline=True` so downstream UI can render «оценка
+# на грани» instead of a confident verdict.
+BORDERLINE_BAND = 0.25
+
+
+def _is_borderline(score: float | None, boundary: float) -> bool:
+    """True iff `score` is within ±BORDERLINE_BAND of `boundary`.
+
+    None defaults to False (no score → no hysteresis to apply).
+    """
+    if score is None:
+        return False
+    return abs(float(score) - boundary) <= BORDERLINE_BAND
+
 
 @dataclass
 class DecisionOutput:
@@ -67,25 +85,49 @@ class DecisionTree:
 
         volume_ok = self._volume_threshold_met(report)
 
-        has_weak_page = report.pages_with_score_2_3 > 0 or (
-            report.best_page_score and WEAK_SCORE_MIN <= report.best_page_score < STRONG_SCORE
+        # Hysteresis: a page sitting near the strong cutoff (3.75-4.25)
+        # is treated as strong (LEAVE) regardless of which side of 4.0
+        # today's run landed on, with a `borderline` flag so the UI can
+        # downgrade the verdict's confidence. Same band at the 2.0
+        # weak cutoff keeps a page from oscillating between «too weak
+        # to count» and «worth strengthening».
+        score = report.best_page_score
+        strong_borderline = _is_borderline(score, STRONG_SCORE)
+        weak_borderline = _is_borderline(score, WEAK_SCORE_MIN)
+
+        has_strong_page = bool(
+            score and (score >= STRONG_SCORE or strong_borderline)
         )
-        has_strong_page = report.best_page_score and report.best_page_score >= STRONG_SCORE
+        has_weak_page = (
+            report.pages_with_score_2_3 > 0
+            or bool(
+                score
+                and WEAK_SCORE_MIN <= score < STRONG_SCORE
+                and not strong_borderline
+            )
+            or weak_borderline
+        )
 
         if has_strong_page and report.status == CoverageStatus.strong:
+            evidence: dict = {}
+            if strong_borderline:
+                evidence["borderline"] = True
+                evidence["borderline_boundary"] = STRONG_SCORE
             return DecisionOutput(
                 intent_code=intent,
                 cluster_key=cluster_key,
                 action=CoverageAction.leave,
                 justification_ru=(
                     f"Интент «{intent.value}» уже хорошо покрыт страницей "
-                    f"{report.best_page_url} (score {report.best_page_score:.1f}). "
+                    f"{report.best_page_url} (score {score:.1f}"
+                    f"{', оценка на грани' if strong_borderline else ''}). "
                     f"Действий не требуется."
                 ),
                 target_page_id=report.best_page_id,
                 target_page_url=report.best_page_url,
                 queries_count=report.queries_count,
                 total_impressions=report.total_impressions_14d,
+                evidence=evidence,
             )
 
         if report.status == CoverageStatus.over_covered:
@@ -113,19 +155,30 @@ class DecisionTree:
             ) if report.best_page_id else False
 
             if not conflict:
+                weak_evidence: dict = {}
+                if weak_borderline:
+                    weak_evidence["borderline"] = True
+                    weak_evidence["borderline_boundary"] = WEAK_SCORE_MIN
+                score_text = (
+                    f"{report.best_page_score:.1f}"
+                    if report.best_page_score is not None
+                    else "—"
+                )
                 return DecisionOutput(
                     intent_code=intent,
                     cluster_key=cluster_key,
                     action=CoverageAction.strengthen,
                     justification_ru=(
                         f"Страница {report.best_page_url} частично покрывает интент "
-                        f"«{intent.value}» (score {report.best_page_score:.1f}). "
+                        f"«{intent.value}» (score {score_text}"
+                        f"{', оценка на грани' if weak_borderline else ''}). "
                         f"Усиление существующей страницы эффективнее создания новой."
                     ),
                     target_page_id=report.best_page_id,
                     target_page_url=report.best_page_url,
                     queries_count=report.queries_count,
                     total_impressions=report.total_impressions_14d,
+                    evidence=weak_evidence,
                 )
 
             return DecisionOutput(

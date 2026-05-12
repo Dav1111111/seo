@@ -182,10 +182,32 @@ def _rule_indexation_coverage(
     # hasn't run — silent (diagnostics layer surfaces this).
     if idx.pages_unknown == idx.pages_total:
         return None
-    confirmed_not_indexed = max(
+    # Prefer the snapshot's directly-counted field if/when it exists
+    # (forward-compat: snapshot may add `confirmed_not_indexed` so we
+    # stop relying on subtraction). When buckets don't add up to
+    # `pages_total` within a small tolerance, we trust the smaller
+    # subtraction result but log so the discrepancy is visible to
+    # whoever debugs the snapshot loader.
+    direct = getattr(idx, "confirmed_not_indexed", None)
+    subtracted = max(
         0,
         idx.pages_total - idx.pages_in_index - idx.pages_excluded - idx.pages_unknown,
     )
+    bucket_sum = (
+        idx.pages_in_index + idx.pages_excluded + idx.pages_unknown + subtracted
+    )
+    if abs(bucket_sum - idx.pages_total) > 2:
+        import logging
+        logging.getLogger(__name__).debug(
+            "indexation buckets don't sum: total=%s in_index=%s excluded=%s "
+            "unknown=%s subtracted=%s (delta=%s)",
+            idx.pages_total, idx.pages_in_index, idx.pages_excluded,
+            idx.pages_unknown, subtracted, bucket_sum - idx.pages_total,
+        )
+    if isinstance(direct, int) and direct >= 0:
+        confirmed_not_indexed = direct
+    else:
+        confirmed_not_indexed = subtracted
     if confirmed_not_indexed <= 0:
         return None
     # Quiet-bar: < 10-page site with ≤ 2 unindexed is normal indexing
@@ -196,7 +218,7 @@ def _rule_indexation_coverage(
     page_word = _ru_plural(confirmed_not_indexed, ("страница", "страницы", "страниц"))
     title = (
         f"Яндекс не видит {confirmed_not_indexed} "
-        f"{_ru_plural(confirmed_not_indexed, ('твою страницу', 'твоих страницы', 'твоих страниц'))}"
+        f"{_ru_plural(confirmed_not_indexed, ('твою страницу', 'твои страницы', 'твоих страниц'))}"
     )
     body = (
         f"На сайте {idx.pages_total} "
@@ -271,7 +293,9 @@ def _rule_harmful_visibility(
     share_pct = bad / classified * 100.0
 
     # Build conversational title/body. Goal: owner immediately gets
-    # «по большинству запросов меня находят не по моей теме».
+    # «по большинству запросов меня находят не по моей теме». Copy
+    # tiers mirror the severity ladder below so wording stays
+    # proportional to the math.
     if share_pct >= 70:
         title = "Яндекс не понимает, кто ты"
         why_short = "Большинство запросов, по которым тебя находят, — не про твою тему."
@@ -309,15 +333,42 @@ def _rule_harmful_visibility(
         "убрать, чтобы перестать ранжироваться по чужой теме."
     )
 
+    # Severity ladder. Two corrections vs. the earlier OR-based rule:
+    #
+    #   * critical requires BOTH count and share simultaneously
+    #     (bad≥20 AND share≥40). The old `OR` would let 6 spam of 15
+    #     classified (= 40%) ring as critical — that's noise on a
+    #     small sample, not «всю видимость съели». An additional
+    #     branch keeps critical for catastrophic 70%+ situations on
+    #     non-trivial samples where the count is still small.
+    #   * high/medium thresholds widened so they can fire on share
+    #     alone for medium-sized signal, since count alone may lag.
+    #
+    # Small-site clamp lives below — it can downgrade these but
+    # never upgrade.
     sev: Severity
-    if classified < 15:
-        sev = "medium" if bad >= 5 else "low"
-    elif bad >= 20 or share_pct >= 40.0:
+    if (bad >= 20 and share_pct >= 40.0) or (share_pct >= 70.0 and classified >= 5):
         sev = "critical"
-    elif bad >= 8 or share_pct >= 20.0:
+    elif bad >= 8 or share_pct >= 30.0:
         sev = "high"
-    else:
+    elif bad >= 5 or share_pct >= 20.0:
         sev = "medium"
+    else:
+        sev = "low"
+    # Small-sample clamp. With <15 classified queries the ratio is
+    # noisy, so we cap severity at `medium`. EXCEPTION: a fully-
+    # broken small site (≥70% harm, ≥5 classified) gets to be
+    # `high` — losing 70%+ of visibility is a real problem even
+    # when total volume is modest. We never let a small sample
+    # become `critical` (that's reserved for sites with both
+    # absolute scale and share).
+    if classified <= 15:
+        if share_pct >= 70.0 and classified >= 5:
+            if sev == "critical":
+                sev = "high"
+        else:
+            if sev in ("critical", "high"):
+                sev = "medium"
     # Harmful visibility is about queries we DON'T want — so the
     # in-focus check inverts: if our spam/disputed examples sit
     # «around» focus tokens, that's exactly the harm worth fixing
@@ -397,10 +448,16 @@ def _rule_missing_landings(
         "предлагаемый URL для новой страницы."
     )
 
+    # Severity: only escalate to `high` when at least one explicitly
+    # high-priority landing is missing, OR when the total backlog is
+    # large enough that even all-low-priority items add up. Four
+    # purely-low-priority items used to fire `high`, which clashed
+    # with `pages_without_review` always being `medium` — calibrate
+    # so wholly-low backlogs stay medium.
     sev: Severity
     if m.high_priority >= 3:
         sev = "critical"
-    elif m.high_priority >= 1 or m.total >= 4:
+    elif m.high_priority >= 1 or m.total >= 6:
         sev = "high"
     else:
         sev = "medium"
@@ -492,7 +549,14 @@ def _rule_pending_recs(
     snap: BrainSnapshot, focus_tokens: list[str],
 ) -> Action | None:
     """Recommendations sitting in `pending` status — already paid for,
-    waiting for owner action. High-priority pending get loud surfacing."""
+    waiting for owner action. High-priority pending get loud surfacing.
+
+    `in_focus` is derived from the URLs of pending rec rows; if any
+    pending rec's URL matches a focus token, the action sorts ahead
+    of out-of-focus items at the same severity. Without this flag,
+    in-focus medium actions would jump over high-priority pending
+    recs that happen to live on focus pages.
+    """
     r = snap.review
     if r.recs_pending <= 0:
         return None
@@ -521,6 +585,18 @@ def _rule_pending_recs(
         "Кнопка «применил» автоматически фиксирует метрики «до» — "
         "через 14 дней увидишь дельту."
     )
+    # in_focus: any pending rec URL substring-matches a focus token.
+    # Read from `top_pending_recommendations` (snapshot.py field), each
+    # row carries a `url` string. Missing field / empty list → False,
+    # preserving the legacy behaviour for tests that don't pass it.
+    rec_urls: list[str] = []
+    pending_rows = getattr(r, "top_pending_recommendations", None) or []
+    for row in pending_rows:
+        if not isinstance(row, dict):
+            continue
+        url = row.get("url") or row.get("page_url")
+        if isinstance(url, str) and url:
+            rec_urls.append(url)
     return Action(
         id="review:pending_recs",
         severity=sev,
@@ -533,6 +609,7 @@ def _rule_pending_recs(
             "pending": r.recs_pending,
             "high_priority_pending": high_n,
         },
+        in_focus=_signals_in_focus(rec_urls, focus_tokens),
     )
 
 
@@ -541,24 +618,67 @@ def _rule_followup_due(
 ) -> Action | None:
     """Outcomes applied but never measured. The 14-day cycle was the
     whole point of marking «applied». Surfacing here nudges the owner
-    when the follow-up is overdue."""
+    when the follow-up is overdue.
+
+    Copy adapts to actual age: if the oldest pending follow-up is
+    overdue (>14 days), we stop saying «скоро» and acknowledge that
+    we're already past the natural window. `in_focus` is derived
+    from any URLs the outcomes loader chose to expose (getattr — keeps
+    forward-compat if snapshot adds the field, returns False today).
+    """
     o = snap.outcomes
     if o.pending_followup <= 0:
         return None
     word = _ru_plural(o.pending_followup, ("замер", "замера", "замеров"))
-    title = f"Скоро узнаем результат твоих {o.pending_followup} {word}"
-    body = (
-        f"Ты применил {o.pending_followup} {_ru_plural(o.pending_followup, ('правку', 'правки', 'правок'))} "
-        f"и нажал «применил & замерить эффект». "
-        f"Замеры до/после делаются автоматически через 14 дней "
-        f"после применения — здесь ничего делать не надо, просто "
-        f"подожди и потом загляни в «До / После»."
+
+    # Optional fields — snapshot may add these later. Until then,
+    # getattr-default keeps the rule honest without rewriting snapshot.
+    outcome_urls_raw = getattr(o, "sample_pending_urls", None) or []
+    outcome_urls = [u for u in outcome_urls_raw if isinstance(u, str) and u]
+    oldest_days = getattr(o, "oldest_pending_days", None)
+    overdue_n = getattr(o, "pending_followup_overdue", None)
+    overdue = (
+        isinstance(oldest_days, (int, float)) and oldest_days > 14
     )
+
+    if overdue:
+        overdue_label = (
+            int(overdue_n)
+            if isinstance(overdue_n, (int, float)) and overdue_n > 0
+            else o.pending_followup
+        )
+        title = f"{o.pending_followup} {word} ждут дольше 14 дней"
+        body = (
+            f"Ты применил {o.pending_followup} "
+            f"{_ru_plural(o.pending_followup, ('правку', 'правки', 'правок'))} "
+            f"и нажал «применил & замерить эффект», но "
+            f"{overdue_label} из них уже просрочены — прошло больше "
+            f"14 дней, а замер «после» так и не подтянулся. "
+            f"Это значит, что Webmaster ещё не отдал свежие метрики "
+            f"для этих страниц; загляни в «До / После», там видно по "
+            f"каждой правке, чего конкретно не хватает."
+        )
+    else:
+        title = f"Скоро узнаем результат твоих {o.pending_followup} {word}"
+        body = (
+            f"Ты применил {o.pending_followup} "
+            f"{_ru_plural(o.pending_followup, ('правку', 'правки', 'правок'))} "
+            f"и нажал «применил & замерить эффект». "
+            f"Замеры до/после делаются автоматически через 14 дней "
+            f"после применения — здесь ничего делать не надо, просто "
+            f"подожди и потом загляни в «До / После»."
+        )
     what_to_do = (
         "Ничего делать не нужно. Через 14 дней после каждой правки "
         "метрики (показы, клики, позиции) подтянутся сами и в модуле "
         "«До / После» появится дельта."
     )
+    evidence: dict[str, int | str | float | None] = {
+        "pending_followup": o.pending_followup,
+        "applied_total": o.applied_total,
+    }
+    if isinstance(oldest_days, (int, float)):
+        evidence["oldest_pending_days"] = int(oldest_days)
     return Action(
         id="outcomes:followup",
         severity="low",
@@ -567,10 +687,8 @@ def _rule_followup_due(
         what_to_do_ru=what_to_do,
         link_to="/studio/outcomes",
         link_label="К замерам",
-        evidence={
-            "pending_followup": o.pending_followup,
-            "applied_total": o.applied_total,
-        },
+        evidence=evidence,
+        in_focus=_signals_in_focus(outcome_urls, focus_tokens),
     )
 
 

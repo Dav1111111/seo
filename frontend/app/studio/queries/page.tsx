@@ -14,6 +14,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FocusPill } from "@/components/studio/focus-pill";
 import {
   Table,
   TableBody,
@@ -247,7 +248,11 @@ function formatPosition(p: number | null | undefined): string {
 export default function StudioQueriesPage() {
   const { currentSite, loading: siteLoading } = useSite();
   const siteId = currentSite?.id || "";
-  const [sort, setSort] = useState<SortMode>("volume");
+  // `sort === null` ⇒ no explicit user sort yet → default to focus-first
+  // (items where `in_focus=true` float to the top, then volume order).
+  // User clicking a sort chip sets a concrete mode and we honour it.
+  const [sort, setSort] = useState<SortMode | null>(null);
+  const effectiveSort: SortMode = sort ?? "volume";
 
   // Trigger UI state — local, no SWR. Each button locks for ~3s after
   // click so a double-click doesn't hammer the dedup window unnecessarily.
@@ -268,8 +273,15 @@ export default function StudioQueriesPage() {
   const setSafeTimeout = useTimeoutSetter();
 
   const { data, error, isLoading, mutate } = useSWR(
-    siteId ? studioKey("queries", siteId, sort) : null,
-    () => api.studioListQueries(siteId, sort, 1000),
+    siteId ? studioKey("queries", siteId, effectiveSort) : null,
+    () => api.studioListQueries(siteId, effectiveSort, 1000),
+  );
+
+  // Strategic focus — drives the «Сейчас в фокусе» banner + the
+  // default focus-first ordering. Hidden entirely when no focus.
+  const { data: focus } = useSWR(
+    siteId ? studioKey("strategic_focus", siteId) : null,
+    () => api.studioGetStrategicFocus(siteId),
   );
 
   async function onDiscover() {
@@ -583,6 +595,23 @@ export default function StudioQueriesPage() {
         </div>
       )}
 
+      {/* Strategic-focus banner — only when focus is active AND the
+          current page actually has any matching item. Hidden otherwise
+          so non-focused sites don't see a no-op badge. */}
+      {focus && (data?.items.some((it) => it.in_focus) ?? false) && (
+        <div
+          className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-sm flex items-start gap-2"
+          title="Управление фокусом — /studio/profile"
+        >
+          <span className="font-medium text-primary whitespace-nowrap">
+            Сейчас в фокусе:
+          </span>
+          <span className="flex-1">
+            {focus.label}. Не в фокусе — серым.
+          </span>
+        </div>
+      )}
+
       {/* Sort */}
       <div className="flex items-center gap-1 text-sm">
         <span className="text-muted-foreground mr-1">Сортировка:</span>
@@ -736,9 +765,17 @@ export default function StudioQueriesPage() {
         </Card>
       ) : (
         (() => {
-          const visible = (data?.items || []).filter(
+          let visible = (data?.items || []).filter(
             (row) => !hidden.has(row.relevance as RelevanceKey),
           );
+          // Default ordering: focus-first when no explicit user sort.
+          // Sort is stable in modern JS, so within each focus bucket
+          // the server-supplied order (volume desc) is preserved.
+          if (sort === null) {
+            visible = [...visible].sort(
+              (a, b) => Number(!!b.in_focus) - Number(!!a.in_focus),
+            );
+          }
           if (visible.length === 0) {
             return (
               <Card className="border-dashed">
@@ -767,7 +804,15 @@ export default function StudioQueriesPage() {
                 </TableHeader>
                 <TableBody>
                   {visible.map((row) => (
-                    <TableRow key={row.query_id}>
+                    <TableRow
+                      key={row.query_id}
+                      className={cn(
+                        // Mute out-of-focus rows only when a focus is
+                        // actually active — otherwise everything looks
+                        // grayed out.
+                        focus && !row.in_focus && "opacity-60",
+                      )}
+                    >
                       <TableCell className="font-medium">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span
@@ -777,6 +822,7 @@ export default function StudioQueriesPage() {
                           >
                             {row.query_text}
                           </span>
+                          <FocusPill in_focus={row.in_focus} />
                           {row.is_branded && (
                             <Badge
                               variant="outline"

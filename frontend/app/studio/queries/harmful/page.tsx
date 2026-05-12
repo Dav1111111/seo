@@ -37,6 +37,7 @@ import { useTimeoutSetter } from "@/lib/hooks/use-timeout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import { FocusPill } from "@/components/studio/focus-pill";
 import {
   ArrowLeft,
   AlertTriangle,
@@ -110,6 +111,13 @@ export default function HarmfulVisibilityPage() {
     },
   );
 
+  // Strategic focus — banner header + default focus-first ordering of
+  // the harmful list. Hidden completely when no focus is set.
+  const { data: focus } = useSWR(
+    siteId ? studioKey("strategic_focus", siteId) : null,
+    () => api.studioGetStrategicFocus(siteId),
+  );
+
   // Stop polling when all candidates have a diagnosis — server-side
   // signal that the run completed, more reliable than a 5-min timeout.
   useEffect(() => {
@@ -173,7 +181,16 @@ export default function HarmfulVisibilityPage() {
   }
 
   const total = data?.counts.total ?? 0;
-  const items = data?.items ?? [];
+  const rawItems = data?.items ?? [];
+  // Focus-first ordering when a focus is active. Sort is stable so
+  // within each bucket the server-supplied order (relevance + volume
+  // desc) is preserved.
+  const items = focus
+    ? [...rawItems].sort(
+        (a, b) => Number(!!b.in_focus) - Number(!!a.in_focus),
+      )
+    : rawItems;
+  const hasInFocus = rawItems.some((it) => it.in_focus);
 
   // Count how many items still need a diagnosis run.
   const undiagnosed = items.filter((it) => !it.harmful_diagnosis).length;
@@ -223,6 +240,22 @@ export default function HarmfulVisibilityPage() {
           </Button>
         )}
       </div>
+
+      {/* Strategic-focus banner — only when focus is set AND at least
+          one harmful item lands in the focus zone. */}
+      {focus && hasInFocus && (
+        <div
+          className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-sm flex items-start gap-2"
+          title="Управление фокусом — /studio/profile"
+        >
+          <span className="font-medium text-primary whitespace-nowrap">
+            Сейчас в фокусе:
+          </span>
+          <span className="flex-1">
+            {focus.label}. Не в фокусе — серым.
+          </span>
+        </div>
+      )}
 
       {/* Trigger banner */}
       {banner && (
@@ -327,7 +360,14 @@ export default function HarmfulVisibilityPage() {
             {items.map((it) => {
               const tone = RELEVANCE_TONE[it.relevance];
               return (
-                <Card key={it.query_id} className={cn(tone.border)}>
+                <Card
+                  key={it.query_id}
+                  className={cn(
+                    tone.border,
+                    // Mute out-of-focus rows only when a focus is active.
+                    focus && !it.in_focus && "opacity-60",
+                  )}
+                >
                   <CardContent className="pt-4 pb-4 space-y-3">
                     {/* Top line */}
                     <div className="flex items-baseline gap-2 flex-wrap">
@@ -343,6 +383,7 @@ export default function HarmfulVisibilityPage() {
                         <Search className="h-4 w-4 inline mr-1 text-muted-foreground" />
                         {it.query_text}
                       </h3>
+                      <FocusPill in_focus={it.in_focus} />
                     </div>
 
                     {/* Stats grid */}
