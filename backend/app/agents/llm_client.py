@@ -82,6 +82,14 @@ def _prompt_hash(system: str, messages: list[dict]) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
+def _use_openai_direct() -> bool:
+    """When LLM_PROVIDER=openai, skip Anthropic and use OpenAI for every
+    call. Lets us flip the whole stack to gpt-5.4 / gpt-5.4-mini without
+    touching call sites — same `(payload, usage_stats)` contract.
+    """
+    return (getattr(settings, "LLM_PROVIDER", "anthropic") or "").lower() == "openai"
+
+
 def call_with_tool(
     *,
     model_tier: str = "cheap",
@@ -99,6 +107,14 @@ def call_with_tool(
     and keeps the connection alive end-to-end. Prompt caching on the
     system prompt is preserved. Output is still structured via tool_use.
     """
+    if _use_openai_direct():
+        return call_with_tool_openai(
+            model_tier=model_tier,
+            system=system,
+            user_message=user_message,
+            tool=tool,
+            max_tokens=max_tokens,
+        )
     client = get_client()
     model = MODEL_MAP.get(model_tier, MODEL_MAP["cheap"])
 
@@ -178,6 +194,13 @@ def call_plain(
     survive the Vercel proxy's single-request timeout. Prompt caching is
     still applied to the system block.
     """
+    if _use_openai_direct():
+        return call_plain_openai(
+            model_tier=model_tier,
+            system=system,
+            user_message=user_message,
+            max_tokens=max_tokens,
+        )
     client = get_client()
     model = MODEL_MAP.get(model_tier, MODEL_MAP["cheap"])
 
@@ -257,6 +280,14 @@ def call_with_optional_tools(
     Caller branches on whichever arrived. Streaming for the same proxy-
     timeout reasons as `call_plain`.
     """
+    if _use_openai_direct():
+        return call_with_optional_tools_openai(
+            model_tier=model_tier,
+            system=system,
+            user_message=user_message,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
     client = get_client()
     model = MODEL_MAP.get(model_tier, MODEL_MAP["cheap"])
 

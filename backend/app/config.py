@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = ""
 
+    # Provider routing. "anthropic" (default) → Claude with OpenAI as
+    # auto-fallback on balance-exhaustion. "openai" → every LLM call goes
+    # directly to OpenAI; Anthropic is not contacted at all. Use this to
+    # switch the whole stack to gpt-5.4 (and gpt-5.4-mini for the cheap
+    # tier) — useful when Claude relevance classification mis-tags too
+    # many queries and a smarter model is required.
+    LLM_PROVIDER: str = "anthropic"
+
     # Telegram
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_DEFAULT_CHAT_ID: str = ""
