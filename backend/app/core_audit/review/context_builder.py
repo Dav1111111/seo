@@ -86,7 +86,7 @@ class ContextBuilder:
 
         top_queries = await self._load_top_queries(db, page.site_id, target_intent.value)
         score = await self._load_page_intent_score(db, page_id, target_intent.value)
-        link_candidates = await self._load_link_candidates(page_id)
+        link_candidates = await self._load_link_candidates(db, page_id)
 
         composite_hash = compute_composite_hash(
             fingerprint.content_hash,
@@ -195,7 +195,9 @@ class ContextBuilder:
         rows = await db.execute(stmt)
         return tuple(q for q, _ in rows)
 
-    async def _load_link_candidates(self, page_id: UUID) -> tuple[LinkCandidate, ...]:
+    async def _load_link_candidates(
+        self, db: AsyncSession, page_id: UUID,
+    ) -> tuple[LinkCandidate, ...]:
         """Pull similarity neighbors from fingerprint so LLM can't hallucinate URLs."""
         try:
             from app.fingerprint import api as fp_api
@@ -203,6 +205,7 @@ class ContextBuilder:
             return ()
         try:
             neighbors = await fp_api.find_similar_pages(
+                db,
                 page_id=page_id,
                 limit=LINK_CANDIDATES_LIMIT,
                 threshold=0.30,
@@ -211,14 +214,25 @@ class ContextBuilder:
         except Exception as exc:
             logger.warning("link_candidates load failed page=%s: %s", page_id, exc)
             return ()
+        # Look up titles/h1 for the neighbor pages so the LLM has anchor
+        # hints (without these it tends to fabricate generic anchors).
+        # One query, keyed by page_id, populates anchor_hint for all hits.
+        neighbor_ids = [n.page_id for n in neighbors]
+        title_by_id: dict[UUID, str | None] = {}
+        if neighbor_ids:
+            rows = await db.execute(
+                select(Page.id, Page.title, Page.h1).where(Page.id.in_(neighbor_ids))
+            )
+            for pid, title, h1 in rows:
+                title_by_id[pid] = title or h1
         return tuple(
             LinkCandidate(
-                url=n["url"],
-                anchor_hint=n.get("title") or n.get("h1"),
-                similarity=float(n.get("score", 0.0)),
+                url=n.url,
+                anchor_hint=title_by_id.get(n.page_id),
+                similarity=float(n.score),
             )
             for n in neighbors
-            if n.get("url")
+            if n.url
         )
 
     # ── Helpers ─────────────────────────────────────────────────────
