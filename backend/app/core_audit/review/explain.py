@@ -63,7 +63,7 @@ _TOOL: dict[str, Any] = {
 }
 
 
-def _serialize_rec(rec: PageReviewRecommendation) -> str:
+def _serialize_rec(rec: PageReviewRecommendation | dict[str, Any]) -> str:
     """Pack the rec into a single user-message payload.
 
     We hand the model the same four fields owners see in the UI:
@@ -72,17 +72,30 @@ def _serialize_rec(rec: PageReviewRecommendation) -> str:
     Anything beyond that — page URL, site context, priority score —
     would invite the model to hallucinate domain claims it can't back
     up from this payload alone.
+
+    Accepts both ORM row and plain dict — see translate_to_plain_ru.
     """
+    if isinstance(rec, dict):
+        category = rec.get("category") or "—"
+        reasoning = rec.get("reasoning_ru") or "—"
+        before = rec.get("before_text") or ""
+        after = rec.get("after_text") or ""
+    else:
+        category = rec.category
+        reasoning = rec.reasoning_ru or "—"
+        before = rec.before_text or ""
+        after = rec.after_text or ""
+
     parts: list[str] = [
-        f"Категория: {rec.category}",
-        f"Обоснование от системы: {rec.reasoning_ru or '—'}",
+        f"Категория: {category}",
+        f"Обоснование от системы: {reasoning}",
     ]
-    if rec.before_text:
+    if before:
         # Cap to 1500 chars per field — keeps the call cheap and a
         # huge before/after never dominates the context.
-        parts.append(f"Сейчас на странице: «{rec.before_text[:1500]}»")
-    if rec.after_text:
-        parts.append(f"Предлагаемая правка: «{rec.after_text[:1500]}»")
+        parts.append(f"Сейчас на странице: «{before[:1500]}»")
+    if after:
+        parts.append(f"Предлагаемая правка: «{after[:1500]}»")
     parts.append(
         "Объясни эту рекомендацию владельцу турагентства на простом "
         "русском (2-3 предложения)."
@@ -91,7 +104,7 @@ def _serialize_rec(rec: PageReviewRecommendation) -> str:
 
 
 def translate_to_plain_ru(
-    rec: PageReviewRecommendation,
+    rec: PageReviewRecommendation | dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     """Run one cheap-tier LLM call to produce `plain_ru` for `rec`.
 
@@ -99,6 +112,11 @@ def translate_to_plain_ru(
     shape returned by :func:`app.agents.llm_client.call_with_tool` —
     in particular ``cost_usd`` is present so the caller can roll it
     up into `agent_runs` / a backfill total.
+
+    Accepts either the ORM row (on-demand endpoint, same event loop)
+    or a plain dict with `category` / `reasoning_ru` / `before_text` /
+    `after_text` keys (backfill — strings are pre-extracted so the
+    async-engine attributes aren't touched from a worker thread).
 
     Raises whatever `call_with_tool` raises (network errors, balance
     exhaustion after fallback, etc.) — the on-demand endpoint catches

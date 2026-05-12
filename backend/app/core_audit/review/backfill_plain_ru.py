@@ -87,17 +87,28 @@ async def backfill_recommendations(
 
     for rec in rows:
         try:
+            # Pre-extract the four fields the LLM needs as plain strings
+            # BEFORE handing off to the worker thread — async-engine
+            # attribute access from a non-event-loop thread raises
+            # MissingGreenlet. Plain dict is safe to cross thread boundary.
+            payload = {
+                "category": rec.category,
+                "reasoning_ru": rec.reasoning_ru,
+                "before_text": rec.before_text,
+                "after_text": rec.after_text,
+            }
+            rec_id = rec.id  # capture for logging without re-touching ORM
             # `translate_to_plain_ru` is sync (the underlying
             # Anthropic / OpenAI SDK calls are blocking). Run it in a
             # worker thread so we don't park the event loop.
             plain_ru, usage = await asyncio.to_thread(
-                translate_to_plain_ru, rec,
+                translate_to_plain_ru, payload,
             )
             if not plain_ru:
                 # Don't poison the column with "" — leave NULL so the
                 # next run can try again.
                 errors.append({
-                    "rec_id": str(rec.id),
+                    "rec_id": str(rec_id),
                     "error": "empty plain_ru returned by LLM",
                 })
                 continue
@@ -107,14 +118,14 @@ async def backfill_recommendations(
             total_cost += float(usage.get("cost_usd") or 0.0)
             logger.info(
                 "backfill: rec=%s cost=$%.5f model=%s",
-                rec.id,
+                rec_id,
                 float(usage.get("cost_usd") or 0.0),
                 usage.get("model"),
             )
         except Exception as exc:  # noqa: BLE001
             await db.rollback()
-            logger.warning("backfill failed for rec=%s: %s", rec.id, exc)
-            errors.append({"rec_id": str(rec.id), "error": str(exc)})
+            logger.warning("backfill failed for rec=%s: %s", rec_id, exc)
+            errors.append({"rec_id": str(rec_id), "error": str(exc)})
 
         await asyncio.sleep(_RATE_SLEEP_SECS)
 
