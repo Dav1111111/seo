@@ -12,7 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core_audit.lateral.dto import LateralContext, normalize_query
+from app.intent.models import PageIntentScore
 from app.models.lateral_query import LateralQuery
+from app.models.page import Page
 from app.models.search_query import SearchQuery
 from app.models.site import Site
 
@@ -21,6 +23,12 @@ from app.models.site import Site
 # LLM only needs a representative slice of "what the site already
 # ranks for" to propose *adjacent* ideas.
 OBSERVED_QUERIES_TOP_N = 25
+
+# Lateral v2 (2026-05-13): anti-cannibalization cap. The LLM needs a
+# representative slice of the site's URL inventory — more than ~50 wastes
+# tokens and dilutes the signal. We pick the most-recently-seen pages,
+# which heuristically tracks the pages the owner actually maintains.
+OWN_PAGES_TOP_N = 50
 
 
 async def build_context(db: AsyncSession, site: Site) -> LateralContext:
@@ -41,6 +49,8 @@ async def build_context(db: AsyncSession, site: Site) -> LateralContext:
 
     top_observed = await _load_top_observed(db, site_id)
     existing_norms = await _load_existing_norms(db, site_id)
+    own_pages = await _load_own_pages(db, site_id)
+    brand_strings = _brand_strings_from(site, tc)
 
     return LateralContext(
         site_id=str(site_id),
@@ -52,6 +62,8 @@ async def build_context(db: AsyncSession, site: Site) -> LateralContext:
         top_observed_queries=top_observed,
         existing_lateral_norms=existing_norms,
         strategic_focus=strategic_focus,
+        own_pages=own_pages,
+        brand_strings=brand_strings,
     )
 
 
@@ -169,3 +181,92 @@ async def _load_existing_norms(
     )
     rows = (await db.execute(stmt)).all()
     return {normalize_query(r[0]) for r in rows if r[0]}
+
+
+async def _load_own_pages(
+    db: AsyncSession, site_id: UUID,
+) -> list[dict]:
+    """Own URL inventory passed to the LLM as anti-cannibalization guard.
+
+    Picks the most-recently-seen pages (proxy for "what the owner actively
+    maintains") and joins on PageIntentScore to surface the top intent_code
+    per page. Cap = OWN_PAGES_TOP_N. Returns [] when no pages crawled yet —
+    a fresh site shouldn't break the weekly task.
+    """
+    stmt = (
+        select(Page.id, Page.url, Page.title, Page.h1)
+        .where(Page.site_id == site_id)
+        .order_by(Page.last_seen_at.desc().nullslast())
+        .limit(OWN_PAGES_TOP_N)
+    )
+    rows = (await db.execute(stmt)).all()
+    if not rows:
+        return []
+
+    page_ids = [r[0] for r in rows]
+
+    # One query for the top-scoring intent per page — avoids N+1.
+    intent_stmt = (
+        select(
+            PageIntentScore.page_id,
+            PageIntentScore.intent_code,
+            PageIntentScore.score,
+        )
+        .where(PageIntentScore.page_id.in_(page_ids))
+        .order_by(PageIntentScore.score.desc())
+    )
+    intent_rows = (await db.execute(intent_stmt)).all()
+    top_intent_by_page: dict[UUID, str] = {}
+    for pid, code, _score in intent_rows:
+        # First row per page wins (results sorted by score desc).
+        top_intent_by_page.setdefault(pid, code)
+
+    out: list[dict] = []
+    for pid, url, title, h1 in rows:
+        out.append({
+            "url": url,
+            "title": title,
+            "h1": h1,
+            "intent_code": top_intent_by_page.get(pid),
+        })
+    return out
+
+
+def _brand_strings_from(site: Site, tc: dict) -> list[str]:
+    """Derive this site's own brand tokens.
+
+    Sources, in priority order:
+      1. target_config.brand_name (owner-curated, most authoritative).
+      2. site.display_name.
+      3. Domain root without TLD (e.g. "grandtourspirit" from
+         "grandtourspirit.ru") — always added so we have at least one
+         token even for fresh sites.
+
+    Returns lowercased, deduped, non-empty tokens.
+    """
+    raw: list[str] = []
+
+    brand_name = tc.get("brand_name")
+    if isinstance(brand_name, str) and brand_name.strip():
+        raw.append(brand_name.strip())
+
+    display = getattr(site, "display_name", None)
+    if isinstance(display, str) and display.strip():
+        raw.append(display.strip())
+
+    if site.domain:
+        # "grandtourspirit.ru" → "grandtourspirit"; ".example" sites also
+        # get a token (helps tests + dev instances).
+        root = site.domain.split(".", 1)[0].strip()
+        if root:
+            raw.append(root)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in raw:
+        norm = token.lower().strip()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out

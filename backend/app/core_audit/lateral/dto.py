@@ -42,6 +42,15 @@ class LateralContext:
     top_observed_queries: list[dict] = field(default_factory=list)
     existing_lateral_norms: set[str] = field(default_factory=set)
     strategic_focus: str | None = None
+    # Lateral v2 (2026-05-13): anti-cannibalization + own-brand guards.
+    # own_pages: list of {url, title, h1, intent_code} for the site's own
+    # crawled pages — passed to the LLM so it doesn't propose a query
+    # that an existing page already targets. Cap ~50.
+    own_pages: list[dict] = field(default_factory=list)
+    # brand_strings: tokens identifying THIS site's brand (e.g. domain
+    # root, target_config.brand_name, display_name). LLM must not propose
+    # queries containing any of these — Python post-filter enforces it.
+    brand_strings: list[str] = field(default_factory=list)
 
 
 def normalize_query(q: str) -> str:

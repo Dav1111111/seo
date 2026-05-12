@@ -14,10 +14,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.core_audit.priority.service import PriorityService
 from app.database import get_db
 
-router = APIRouter()
+# Auth gate: rescore queues Celery work; reads expose ranked actions.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class QueuedResponse(BaseModel):

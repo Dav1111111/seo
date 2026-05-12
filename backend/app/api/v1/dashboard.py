@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.database import get_db
 from app.models.daily_metric import DailyMetric
 from app.models.issue import Issue
@@ -17,7 +18,10 @@ from app.models.agent_run import AgentRun
 from app.models.alert import Alert
 from app.agents.seasonality_engine import SeasonalityEngine
 
-router = APIRouter()
+# Auth gate: every /sites/{site_id}/... route on this router triggers
+# data reads or writes that burn LLM budget downstream. Protect at the
+# router level so future additions stay covered by default.
+router = APIRouter(dependencies=[Depends(require_admin)])
 _season = SeasonalityEngine()
 
 

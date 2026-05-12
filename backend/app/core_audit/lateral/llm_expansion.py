@@ -101,19 +101,24 @@ _SYSTEM = """\
 3. **Не предлагай брендовые запросы** (бренд сайта или конкурентов).
 4. **Не выдумывай услуги/гео, которых нет у бизнеса** — будь привязан
    к services / geo / strategic_focus.
-5. **Не повторяй услуги один-в-один** — задача расширить, а не
+5. **АНТИ-КАННИБАЛИЗАЦИЯ**: если в `own_pages` уже есть страница с релевантным
+   intent под предлагаемый запрос — НЕ предлагай его. Лучше отметь, что
+   существующую страницу можно усилить (но это вне твоей задачи, не пиши об этом).
+6. **БРЕНДОВЫЕ ЗАПРОСЫ**: запрещены запросы, содержащие любую строку из
+   `brand_strings` (включая частичное совпадение). Это бренд САМОГО САЙТА.
+7. **Не повторяй услуги один-в-один** — задача расширить, а не
    парафразировать. «Багги Абхазия» → не «купить багги Абхазия», а
    «однодневные туры из Адлера», «активный отдых Гагра», «джип-тур
    Рицу» — рядом, но шире.
-6. **Каждой идее — relation**:
+8. **Каждой идее — relation**:
    - direct: явная продажа того же продукта тому же покупателю.
    - related: тот же покупатель, смежный продукт.
    - info: покупатель ищет перед покупкой (без транзакции).
    - weak: дальняя смежность, только если дешёво занять.
-7. **Confidence** 0.0-1.0 — честная оценка, не средне-теплая. Цифры
+9. **Confidence** 0.0-1.0 — честная оценка, не средне-теплая. Цифры
    ниже 0.4 ставь только когда сам сомневаешься.
-8. **Rationale** — одно предложение по-русски, почему это В ТОЧКУ для
-   ЭТОГО бизнеса. Без общих фраз «увеличит трафик», «повысит видимость».
+10. **Rationale** — одно предложение по-русски, почему это В ТОЧКУ для
+    ЭТОГО бизнеса. Без общих фраз «увеличит трафик», «повысит видимость».
 
 Если бизнес-контекст пустой или непонятный — лучше верни меньше идей
 с высоким confidence, чем нагнать 20 общих.
@@ -135,6 +140,23 @@ def _format_user_message(ctx: LateralContext) -> str:
         lines.append(
             "competitor_brands (не предлагай эти бренды): "
             + ", ".join(ctx.competitor_brands)
+        )
+
+    if ctx.brand_strings:
+        lines.append(
+            "brand_strings (запрещены частичные совпадения): "
+            + ", ".join(ctx.brand_strings)
+        )
+    if ctx.own_pages:
+        pages_rows = []
+        for p in ctx.own_pages[:40]:  # cap in prompt to keep tokens reasonable
+            title = (p.get("title") or "")[:80]
+            intent = p.get("intent_code") or "?"
+            url = p.get("url", "")
+            pages_rows.append(f"{url} | intent={intent} | {title}")
+        lines.append(
+            "own_pages (НЕ предлагай идеи, которые их каннибализируют):\n  - "
+            + "\n  - ".join(pages_rows)
         )
 
     if ctx.top_observed_queries:
@@ -172,6 +194,10 @@ def expand_with_llm(
     raw_items = tool_input.get("queries") or []
     candidates: list[LateralCandidate] = []
     seen_norms: set[str] = set()
+    # Lateral v2 belt-and-braces: even if the LLM ignores rule 6, we drop
+    # anything whose normalized form contains a brand token (partial match).
+    brand_tokens = [b for b in (ctx.brand_strings or []) if b]
+    dropped_brand = 0
     for item in raw_items:
         if not isinstance(item, dict):
             continue
@@ -183,6 +209,9 @@ def expand_with_llm(
             continue
         if norm in ctx.existing_lateral_norms:
             # LLM ignored our hint — drop silently to save a DB roundtrip.
+            continue
+        if brand_tokens and any(bt in norm for bt in brand_tokens):
+            dropped_brand += 1
             continue
 
         relation = (item.get("relation") or "").strip().lower()
@@ -212,8 +241,9 @@ def expand_with_llm(
             break
 
     logger.info(
-        "lateral.llm_done domain=%s raw=%d kept=%d cost=$%.5f",
-        ctx.domain, len(raw_items), len(candidates), usage.get("cost_usd", 0.0),
+        "lateral.llm_done domain=%s raw=%d kept=%d dropped_brand=%d cost=$%.5f",
+        ctx.domain, len(raw_items), len(candidates), dropped_brand,
+        usage.get("cost_usd", 0.0),
     )
     return candidates, usage
 

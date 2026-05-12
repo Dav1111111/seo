@@ -8,13 +8,16 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.database import get_db
 from app.intent.coverage import CoverageAnalyzer
 from app.intent.models import PageIntentScore, QueryIntent
 from app.models.page import Page
 from app.models.search_query import SearchQuery
 
-router = APIRouter()
+# Auth gate: intent classification and decide endpoints trigger LLM
+# spend; reads expose proprietary coverage data. Protect router-wide.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class QueuedResponse(BaseModel):

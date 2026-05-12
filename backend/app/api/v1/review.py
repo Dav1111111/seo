@@ -20,10 +20,13 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.core_audit.review.models import PageReview, PageReviewRecommendation
 from app.database import get_db
 
-router = APIRouter()
+# Auth gate: page review triggers LLM enrichment; PATCH on
+# recommendations mutates state without owner verification.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class QueuedResponse(BaseModel):

@@ -6,12 +6,15 @@ import uuid
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api.v1.deps import require_admin
 from app.config import settings
 
-router = APIRouter()
+# Auth gate: every endpoint here fires Celery work that consumes API
+# quota and LLM budget. Anonymous POSTs would let anyone drain spend.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class CollectResponse(BaseModel):

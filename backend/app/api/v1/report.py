@@ -9,12 +9,15 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.core_audit.report.dto import WeeklyReport as WeeklyReportDTO
 from app.core_audit.report.renderers.markdown import render_markdown
 from app.core_audit.report.service import ReportService
 from app.database import get_db
 
-router = APIRouter()
+# Auth gate: report build queues Celery work (LLM-heavy); reads expose
+# weekly performance + recommendation history.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class QueuedResponse(BaseModel):

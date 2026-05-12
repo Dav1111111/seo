@@ -18,10 +18,13 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.deps import require_admin
 from app.database import get_db
 from app.models.analysis_event import AnalysisEvent
 
-router = APIRouter()
+# Auth gate: activity feed reveals run_ids and stage history. Protect at
+# the router level so every endpoint inherits the check.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _serialize(ev: AnalysisEvent) -> dict[str, Any]:
