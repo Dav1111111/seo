@@ -89,7 +89,12 @@ async def _collect_webmaster_for_site(site: dict) -> dict:
     )
     try:
         async with task_session() as db:
-            result = await collector.collect_and_store(db, site["id"], days_back=7)
+            # 90 days = Yandex Webmaster API max look-back. Why so wide:
+            # competitor-discovery skip-gate needs ≥5 «money queries» — that
+            # threshold is starved by a 7-day window on slow-niche sites
+            # (tourism off-season). 90 days catches the full year of
+            # high-season tail without paying extra (one paginated call).
+            result = await collector.collect_and_store(db, site["id"], days_back=90)
         return result
     finally:
         await collector.close()
@@ -215,7 +220,8 @@ def collect_site_webmaster(site_id: str, run_id: str | None = None):
                 host_id=site.yandex_webmaster_host_id or settings.YANDEX_WEBMASTER_HOST_ID,
             )
             try:
-                out = await collector.collect_and_store(db, site.id, days_back=7)
+                # See _collect_webmaster_for_site for why 90.
+                out = await collector.collect_and_store(db, site.id, days_back=90)
             except Exception as exc:  # noqa: BLE001
                 await emit_terminal(
                     db, site_id, "webmaster", "failed",
