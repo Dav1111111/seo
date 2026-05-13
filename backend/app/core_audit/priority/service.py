@@ -218,6 +218,7 @@ class PriorityService:
                 PageReviewRecommendation.user_status,
                 PageReviewRecommendation.after_text,
                 PageReviewRecommendation.estimated_impact,
+                PageReviewRecommendation.source_finding_id,
                 PageReview.target_intent_code,
                 PageReview.page_id,
                 PageReview.reviewer_model,
