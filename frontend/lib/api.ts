@@ -102,9 +102,12 @@ export const api = {
   health: () => apiFetch<{ status: string; db: string; redis: string }>("/health"),
 
   // Dashboard
-  dashboard: (siteId = SITE_ID) => apiFetch<any>(`/sites/${siteId}/dashboard`),
+  dashboard: (siteId = SITE_ID) =>
+    apiFetch<any>(`/sites/${siteId}/dashboard`, { base: "admin" }),
   trafficMetrics: (siteId = SITE_ID, days = 30) =>
-    apiFetch<any>(`/sites/${siteId}/metrics/traffic?days=${days}`),
+    apiFetch<any>(`/sites/${siteId}/metrics/traffic?days=${days}`, {
+      base: "admin",
+    }),
 
   // Sites
   sites: () => apiFetch<any[]>("/sites"),
@@ -117,19 +120,22 @@ export const api = {
 
   // Reviews (Module 3)
   review: (reviewId: string) =>
-    apiFetch<any>(`/reviews/${reviewId}`),
+    apiFetch<any>(`/reviews/${reviewId}`, { base: "admin" }),
 
   // Reports (Module 5)
   reportsList: (siteId: string, limit = 20) =>
-    apiFetch<{ total: number; items: any[] }>(`/reports/sites/${siteId}?limit=${limit}`),
+    apiFetch<{ total: number; items: any[] }>(
+      `/reports/sites/${siteId}?limit=${limit}`,
+      { base: "admin" },
+    ),
   reportLatest: (siteId: string) =>
-    apiFetch<any>(`/reports/sites/${siteId}/latest`),
+    apiFetch<any>(`/reports/sites/${siteId}/latest`, { base: "admin" }),
   report: (reportId: string) =>
-    apiFetch<any>(`/reports/${reportId}`),
+    apiFetch<any>(`/reports/${reportId}`, { base: "admin" }),
   triggerReport: (siteId: string, weekEnd?: string) =>
     apiFetch<{ task_id: string; status: string }>(
       `/reports/sites/${siteId}/run${weekEnd ? `?week_end=${encodeURIComponent(weekEnd)}` : ""}`,
-      { method: "POST" },
+      { method: "POST", base: "admin" },
     ),
   reportMarkdownUrl: (reportId: string) => `${API_BASE}/reports/${reportId}/markdown`,
 
@@ -138,19 +144,22 @@ export const api = {
     const qs = new URLSearchParams(params as any).toString();
     return apiFetch<{ total: number; items: any[] }>(
       `/priorities/sites/${siteId}${qs ? `?${qs}` : ""}`,
+      { base: "admin" },
     );
   },
   weeklyPlan: (siteId: string, top_n = 10, max_per_page = 2) =>
     apiFetch<{ total_in_backlog: number; pages_represented: number; max_per_page: number; items: any[] }>(
       `/priorities/sites/${siteId}/weekly-plan?top_n=${top_n}&max_per_page=${max_per_page}`,
+      { base: "admin" },
     ),
   triggerRescore: (siteId: string) =>
     apiFetch<{ task_id: string; status: string }>(
-      `/priorities/sites/${siteId}/rescore`, { method: "POST" },
+      `/priorities/sites/${siteId}/rescore`, { method: "POST", base: "admin" },
     ),
   patchRecommendation: (recId: string, body: { user_status: string; note?: string }) =>
     apiFetch<any>(`/reviews/recommendations/${recId}`, {
       method: "PATCH",
+      base: "admin",
       body: JSON.stringify(body),
     }),
 
@@ -310,7 +319,7 @@ export const api = {
         extra: Record<string, any>;
         run_id: string | null;
       }>;
-    }>(`/sites/${siteId}/activity?limit=${limit}`),
+    }>(`/sites/${siteId}/activity?limit=${limit}`, { base: "admin" }),
 
   getActivityByStage: (siteId: string) =>
     apiFetch<{
@@ -326,7 +335,7 @@ export const api = {
           run_id: string | null;
         }
       >;
-    }>(`/sites/${siteId}/activity/last`),
+    }>(`/sites/${siteId}/activity/last`, { base: "admin" }),
 
   // Events of the latest pipeline run only — lets LastRunSummary show
   // a single clean run without events from previous clicks mixing in.
@@ -342,7 +351,7 @@ export const api = {
         extra: Record<string, any>;
         run_id: string | null;
       }>;
-    }>(`/sites/${siteId}/activity/current-run`),
+    }>(`/sites/${siteId}/activity/current-run`, { base: "admin" }),
 
   triggerFullAnalysis: (siteId: string) =>
     apiFetch<{ status: string; queued: string[]; run_id: string }>(
