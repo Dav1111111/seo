@@ -288,9 +288,9 @@ export default function StudioIndexationPage() {
             <p className="text-sm text-muted-foreground">
               Жми «Перепроверить» — модуль отправит запрос{" "}
               <code className="text-xs">site:{currentSite.domain}</code> в
-              Яндекс Search API, посчитает страницы в индексе и (если мало)
-              автоматически разберёт причину: проверит robots.txt, sitemap,
-              ответ главной страницы под YandexBot.
+              Яндекс Search API, получит видимую выборку URL и (если URL мало)
+              автоматически разберёт возможную причину: проверит robots.txt,
+              sitemap, ответ главной страницы под YandexBot.
             </p>
           </CardContent>
         </Card>
@@ -307,7 +307,7 @@ export default function StudioIndexationPage() {
               </div>
               <p className="text-sm text-blue-900/80">
                 Запрашиваю site:{currentSite.domain} в Яндекс Search API.
-                Если страниц мало — следом запущу диагностику robots.txt,
+                Если URL в выборке мало — следом запущу диагностику robots.txt,
                 sitemap и рендеринга главной. Страница обновится сама через
                 несколько секунд.
               </p>
@@ -369,7 +369,7 @@ export default function StudioIndexationPage() {
                     data.pages_in_index_searchapi !==
                       (data?.pages_in_index_live ?? 0) && (
                       <div className="text-xs text-muted-foreground mt-2">
-                        по проверке Search API:{" "}
+                        в выборке Search API:{" "}
                         <span className="font-medium tabular-nums">
                           {data.pages_in_index_searchapi}
                         </span>
@@ -402,9 +402,9 @@ export default function StudioIndexationPage() {
               <Card>
                 <CardContent className="pt-6 space-y-3">
                   <div className="text-sm font-medium">
-                    Что Яндекс показывает первым
+                    Что Яндекс показал в выборке
                     <span className="text-muted-foreground font-normal ml-2">
-                      (топ-{pages.length} из {data?.pages_found ?? "?"})
+                      (первые {pages.length} из {data?.pages_in_index_searchapi ?? "?"})
                     </span>
                   </div>
                   <ol className="space-y-2 text-sm">
@@ -632,8 +632,8 @@ function UrlSignalTable({
     },
     {
       value: "missing_in_search",
-      label: `в sitemap, но не в Search API (${urls.only_in_sitemap})`,
-      hint: "наши страницы которые Яндекс не показал в выдаче site:domain",
+      label: `в sitemap, но не в выборке Search API (${urls.only_in_sitemap})`,
+      hint: "наши страницы, которых не было в последней выборке site:domain; это не точный статус индекса",
     },
     {
       value: "only_in_search",

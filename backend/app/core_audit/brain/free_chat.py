@@ -659,8 +659,19 @@ def _format_full_snapshot(snap: BrainSnapshot) -> str:
                 line += f" score={rec.get('priority_score')}"
             if rec.get("target_intent_code"):
                 line += f" intent={rec.get('target_intent_code')}"
+            if rec.get("source_finding_id"):
+                line += f" source={rec.get('source_finding_id')}"
             if rec.get("rec_id"):
                 line += f" rec_id={rec.get('rec_id')}"
+            score_bits = []
+            if rec.get("impact_score") is not None:
+                score_bits.append(f"impact={rec.get('impact_score')}")
+            if rec.get("confidence_score") is not None:
+                score_bits.append(f"confidence={rec.get('confidence_score')}")
+            if rec.get("ease_score") is not None:
+                score_bits.append(f"ease={rec.get('ease_score')}")
+            if score_bits:
+                line += " " + " ".join(score_bits)
             reason = (rec.get("reasoning_ru") or "").strip()
             if reason:
                 line += f" — {reason}"

@@ -6,8 +6,8 @@ of concrete opportunities a site owner can act on this week.
 Sources of opportunities
 ------------------------
 1. Content gaps. For each cluster of similar queries where competitors
-   are top-5 and the site isn't in top-30, produce one "create/expand a
-   page about X" opportunity. Groups queries that share a normalised
+   are top-5 and the site is absent from the checked SERP sample,
+   produce one "create/expand a page about X" opportunity. Groups queries that share a normalised
    head-term so "багги абхазия" / "багги в абхазия" / "багги туры
    абхазия" fold into one opportunity, not three.
 
@@ -199,6 +199,12 @@ def _content_gap_opportunities(
         queries = [r.get("query") for r in rows if r.get("query")]
         best_comp_pos = top.get("competitor_position", 99)
         site_pos = top.get("site_position")
+        serp_depth = int(top.get("serp_depth") or 10)
+        own_visibility = (
+            f"на позиции {site_pos}"
+            if site_pos
+            else f"не видим в проверенном топ-{serp_depth}"
+        )
         display_query = min(queries, key=len) if queries else key
 
         # Check if we already have a page that matches this topic
@@ -210,8 +216,9 @@ def _content_gap_opportunities(
             and match.score < STRONG_MATCH_THRESHOLD
         )
 
-        # Priority: top-3 competitor position + site absent = high
-        if best_comp_pos <= 3 and (site_pos is None or site_pos > 30):
+        # Priority: top-3 competitor position + site absent from the
+        # checked SERP sample = high.
+        if best_comp_pos <= 3 and site_pos is None:
             prio = "high"
         elif best_comp_pos <= 5:
             prio = "medium"
@@ -226,7 +233,7 @@ def _content_gap_opportunities(
                 f"Конкурент {top.get('competitor_domain')} стоит на позиции "
                 f"{best_comp_pos} по запросу «{display_query}». У тебя "
                 + (
-                    f"уже есть страница {page_url} — но ты {'на позиции ' + str(site_pos) if site_pos else 'не в топ-100'}. "
+                    f"уже есть страница {page_url} — но ты {own_visibility}. "
                     f"Значит, странице нужна докрутка: недостаёт сигналов "
                     f"intent и покрытия темы."
                 )
@@ -263,7 +270,7 @@ def _content_gap_opportunities(
             reasoning = (
                 f"Конкурент {top.get('competitor_domain')} стоит на позиции "
                 f"{best_comp_pos} по этому запросу, ты "
-                + (f"на позиции {site_pos}" if site_pos else "не ранжируешься в топ-100")
+                + own_visibility
                 + ". В кластере "
                 + f"{len(queries)} похожих запрос"
                 + ("" if len(queries) == 1 else ("а" if 1 < len(queries) < 5 else "ов"))
@@ -282,6 +289,7 @@ def _content_gap_opportunities(
             "competitor_url": top.get("competitor_url"),
             "competitor_title": top.get("competitor_title"),
             "site_position": site_pos,
+            "serp_depth": serp_depth,
             "other_competitors": top.get("other_competitors") or [],
         }
         if match is not None:

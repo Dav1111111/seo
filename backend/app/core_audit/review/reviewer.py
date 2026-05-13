@@ -327,6 +327,7 @@ class Reviewer:
                 reasoning_ru=rec.reasoning_ru,
                 plain_ru=rec.plain_ru,
                 estimated_impact=rec.estimated_impact,
+                source_finding_id=rec.source_finding_id,
                 user_status="pending",
             ))
         await db.commit()

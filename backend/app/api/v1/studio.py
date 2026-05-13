@@ -1176,8 +1176,9 @@ async def get_indexation_sources(
                 search_event.status if search_event else "never_checked"
             ),
             "note": (
-                "Что Яндекс показывает по запросу site:domain прямо сейчас. "
-                "Кнопка «Перепроверить» сверху обновляет это число."
+                "Выборка URL, которые Яндекс показал по запросу site:domain "
+                "прямо сейчас. Это не полный инвентарь индекса; точный "
+                "per-URL статус берём из Webmaster."
             ),
         },
     }
@@ -1646,10 +1647,12 @@ class RecommendationOut(BaseModel):
     rec_id: str
     category: str
     priority: str
+    source_finding_id: str | None = None
     user_status: str
     before_text: str | None
     after_text: str | None
     reasoning_ru: str
+    plain_ru: str | None = None
     priority_score: float | None
     impact_score: float | None
     confidence_score: float | None
@@ -1878,10 +1881,12 @@ async def get_page_detail(
                 rec_id=str(r.id),
                 category=r.category,
                 priority=r.priority,
+                source_finding_id=r.source_finding_id,
                 user_status=r.user_status,
                 before_text=r.before_text,
                 after_text=r.after_text,
                 reasoning_ru=r.reasoning_ru,
+                plain_ru=r.plain_ru,
                 priority_score=float(r.priority_score) if r.priority_score is not None else None,
                 impact_score=float(r.impact_score) if r.impact_score is not None else None,
                 confidence_score=float(r.confidence_score) if r.confidence_score is not None else None,

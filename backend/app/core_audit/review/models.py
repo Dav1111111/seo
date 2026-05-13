@@ -110,6 +110,7 @@ class PageReviewRecommendation(Base, TimestampMixin):
     # written before the LLM produced it are backfilled out-of-band.
     plain_ru: Mapped[str | None] = mapped_column(Text, nullable=True)
     estimated_impact: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    source_finding_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     user_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     user_status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -472,7 +472,7 @@ async def get_content_gaps(
     top_k: int = Query(default=20, ge=3, le=50),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Content gaps — queries where a confirmed competitor ranks top-5 and we don't.
+    """Content gaps — competitor top-5 queries where we are absent from the checked SERP sample.
 
     Reads the per-query SERP cache produced by the last discovery run
     (sites.target_config.competitor_profile.query_serps). No new SERP

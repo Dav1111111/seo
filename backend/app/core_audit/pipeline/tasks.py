@@ -191,6 +191,11 @@ async def _skip_after_primary_failure(
         extra=extra, run_id=run_id,
     )
     await emit_terminal(
+        db, site_id, "classify_queries", "skipped",
+        "Классификация запросов пропущена — базовый сбор завершился с ошибкой.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
         db, site_id, "intent_decide", "skipped",
         "Решения покрытия пропущены — базовый сбор завершился с ошибкой.",
         extra=extra, run_id=run_id,
@@ -224,6 +229,36 @@ def _queue_review_chain(site_id: str, run_id: str | None) -> bool:
     except Exception as exc:  # noqa: BLE001
         log.warning("pipeline.review_chain_dispatch_failed site=%s err=%s", site_id, exc)
         return False
+
+
+def _queue_classify_queries(site_id: str, run_id: str | None) -> bool:
+    """Run SearchQuery relevance classification as part of full analysis.
+
+    This fills own/adjacent/disputed/spam/unclassified counts that the
+    SEO assistant uses. Intent coverage is a separate stage; without this
+    task the assistant sees raw queries but cannot say which ones are ours.
+    """
+    from app.collectors.tasks import classify_queries_site_task
+
+    try:
+        classify_queries_site_task.apply_async(
+            args=[site_id],
+            kwargs={"run_id": run_id},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pipeline.classify_queries_dispatch_failed site=%s err=%s", site_id, exc)
+        return False
+
+
+async def _mark_classify_dispatch_failed(
+    db, site_id: str, run_id: str | None,
+) -> None:
+    await emit_terminal(
+        db, site_id, "classify_queries", "failed",
+        "Не удалось запустить классификацию запросов.",
+        run_id=run_id,
+    )
 
 
 async def _mark_review_chain_dispatch_failed(
@@ -406,6 +441,17 @@ def pipeline_after_primary_task(
         business_truth_rebuild_site_task,
     )
     business_truth_rebuild_site_task.delay(site_id, run_id=run_id)
+
+    # Step 4.5 — classify observed queries by relevance. This runs
+    # independently from intent_decide: intent_decide maps demand to
+    # pages, while classify_queries tells the assistant whether Search
+    # Query rows are ours, adjacent, disputed or spam.
+    if not _queue_classify_queries(site_id, run_id):
+        async def _mark_classify_failed() -> None:
+            async with task_session() as db:
+                await _mark_classify_dispatch_failed(db, site_id, run_id)
+
+        _run(_mark_classify_failed())
 
     # Step 5 — gated competitor discovery. Run the gate decision
     # synchronously so we know whether to queue the task or emit

@@ -250,6 +250,10 @@ def _page_recommendation_items(snap: BrainSnapshot) -> list[BattlePlanItem]:
                 "priority": rec.get("priority"),
                 "category": rec.get("category"),
                 "priority_score": rec.get("priority_score"),
+                "impact_score": rec.get("impact_score"),
+                "confidence_score": rec.get("confidence_score"),
+                "ease_score": rec.get("ease_score"),
+                "source_finding_id": rec.get("source_finding_id"),
                 "target_intent_code": rec.get("target_intent_code"),
                 "url": url,
             },
@@ -413,7 +417,10 @@ def _facts(snap: BrainSnapshot) -> list[str]:
     if idx.last_checked_at:
         facts.append(f"Последняя per-URL проверка Webmaster: {_short_dt(idx.last_checked_at)}.")
     if q.total > 0:
-        facts.append(f"Запросов: {q.total}; own: {q.own}; spam/disputed: {q.spam + q.disputed}.")
+        facts.append(
+            f"Запросов: {q.total}; own: {q.own}; spam/disputed: "
+            f"{q.spam + q.disputed}; unclassified: {q.unclassified}."
+        )
     if c.profile_available:
         facts.append(f"SERP-конкуренты разведаны: запросов {c.queries_probed}, внешних доменов {c.unique_domains_seen}.")
     if c.growth_opportunities:
@@ -475,8 +482,20 @@ def _page_recommendation_detail(rec: dict[str, Any]) -> str:
         bits.append(f"категория={rec.get('category')}")
     if rec.get("target_intent_code"):
         bits.append(f"интент={rec.get('target_intent_code')}")
+    if rec.get("source_finding_id"):
+        bits.append(f"источник={rec.get('source_finding_id')}")
     if rec.get("priority_score") is not None:
         bits.append(f"score={rec.get('priority_score')}")
+    scoring = []
+    for key, label in (
+        ("impact_score", "impact"),
+        ("confidence_score", "confidence"),
+        ("ease_score", "ease"),
+    ):
+        if rec.get(key) is not None:
+            scoring.append(f"{label}={rec.get(key)}")
+    if scoring:
+        bits.append("оценки: " + ", ".join(scoring))
     before = str(rec.get("before_text") or "").strip()
     if before:
         bits.append(f"сейчас в данных: «{before}»")

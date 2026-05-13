@@ -406,7 +406,7 @@ def test_system_prompt_pins_mode_and_honesty_rules() -> None:
     assert "7. КОГДА ОБСУЖДАЕМ ИНДЕКСАЦИЮ" in SYSTEM_PROMPT
     assert "8. КОГДА НЕ ЗНАЕШЬ" in SYSTEM_PROMPT
     assert "9. РЕЖИМ ОБСУЖДЕНИЯ" in SYSTEM_PROMPT
-    assert "11. РЕЖИМ БОЕВОГО SEO-ПЛАНА" in SYSTEM_PROMPT
+    assert "РЕЖИМ БОЕВОГО SEO-ПЛАНА" in SYSTEM_PROMPT
 
 
 def test_user_message_adds_competitor_question_instruction() -> None:

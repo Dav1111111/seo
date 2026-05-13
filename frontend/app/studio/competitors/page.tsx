@@ -571,7 +571,7 @@ export default function StudioCompetitorsPage() {
               <CardContent className="pt-6 text-sm text-muted-foreground">
                 {competitors.length === 0
                   ? "Чтобы найти gap'ы, сначала нужна разведка конкурентов."
-                  : "Не нашли запросов, где конкуренты в топ-5, а вы вне топ-30. Это значит либо выборка маленькая, либо у вас плотные позиции — проверьте /studio/queries."}
+                  : "Не нашли запросов, где конкуренты в топ-5, а вас нет в проверенной SERP-выборке. Это значит либо выборка маленькая, либо у вас плотные позиции — проверьте /studio/queries."}
                 {gaps?.note && <span className="block mt-1">{gaps.note}</span>}
               </CardContent>
             </Card>
@@ -602,7 +602,7 @@ export default function StudioCompetitorsPage() {
                         <td className="px-4 py-2 text-right tabular-nums">
                           {g.site_position == null ? (
                             <span className="text-red-700 font-medium">
-                              30+
+                              нет в топ-{g.serp_depth || "?"}
                             </span>
                           ) : (
                             <span>{g.site_position}</span>

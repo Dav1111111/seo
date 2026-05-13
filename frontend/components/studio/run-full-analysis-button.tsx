@@ -22,7 +22,7 @@ import { useSite } from "@/lib/site-context";
  *
  * Calls `POST /admin/sites/{id}/pipeline/full` (a chord:
  *   crawl + webmaster + demand_map  →  pipeline_after_primary
- *   → competitors → opportunities → intent_decide → review →
+ *   → classify_queries + competitors → opportunities → intent_decide → review →
  *     priorities → report)
  * then polls `GET /sites/{id}/activity/current-run` every 4s to render
  * a per-stage checklist. Once `stage="pipeline" status="done"|"failed"`
@@ -47,6 +47,10 @@ const STAGES: Array<{ key: string; label: string }> = [
   { key: "crawl", label: "Просматриваю твои страницы" },
   { key: "webmaster", label: "Спрашиваю Яндекс.Вебмастер про индексацию" },
   { key: "demand_map", label: "Собираю что ищут в нише" },
+  {
+    key: "classify_queries",
+    label: "Разбираю запросы: наши, спорные или мусорные",
+  },
   {
     key: "business_truth",
     label:

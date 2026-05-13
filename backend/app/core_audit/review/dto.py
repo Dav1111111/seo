@@ -83,7 +83,8 @@ class Recommendation:
     `source_finding_id` is an in-memory identity key tying this rec back
     to the structured CheckFinding that produced it. Used by the LLM
     enrichment layer to merge `after_text`/`reasoning_ru` overrides.
-    Not persisted — reviewer extracts category/priority/text only.
+    Persisted on the DB row so Studio and the assistant can show which
+    detector/finding produced the recommendation.
     """
     category: RecCategory
     priority: RecPriority

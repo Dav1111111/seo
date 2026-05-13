@@ -572,13 +572,12 @@ def indexnow_ping_site(self, site_id: str, run_id: str | None = None):
 
 @celery_app.task(name="check_site_indexation", bind=True, max_retries=1)
 def check_site_indexation(self, site_id: str, run_id: str | None = None):
-    """Probe Yandex `site:domain` to answer "is this site in the index?".
+    """Probe Yandex `site:domain` to collect a public Search API sample.
 
     Runs independently of Webmaster — uses Yandex Cloud Search API
-    directly, so it answers the question even when the Webmaster host
-    is stuck at HOST_NOT_LOADED. Result goes into activity feed as
-    an `indexation` stage event so the UI can surface the honest
-    status instead of showing a blank Webmaster card.
+    directly, so it gives a visibility signal even when the Webmaster
+    host is stuck at HOST_NOT_LOADED. It is not a full index inventory:
+    exact per-URL status still comes from Webmaster.
     """
     from app.collectors.yandex_serp import check_indexation
     from app.core_audit.activity import emit_terminal, log_event
@@ -598,7 +597,7 @@ def check_site_indexation(self, site_id: str, run_id: str | None = None):
             domain = site.domain
             await log_event(
                 db, site_id, "indexation", "started",
-                f"Проверяю индексацию в Яндексе по запросу site:{domain}…",
+                f"Проверяю видимость в Яндексе по выборке site:{domain}…",
                 run_id=run_id,
             )
 
@@ -629,15 +628,16 @@ def check_site_indexation(self, site_id: str, run_id: str | None = None):
 
             if out.pages_found == 0:
                 message = (
-                    f"Сайт {domain} не найден в индексе Яндекса. "
-                    "Это не наша ошибка — Яндекс пока не добавил его в поиск. "
-                    "Проверь в Вебмастере: загружен ли хост и нет ли запретов в robots.txt."
+                    f"Search API не показал URL сайта {domain} в выборке "
+                    "site:domain. Это не точное доказательство полного "
+                    "отсутствия в индексе — точный статус смотри по "
+                    "per-URL данным Webmaster."
                 )
                 status = "skipped"
             else:
                 message = (
-                    f"В индексе Яндекса: {out.pages_found} страниц "
-                    f"(показываю первые {min(len(pages), 20)})."
+                    f"Search API показал {out.pages_found} URL в выборке "
+                    f"site:domain (показываю первые {min(len(pages), 20)})."
                 )
                 status = "done"
 
@@ -1107,8 +1107,8 @@ def studio_indexation_run(self, site_id: str, run_id: str | None = None):
             domain = site.domain
             await log_event(
                 db, site_id, "indexation", "started",
-                f"Проверяю индексацию: site:{domain} + диагностика "
-                f"причины (если страниц мало).",
+                f"Проверяю выборку Яндекса: site:{domain} + диагностика "
+                f"причины (если URL мало).",
                 run_id=run_id,
             )
 
@@ -1162,30 +1162,31 @@ def studio_indexation_run(self, site_id: str, run_id: str | None = None):
             }
 
             if out.pages_found == 0:
-                # Honest skipped: not our error, Yandex hasn't crawled.
-                # The diagnostic verdict (if any) explains WHY.
+                # Honest skipped: Search API sample is empty. Webmaster
+                # per-URL is the source of truth for exact index status.
                 base = (
-                    f"Сайт {domain} не найден в индексе Яндекса. "
+                    f"Search API не показал URL сайта {domain} в выборке site:domain. "
                 )
                 if diagnosis:
                     message = base + f"Корневая причина: {diagnosis['verdict']}."
                 else:
                     message = base + (
-                        "Яндекс просто ещё не добавил его — отправь sitemap "
-                        "в Вебмастер и проверь robots.txt."
+                        "Это не точное доказательство полного отсутствия в "
+                        "индексе — проверь per-URL статус в Webmaster."
                     )
                 status = "skipped"
             elif out.pages_found < LOW_INDEX_THRESHOLD and diagnosis:
                 message = (
-                    f"В индексе всего {out.pages_found} страниц — это мало. "
+                    f"Search API показал всего {out.pages_found} URL в "
+                    f"выборке site:domain — это мало. "
                     f"Корневая причина: {diagnosis['verdict']}. "
                     f"{diagnosis['action_ru']}"
                 )
                 status = "done"
             else:
                 message = (
-                    f"В индексе Яндекса: {out.pages_found} страниц "
-                    f"(показываю первые {min(len(pages), 20)})."
+                    f"Search API показал {out.pages_found} URL в выборке "
+                    f"site:domain (показываю первые {min(len(pages), 20)})."
                 )
                 status = "done"
 

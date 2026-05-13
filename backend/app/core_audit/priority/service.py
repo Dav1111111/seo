@@ -258,7 +258,9 @@ class PriorityService:
                 page_scores[(pid, ic)] = float(score or 0.0)
 
         for r in rows:
-            signal_type, signal_name = self._split_source_finding_id(r.estimated_impact)
+            signal_type, signal_name = self._split_source_finding_id(
+                r.source_finding_id,
+            )
             top_q = self._first_top_query(r.top_queries_snapshot)
 
             # Phase D — attach target_cluster match for this rec's intent.
@@ -433,13 +435,13 @@ class PriorityService:
         return str(first)
 
     @staticmethod
-    def _split_source_finding_id(_estimated_impact: dict | None) -> tuple[str | None, str | None]:
+    def _split_source_finding_id(source_finding_id: str | None) -> tuple[str | None, str | None]:
         """source_finding_id encoding: 'signal_type' or 'signal_type:name'.
 
-        v1 does not persist it on the ORM row — we derive signal_type from
-        the category/signal naming convention. Future: add a column.
-        Returns (signal_type, signal_name) best-effort.
+        Returns (signal_type, signal_name) best-effort. Older rows can
+        still have NULL until their page is reviewed again.
         """
-        # TODO: persist source_finding_id on PageReviewRecommendation
-        # For now returns (None, None) — scorer falls back to category defaults.
-        return None, None
+        if not source_finding_id:
+            return None, None
+        signal, _, name = source_finding_id.partition(":")
+        return signal or None, name or None

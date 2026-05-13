@@ -725,6 +725,10 @@ async def _review(db: AsyncSession, site_id: UUID) -> ReviewFacts:
             PageReviewRecommendation.after_text,
             Page.url,
             PageReview.target_intent_code,
+            PageReviewRecommendation.source_finding_id,
+            PageReviewRecommendation.impact_score,
+            PageReviewRecommendation.confidence_score,
+            PageReviewRecommendation.ease_score,
         )
         .join(PageReview, PageReview.id == PageReviewRecommendation.review_id)
         .join(Page, Page.id == PageReview.page_id)
@@ -752,6 +756,10 @@ async def _review(db: AsyncSession, site_id: UUID) -> ReviewFacts:
             "after_text": (r[6] or "")[:160],
             "url": r[7],
             "target_intent_code": r[8],
+            "source_finding_id": r[9],
+            "impact_score": float(r[10]) if r[10] is not None else None,
+            "confidence_score": float(r[11]) if r[11] is not None else None,
+            "ease_score": float(r[12]) if r[12] is not None else None,
         }
         for r in top_rec_rows
     ]

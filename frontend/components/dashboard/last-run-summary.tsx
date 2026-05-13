@@ -52,7 +52,7 @@ function timeAgo(iso: string | undefined | null): string {
 const TERMINAL = new Set(["done", "failed", "skipped"]);
 const WORK_STAGES = [
   "crawl", "webmaster", "demand_map",
-  "business_truth",
+  "business_truth", "classify_queries",
   "competitor_discovery", "competitor_deep_dive", "opportunities",
   "review", "priorities", "report",
 ];

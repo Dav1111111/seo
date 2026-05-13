@@ -38,7 +38,11 @@ v1_router.include_router(review_router, tags=["review"])
 v1_router.include_router(priority_router, tags=["priority"])
 v1_router.include_router(report_router, tags=["report"])
 v1_router.include_router(admin_demand_map_router, tags=["admin-demand-map"])
+# Activity is an admin-gated feed. Keep the legacy non-prefixed route for
+# direct/internal callers, and expose the admin-prefixed alias used by the
+# Next.js admin-proxy (`/admin-proxy/...` -> `/api/v1/admin/...`).
 v1_router.include_router(activity_router, tags=["activity"])
+v1_router.include_router(activity_router, prefix="/admin", tags=["activity"])
 v1_router.include_router(admin_ops_router, tags=["admin-ops"])
 v1_router.include_router(business_truth_router, tags=["business-truth"])
 v1_router.include_router(lateral_router, tags=["lateral"])

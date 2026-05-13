@@ -27,6 +27,10 @@ def test_battle_plan_caps_actions_and_requires_grounded_fields() -> None:
             "before_text": f"old title {idx}",
             "after_text": f"action {idx}",
             "target_intent_code": "buggy_abkhazia",
+            "source_finding_id": "title_length",
+            "impact_score": 0.7,
+            "confidence_score": 0.8,
+            "ease_score": 0.9,
         }
         for idx in range(8)
     ]
@@ -64,6 +68,7 @@ def test_battle_plan_reply_has_plan_verification_and_missing_data() -> None:
     assert "Куда открыть:" in reply
     assert "Проверенный per-URL статус Webmaster" in reply
     assert "unknown не считай ошибкой" in reply
+    assert "unclassified:" in reply
     assert "Нет SERP-разведки конкурентов" in reply
 
 

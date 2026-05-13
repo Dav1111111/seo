@@ -11,10 +11,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Search, ExternalLink, AlertCircle, CheckCircle2 } from "lucide-react";
 
 /**
- * Honest indexation status — asks Yandex Search API `site:domain` directly
- * (independent of Webmaster). When Webmaster is stuck at HOST_NOT_LOADED,
- * this card is the *only* way the owner gets a truthful answer to
- * "is my site visible in Yandex search at all?".
+ * Search visibility sample — asks Yandex Search API `site:domain`
+ * directly. Webmaster per-URL stays the exact index source; this card
+ * only shows what the public Search API sample returned right now.
  *
  * Reads the most recent `indexation` stage event. If nothing on record,
  * prompts the owner to run the first check.
@@ -103,7 +102,7 @@ export function IndexationCard({ siteId }: { siteId: string }) {
             <Search className="h-4 w-4" /> Индексация в Яндексе
           </CardTitle>
           <p className="text-xs text-muted-foreground mt-1">
-            Прямой запрос <code>site:домен</code> — не зависит от Вебмастера.
+            Выборка <code>site:домен</code> — точный статус смотри в Webmaster.
           </p>
         </div>
         <Button size="sm" variant="outline" onClick={runCheck} disabled={running} className="shrink-0">
@@ -135,8 +134,8 @@ export function IndexationCard({ siteId }: { siteId: string }) {
               <span>{event.message}</span>
             </div>
             <div className="text-xs text-muted-foreground pl-6">
-              Это ограничение Яндекса, не нашей платформы. Открой Вебмастер →
-              проверь, загружен ли хост, нет ли запретов в robots.txt.
+              Это пустая выборка Search API, а не доказательство полного
+              отсутствия в индексе. Точный статус проверь в Webmaster.
             </div>
           </div>
         ) : (
@@ -144,9 +143,9 @@ export function IndexationCard({ siteId }: { siteId: string }) {
             <div className="flex items-center gap-2 text-sm">
               <CheckCircle2 className="h-4 w-4 text-emerald-600" />
               <span>
-                В индексе найдено{" "}
+                Search API показал{" "}
                 <Badge variant="secondary">{extra?.pages_found ?? 0}</Badge>{" "}
-                страниц
+                URL в выборке
               </span>
             </div>
             {extra?.pages && extra.pages.length > 0 && (

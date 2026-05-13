@@ -895,6 +895,7 @@ function RecCard({
     rec_id: string;
     category: string;
     priority: string;
+    source_finding_id: string | null;
     user_status: string;
     before_text: string | null;
     after_text: string | null;
@@ -937,6 +938,14 @@ function RecCard({
           <span className="text-xs text-muted-foreground">
             {CATEGORY_LABEL[rec.category] || rec.category}
           </span>
+          {rec.source_finding_id && (
+            <span
+              className="text-xs text-muted-foreground truncate max-w-[220px]"
+              title={`Источник: ${rec.source_finding_id}`}
+            >
+              · {rec.source_finding_id}
+            </span>
+          )}
           {rec.priority_score != null && (
             <span className="text-xs text-muted-foreground tabular-nums">
               · score {rec.priority_score.toFixed(2)}

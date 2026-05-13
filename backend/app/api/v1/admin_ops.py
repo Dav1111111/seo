@@ -47,7 +47,7 @@ async def trigger_full_pipeline(
     site_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """One button: crawl → webmaster → demand map → competitors (auto-chain).
+    """One button: crawl → webmaster → demand map → classify → competitors.
 
     Owner gets the whole platform running on their site without hunting
     through three pages. Spaces the stages so they don't collide.
@@ -102,6 +102,7 @@ async def trigger_full_pipeline(
     queued: list[str] = [
         *primary_tasks.values(),
         "business_truth",
+        "classify_queries",
         "competitor_discovery",
         "competitor_deep_dive",
         "opportunities",
@@ -114,7 +115,8 @@ async def trigger_full_pipeline(
     await log_event(
         db, site_id, "pipeline", "started",
         "Запустил полный анализ: страницы, Вебмастер, карта спроса, "
-        "понимание бизнеса, конкуренты, решения покрытия и проверка страниц. "
+        "понимание бизнеса, классификация запросов, конкуренты, решения "
+        "покрытия и проверка страниц. "
         "Обычно несколько минут.",
         extra={"queued": queued, "run_id": run_id},
         run_id=run_id,
@@ -501,12 +503,11 @@ async def trigger_indexation_check(
     site_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Probe Yandex for `site:domain` — honest "are we in the index" answer.
+    """Probe Yandex for `site:domain` — public Search API sample.
 
     Independent of Webmaster. Useful when Webmaster reports
-    HOST_NOT_LOADED: this endpoint asks the public search directly,
-    so the owner sees whether Yandex genuinely has zero pages or
-    whether there's just a Webmaster-side glitch.
+    HOST_NOT_LOADED, but it is not a full index inventory; exact per-URL
+    index status still comes from Webmaster.
     """
     site = await db.get(Site, site_id)
     if site is None:

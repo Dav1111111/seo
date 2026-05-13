@@ -263,6 +263,7 @@ export const api = {
       gaps?: Array<{
         query: string;
         site_position: number | null;
+        serp_depth: number;
         competitor_domain: string;
         competitor_position: number;
         competitor_url: string;
@@ -394,8 +395,8 @@ export const api = {
       { method: "POST", base: "admin" },
     ),
 
-  // Indexation probe — asks Yandex Search API `site:domain`. Fallback
-  // to Webmaster: works even when the host is stuck at HOST_NOT_LOADED.
+  // Indexation probe — asks Yandex Search API `site:domain` for a
+  // visible sample. Webmaster per-URL remains the exact index source.
   triggerIndexationCheck: (siteId: string) =>
     apiFetch<{
       status: string;
@@ -1072,6 +1073,7 @@ export const api = {
           rec_id: string;
           category: string;
           priority: string;
+          source_finding_id: string | null;
           user_status: string;
           before_text: string | null;
           after_text: string | null;

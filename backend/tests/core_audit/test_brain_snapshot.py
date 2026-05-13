@@ -92,6 +92,10 @@ async def test_review_snapshot_uses_latest_completed_reviews_per_intent(
             priority="high",
             user_status="pending",
             priority_score=8,
+            impact_score=0.7,
+            confidence_score=0.8,
+            ease_score=0.9,
+            source_finding_id="title_length",
             reasoning_ru="current info recommendation",
         ),
         PageReviewRecommendation(
@@ -135,3 +139,7 @@ async def test_review_snapshot_uses_latest_completed_reviews_per_intent(
         "current info recommendation",
         "current commercial recommendation",
     ]
+    assert facts.top_pending_recommendations[0]["source_finding_id"] == "title_length"
+    assert facts.top_pending_recommendations[0]["impact_score"] == 0.7
+    assert facts.top_pending_recommendations[0]["confidence_score"] == 0.8
+    assert facts.top_pending_recommendations[0]["ease_score"] == 0.9

@@ -415,7 +415,7 @@ export default function CompetitorsPage() {
           ) : (
             <>
               <p className="text-sm text-muted-foreground mb-3">
-                Запросы, по которым конкуренты в топ-5, а ты не в топ-30 или отсутствуешь.
+                Запросы, по которым конкуренты в топ-5, а тебя нет в проверенной SERP-выборке.
                 Это темы для новых страниц или жёсткого усиления.
               </p>
               <ul className="space-y-2">
@@ -425,7 +425,7 @@ export default function CompetitorsPage() {
                       <TrendingDown className="h-4 w-4 text-rose-600" />
                       <span className="font-mono text-sm font-medium">{g.query}</span>
                       <Badge variant="outline" className="text-[10px]">
-                        ты: {g.site_position ?? "нет в топ-100"}
+                        ты: {g.site_position ?? `нет в топ-${g.serp_depth ?? "?"}`}
                       </Badge>
                     </div>
                     <div className="text-xs leading-snug pl-6">
