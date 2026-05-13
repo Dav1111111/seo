@@ -38,6 +38,27 @@ _PRIORITY_SCORE = {
 }
 
 
+# Evidence keys that are LLM/system-internal only and must NEVER leak
+# into owner-facing markdown. `source_finding_id` is the Python-check
+# identifier (e.g. `commercial.missing_phone_in_header`); the owner
+# should see the human reason, not the code path.
+_INTERNAL_EVIDENCE_KEYS: frozenset[str] = frozenset({
+    "source_finding_id",
+})
+
+
+def _evidence_for_owner(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Strip internal-only keys before rendering for the owner.
+
+    The full evidence dict still travels with the BattlePlanItem so
+    LLM context builders and downstream consumers can use it; only the
+    markdown rendering goes through this filter.
+    """
+    if not evidence:
+        return {}
+    return {k: v for k, v in evidence.items() if k not in _INTERNAL_EVIDENCE_KEYS}
+
+
 def build_battle_plan_items(
     snap: BrainSnapshot,
     plan: Plan,
@@ -100,7 +121,7 @@ def render_battle_plan_reply(snap: BrainSnapshot, plan: Plan) -> str:
             f"   - Проверка: {item.verify_ru}",
             f"   - Куда открыть: {item.link_to}",
         ])
-        evidence = _format_evidence(item.evidence)
+        evidence = _format_evidence(_evidence_for_owner(item.evidence))
         if evidence:
             lines.append(f"   - Основание: {evidence}")
 
@@ -482,8 +503,10 @@ def _page_recommendation_detail(rec: dict[str, Any]) -> str:
         bits.append(f"категория={rec.get('category')}")
     if rec.get("target_intent_code"):
         bits.append(f"интент={rec.get('target_intent_code')}")
-    if rec.get("source_finding_id"):
-        bits.append(f"источник={rec.get('source_finding_id')}")
+    # `source_finding_id` is an internal Python-check identifier
+    # (e.g. `commercial.missing_phone_in_header`). It's useful as LLM
+    # context inside `evidence` but must NOT leak into owner-facing
+    # markdown — see `_evidence_for_owner`.
     if rec.get("priority_score") is not None:
         bits.append(f"score={rec.get('priority_score')}")
     scoring = []

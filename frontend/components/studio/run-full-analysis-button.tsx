@@ -196,7 +196,7 @@ export function RunFullAnalysisButton() {
         if (lastPipeline.status === "failed") {
           setFinalStatus({
             kind: "err",
-            msg: "Анализ прерван. Загляни в Activity справа — там детали.",
+            msg: "Анализ прерван. Загляни в ленту событий справа — там детали.",
             at: Date.now(),
           });
         } else {
@@ -226,7 +226,7 @@ export function RunFullAnalysisButton() {
         setRunning(false);
         setFinalStatus({
           kind: "err",
-          msg: "Слежу более 8 минут — что-то затянулось. Загляни в Activity.",
+          msg: "Слежу более 8 минут — что-то затянулось. Загляни в ленту событий.",
           at: Date.now(),
         });
         return;
@@ -579,8 +579,8 @@ function ErrorState({ msg, onRetry }: { msg: string; onRetry: () => void }) {
             {msg}
           </p>
           <p className="text-xs text-red-900/70 dark:text-red-200/70 mt-2">
-            Попробуй запустить ещё раз. Если повторится — загляни в Activity
-            справа: там видно, на каком шаге сорвалось.
+            Попробуй запустить ещё раз. Если повторится — загляни в ленту
+            событий справа: там видно, на каком шаге сорвалось.
           </p>
         </div>
       </div>

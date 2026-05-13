@@ -409,6 +409,21 @@ def test_system_prompt_pins_mode_and_honesty_rules() -> None:
     assert "РЕЖИМ БОЕВОГО SEO-ПЛАНА" in SYSTEM_PROMPT
 
 
+def test_system_prompt_forbids_citing_internal_ids() -> None:
+    """`source_finding_id` and similar Python-check identifiers travel
+    in the snapshot context so the LLM knows WHICH detector fired.
+    They must never be cited back to the owner — the prompt has to
+    explicitly forbid that."""
+    prompt_lower = SYSTEM_PROMPT.lower()
+    # The forbidden term itself appears at least once (in the rule).
+    assert "source_finding_id" in prompt_lower
+    # And the rule must explicitly say "do not cite / do not show".
+    assert "не цитируй" in prompt_lower or "не показывай" in prompt_lower
+    # And it must mention the concept of an internal identifier so the
+    # rule generalises beyond just `source_finding_id`.
+    assert "идентификатор" in prompt_lower or "внутренние коды" in prompt_lower
+
+
 def test_user_message_adds_competitor_question_instruction() -> None:
     """Competitor questions get an extra guardrail: split SERP,
     deep-dive and computed opportunities, and point to the module when

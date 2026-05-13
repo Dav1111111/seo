@@ -189,6 +189,7 @@ export function LastRunSummary({ siteId }: { siteId: string }) {
           <StageChip stage={byStage.get("webmaster")}            label="вебмастер" />
           <StageChip stage={byStage.get("demand_map")}           label="карта спроса" />
           <StageChip stage={byStage.get("business_truth")}       label="понимание бизнеса" />
+          <StageChip stage={byStage.get("classify_queries")}     label="разбор запросов" />
           <StageChip stage={discovery}                           label="разведка" />
           <StageChip stage={dive}                                label="глубокий анализ" />
           <StageChip stage={opps}                                label="точки роста" />

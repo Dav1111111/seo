@@ -35,6 +35,17 @@ type ActivityEvent = {
   run_id: string | null;
 };
 
+function timeAgo(iso: string | undefined | null): string {
+  if (!iso) return "—";
+  const utcIso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+  const then = new Date(utcIso).getTime();
+  const sec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (sec < 60) return "только что";
+  if (sec < 3600) return `${Math.floor(sec / 60)} мин назад`;
+  if (sec < 86_400) return `${Math.floor(sec / 3600)} ч назад`;
+  return `${Math.floor(sec / 86_400)} д назад`;
+}
+
 function asIndexationExtra(extra: Record<string, unknown>): IndexationExtra {
   const pages = Array.isArray(extra.pages)
     ? (extra.pages as Array<Record<string, unknown>>)
@@ -140,12 +151,15 @@ export function IndexationCard({ siteId }: { siteId: string }) {
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex items-center gap-2 text-sm flex-wrap">
               <CheckCircle2 className="h-4 w-4 text-emerald-600" />
               <span>
                 Search API показал{" "}
                 <Badge variant="secondary">{extra?.pages_found ?? 0}</Badge>{" "}
                 URL в выборке
+              </span>
+              <span className="text-xs text-muted-foreground">
+                · обновлено {timeAgo(event.ts)}
               </span>
             </div>
             {extra?.pages && extra.pages.length > 0 && (

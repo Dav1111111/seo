@@ -1257,162 +1257,195 @@ def classify_queries_site_task(self, site_id: str, run_id: str | None = None):
     from app.models.search_query import SearchQuery
 
     async def _run():
-        async with task_session() as db:
-            site = (await db.execute(
-                select(Site).where(Site.id == UUID(site_id))
-            )).scalar_one_or_none()
-            if not site:
-                await emit_terminal(
-                    db, site_id, "classify_queries", "failed",
-                    "Сайт не найден в базе.",
-                    run_id=run_id,
-                )
-                return {"status": "failed", "error": "Site not found"}
-
-            profile = ProfileSlice.from_target_config(site.target_config)
-            narrative = (
-                site.target_config.get("narrative_ru")
-                if site.target_config else ""
-            ) or ""
-
-            if not profile.primary_product or not profile.geo_primary:
-                await emit_terminal(
-                    db, site_id, "classify_queries", "skipped",
-                    "Профиль неполный — заполни primary_product и "
-                    "geo_primary в /studio/profile перед классификацией.",
-                    extra={"reason": "incomplete_profile"},
-                    run_id=run_id,
-                )
-                return {"status": "skipped", "reason": "incomplete_profile"}
-
-            # Rows we may overwrite — never user-set ones.
-            rows = (await db.execute(
-                select(SearchQuery).where(
-                    SearchQuery.site_id == site.id,
-                    or_(
-                        SearchQuery.relevance_set_by.is_(None),
-                        SearchQuery.relevance_set_by == "rules",
-                        SearchQuery.relevance_set_by == "llm",
-                    ),
-                )
-            )).scalars().all()
-
-            if not rows:
-                await emit_terminal(
-                    db, site_id, "classify_queries", "done",
-                    "Нет запросов для классификации.",
-                    extra={"total": 0},
-                    run_id=run_id,
-                )
-                return {"status": "done", "total": 0}
-
-            await log_event(
-                db, site_id, "classify_queries", "started",
-                f"Классифицирую {len(rows)} запросов: правила, потом "
-                f"LLM пакетами по {CLASSIFY_BATCH_SIZE}.",
-                extra={"total": len(rows), "primary": profile.primary_product},
-                run_id=run_id,
-            )
-
-            now = datetime.now(timezone.utc)
-
-            # ── Pass 1: rules ──────────────────────────────────
-            rules_hits = 0
-            llm_pending: list[tuple[int, SearchQuery]] = []  # (idx-in-list, row)
-            for r in rows:
-                v = classify_by_rules(r.query_text, profile)
-                if v is not None:
-                    r.relevance = v.relevance
-                    r.relevance_set_by = v.set_by
-                    r.relevance_set_at = now
-                    r.relevance_reason_ru = v.reason_ru
-                    rules_hits += 1
-                else:
-                    llm_pending.append((len(llm_pending), r))
-
-            await db.commit()
-
-            # ── Pass 2: LLM in batches ────────────────────────
-            llm_hits = 0
-            llm_cost = 0.0
-            llm_input_tokens = 0
-            llm_output_tokens = 0
-            llm_failures = 0
-
-            for start in range(0, len(llm_pending), CLASSIFY_BATCH_SIZE):
-                batch = llm_pending[start : start + CLASSIFY_BATCH_SIZE]
-                batch_queries = [row.query_text for _, row in batch]
-
-                try:
-                    result = await anyio.to_thread.run_sync(
-                        classify_by_llm,
-                        batch_queries,
-                        profile,
-                        narrative,
+        # Pipeline cascade invariant — every started stage MUST receive a
+        # terminal event. The `_run` body can raise from many places
+        # (OperationalError on session enter, anthropic SDK errors inside
+        # classify_by_llm, malformed target_config, etc.). Without this
+        # outer guard, Celery records FAILURE on the task itself but no
+        # `classify_queries:failed` activity event is written, leaving
+        # the pipeline reconciler unable to close the wrapper.
+        #
+        # Pattern mirrored from `pipeline_intent_then_review_task`
+        # (core_audit/pipeline/tasks.py).
+        try:
+            async with task_session() as db:
+                site = (await db.execute(
+                    select(Site).where(Site.id == UUID(site_id))
+                )).scalar_one_or_none()
+                if not site:
+                    await emit_terminal(
+                        db, site_id, "classify_queries", "failed",
+                        "Сайт не найден в базе.",
+                        run_id=run_id,
                     )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "classify_queries.llm_batch_failed start=%d size=%d "
-                        "err=%s",
-                        start, len(batch), exc,
+                    return {"status": "failed", "error": "Site not found"}
+
+                profile = ProfileSlice.from_target_config(site.target_config)
+                narrative = (
+                    site.target_config.get("narrative_ru")
+                    if site.target_config else ""
+                ) or ""
+
+                if not profile.primary_product or not profile.geo_primary:
+                    await emit_terminal(
+                        db, site_id, "classify_queries", "skipped",
+                        "Профиль неполный — заполни primary_product и "
+                        "geo_primary в /studio/profile перед классификацией.",
+                        extra={"reason": "incomplete_profile"},
+                        run_id=run_id,
                     )
-                    llm_failures += len(batch)
-                    continue
+                    return {"status": "skipped", "reason": "incomplete_profile"}
 
-                llm_cost += result.cost_usd
-                llm_input_tokens += result.input_tokens
-                llm_output_tokens += result.output_tokens
+                # Rows we may overwrite — never user-set ones.
+                rows = (await db.execute(
+                    select(SearchQuery).where(
+                        SearchQuery.site_id == site.id,
+                        or_(
+                            SearchQuery.relevance_set_by.is_(None),
+                            SearchQuery.relevance_set_by == "rules",
+                            SearchQuery.relevance_set_by == "llm",
+                        ),
+                    )
+                )).scalars().all()
 
-                for batch_idx, (_, row) in enumerate(batch):
-                    verdict = result.verdicts.get(batch_idx)
-                    if verdict is None:
-                        # Model didn't return this index — leave row
-                        # alone (will retry on next run).
-                        continue
-                    row.relevance = verdict.relevance
-                    row.relevance_set_by = verdict.set_by
-                    row.relevance_set_at = now
-                    row.relevance_reason_ru = verdict.reason_ru
-                    llm_hits += 1
+                if not rows:
+                    await emit_terminal(
+                        db, site_id, "classify_queries", "done",
+                        "Нет запросов для классификации.",
+                        extra={"total": 0},
+                        run_id=run_id,
+                    )
+                    return {"status": "done", "total": 0}
 
-                # Commit per-batch so partial progress survives a
-                # worker crash mid-run.
+                await log_event(
+                    db, site_id, "classify_queries", "started",
+                    f"Классифицирую {len(rows)} запросов: правила, потом "
+                    f"LLM пакетами по {CLASSIFY_BATCH_SIZE}.",
+                    extra={"total": len(rows), "primary": profile.primary_product},
+                    run_id=run_id,
+                )
+
+                now = datetime.now(timezone.utc)
+
+                # ── Pass 1: rules ──────────────────────────────────
+                rules_hits = 0
+                llm_pending: list[tuple[int, SearchQuery]] = []  # (idx-in-list, row)
+                for r in rows:
+                    v = classify_by_rules(r.query_text, profile)
+                    if v is not None:
+                        r.relevance = v.relevance
+                        r.relevance_set_by = v.set_by
+                        r.relevance_set_at = now
+                        r.relevance_reason_ru = v.reason_ru
+                        rules_hits += 1
+                    else:
+                        llm_pending.append((len(llm_pending), r))
+
                 await db.commit()
 
-            stats = {
-                "total": len(rows),
-                "rules_hits": rules_hits,
-                "llm_hits": llm_hits,
-                "llm_failures": llm_failures,
-                "llm_batches": (len(llm_pending) + CLASSIFY_BATCH_SIZE - 1)
-                    // CLASSIFY_BATCH_SIZE,
-                "llm_cost_usd": round(llm_cost, 5),
-                "llm_input_tokens": llm_input_tokens,
-                "llm_output_tokens": llm_output_tokens,
-            }
+                # ── Pass 2: LLM in batches ────────────────────────
+                llm_hits = 0
+                llm_cost = 0.0
+                llm_input_tokens = 0
+                llm_output_tokens = 0
+                llm_failures = 0
 
-            unclassified_left = len(rows) - rules_hits - llm_hits
-            if unclassified_left > 0:
-                message = (
-                    f"Классифицировано {rules_hits + llm_hits} из {len(rows)}: "
-                    f"{rules_hits} правилами, {llm_hits} LLM. "
-                    f"{unclassified_left} остались без класса "
-                    f"(LLM вернул не на всё)."
-                )
-                terminal = "done"  # not a failure — partial is fine
-            else:
-                message = (
-                    f"Классифицировано {len(rows)} запросов: "
-                    f"{rules_hits} правилами, {llm_hits} LLM. "
-                    f"Стоимость: ${llm_cost:.4f}."
-                )
-                terminal = "done"
+                for start in range(0, len(llm_pending), CLASSIFY_BATCH_SIZE):
+                    batch = llm_pending[start : start + CLASSIFY_BATCH_SIZE]
+                    batch_queries = [row.query_text for _, row in batch]
 
-            await emit_terminal(
-                db, site_id, "classify_queries", terminal, message,
-                extra=stats, run_id=run_id,
+                    try:
+                        result = await anyio.to_thread.run_sync(
+                            classify_by_llm,
+                            batch_queries,
+                            profile,
+                            narrative,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "classify_queries.llm_batch_failed start=%d size=%d "
+                            "err=%s",
+                            start, len(batch), exc,
+                        )
+                        llm_failures += len(batch)
+                        continue
+
+                    llm_cost += result.cost_usd
+                    llm_input_tokens += result.input_tokens
+                    llm_output_tokens += result.output_tokens
+
+                    for batch_idx, (_, row) in enumerate(batch):
+                        verdict = result.verdicts.get(batch_idx)
+                        if verdict is None:
+                            # Model didn't return this index — leave row
+                            # alone (will retry on next run).
+                            continue
+                        row.relevance = verdict.relevance
+                        row.relevance_set_by = verdict.set_by
+                        row.relevance_set_at = now
+                        row.relevance_reason_ru = verdict.reason_ru
+                        llm_hits += 1
+
+                    # Commit per-batch so partial progress survives a
+                    # worker crash mid-run.
+                    await db.commit()
+
+                stats = {
+                    "total": len(rows),
+                    "rules_hits": rules_hits,
+                    "llm_hits": llm_hits,
+                    "llm_failures": llm_failures,
+                    "llm_batches": (len(llm_pending) + CLASSIFY_BATCH_SIZE - 1)
+                        // CLASSIFY_BATCH_SIZE,
+                    "llm_cost_usd": round(llm_cost, 5),
+                    "llm_input_tokens": llm_input_tokens,
+                    "llm_output_tokens": llm_output_tokens,
+                }
+
+                unclassified_left = len(rows) - rules_hits - llm_hits
+                if unclassified_left > 0:
+                    message = (
+                        f"Классифицировано {rules_hits + llm_hits} из {len(rows)}: "
+                        f"{rules_hits} правилами, {llm_hits} LLM. "
+                        f"{unclassified_left} остались без класса "
+                        f"(LLM вернул не на всё)."
+                    )
+                    terminal = "done"  # not a failure — partial is fine
+                else:
+                    message = (
+                        f"Классифицировано {len(rows)} запросов: "
+                        f"{rules_hits} правилами, {llm_hits} LLM. "
+                        f"Стоимость: ${llm_cost:.4f}."
+                    )
+                    terminal = "done"
+
+                await emit_terminal(
+                    db, site_id, "classify_queries", terminal, message,
+                    extra=stats, run_id=run_id,
+                )
+                return {"status": terminal, **stats}
+        except Exception as exc:  # noqa: BLE001
+            # Best-effort terminal so the pipeline cascade can close.
+            # Open a fresh session — the outer one may have rolled back
+            # or never been entered.
+            logger.exception(
+                "classify_queries_site_task.unhandled site=%s err=%s",
+                site_id, exc,
             )
-            return {"status": terminal, **stats}
+            try:
+                async with task_session() as db2:
+                    await emit_terminal(
+                        db2, site_id, "classify_queries", "failed",
+                        f"Классификация остановлена: {str(exc)[:200]}",
+                        run_id=run_id,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "classify_queries_site_task.terminal_emit_failed "
+                    "site=%s", site_id,
+                )
+            # Re-raise so Celery still records FAILURE on the task itself.
+            raise
 
     return _run_async(_run())
 

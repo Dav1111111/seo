@@ -349,9 +349,10 @@ class TaskGeneratorAgent:
         # Type-specific guidance
         if page_type == "tour":
             type_hint = (
-                "Используй @type: TouristTrip с offers (Offer с price, priceCurrency='RUB'). "
-                "Добавь itinerary (ItemList с этапами программы тура), "
-                "touristType, provider (ссылка на TravelAgency сайта). "
+                "Используй @type: Product с offers (Offer с price, priceCurrency='RUB'). "
+                "Яндекс уверенно парсит Product/Offer в rich-сниппет с ценой; "
+                "TouristTrip Яндекс не разбирает в rich-сниппеты — не используй его. "
+                "provider — ссылка на TravelAgency сайта. "
                 "aggregateRating добавь ТОЛЬКО если есть реальные отзывы на странице — иначе ПРОПУСТИ."
             )
         elif page_type == "landing":
@@ -619,8 +620,11 @@ H1: {opp.get('page_h1') or '—'}
             )
         elif t == "schema_add":
             pt = opp.get("page_type", "landing")
+            # NB: TouristTrip / TouristAttraction are NOT recommended —
+            # Yandex doesn't parse them into rich snippets. Product/Offer
+            # is the canonical choice for tour pages.
             schema_type = {
-                "tour": "TouristTrip",
+                "tour": "Product",
                 "landing": "TravelAgency",
                 "article": "BlogPosting",
             }.get(pt, "WebPage")

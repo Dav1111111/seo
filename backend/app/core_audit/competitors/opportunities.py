@@ -92,11 +92,10 @@ HIGH_VALUE_SCHEMA: dict[str, tuple[str, str]] = {
         "Schema Service",
         "Структурированное описание услуги — помогает SERP-сниппетам.",
     ),
-    "TouristTrip": (
-        "Schema TouristTrip",
-        "Специализированный туристический Schema — прямое попадание "
-        "в туристические блоки Яндекса.",
-    ),
+    # TouristTrip removed 2026-05-14 — Yandex doesn't parse it into rich
+    # snippets; see harmful_diagnoser.py and review/llm/prompts.py for
+    # the canonical anti-list. Recommending it would mis-aim owners at a
+    # schema type that yields no SERP-side benefit on Yandex.
     "FAQPage": (
         "Schema FAQPage",
         "Раскрывает FAQ прямо в выдаче, забирая больше real-estate.",

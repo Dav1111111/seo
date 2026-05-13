@@ -19,7 +19,9 @@ from sqlalchemy import select
 from app.core_audit.pipeline.tasks import (
     MIN_MONEY_QUERIES,
     _count_money_queries,
+    _mark_classify_dispatch_failed,
     _primary_stage_failures,
+    _queue_classify_queries,
     _skip_after_primary_failure,
     _skip_competitor_stages,
 )
@@ -264,3 +266,46 @@ async def test_skip_after_primary_failure_emits_all_downstream_terminals(
     assert ("priorities", "skipped") in by_stage
     assert ("report", "skipped") in by_stage
     assert ("pipeline", "failed") in by_stage
+
+
+def test_queue_classify_queries_returns_false_on_dispatch_failure(
+    monkeypatch,
+):
+    """Broker outage → apply_async raises → helper must return False so
+    the caller knows to emit a `classify_queries:failed` terminal and
+    keep the pipeline cascade closed."""
+    from app.collectors import tasks as collectors_tasks
+
+    def _boom(*args, **kwargs):
+        raise ConnectionError("redis broker unreachable")
+
+    monkeypatch.setattr(
+        collectors_tasks.classify_queries_site_task,
+        "apply_async",
+        _boom,
+    )
+
+    ok = _queue_classify_queries("00000000-0000-0000-0000-000000000001", None)
+    assert ok is False
+
+
+async def test_mark_classify_dispatch_failed_emits_failed_terminal(
+    db, test_site: Site,
+):
+    """Caller-side cleanup helper must write the `classify_queries:failed`
+    event so the pipeline reconciler can close the wrapper instead of
+    spinning on an open stage."""
+    import uuid
+
+    run_id = uuid.uuid4()
+
+    await _mark_classify_dispatch_failed(db, str(test_site.id), str(run_id))
+
+    rows = (await db.execute(
+        select(AnalysisEvent).where(
+            AnalysisEvent.site_id == test_site.id,
+            AnalysisEvent.stage == "classify_queries",
+        )
+    )).scalars().all()
+    statuses = {e.status for e in rows}
+    assert "failed" in statuses

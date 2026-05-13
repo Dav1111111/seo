@@ -128,7 +128,8 @@ def _merge_recommendations(
             ),
             before=cargo,
             after="Product + Offer + AggregateRating",
-            source_finding_id=f"schema_cargo_cult_present:{cargo}",
+            # source_finding_id column is String(120) — truncate to fit
+            source_finding_id=f"schema_cargo_cult_present:{cargo}"[:120],
         ))
 
     return updated
@@ -144,7 +145,8 @@ def _h2_draft_to_rec(d: LLMH2Draft) -> Recommendation:
         ),
         before=None,
         after=d.draft_ru,
-        source_finding_id=f"llm_h2_draft:{d.block_title}",
+        # source_finding_id column is String(120) — truncate to fit
+        source_finding_id=f"llm_h2_draft:{d.block_title}"[:120],
     )
 
 
@@ -159,5 +161,6 @@ def _link_to_rec(lp: LLMLinkProposal) -> Recommendation:
         ),
         before=None,
         after=f'<a href="{lp.target_url}">{lp.anchor_ru}</a>',
-        source_finding_id=f"llm_internal_link:{lp.target_url}",
+        # source_finding_id column is String(120) — truncate to fit
+        source_finding_id=f"llm_internal_link:{lp.target_url}"[:120],
     )

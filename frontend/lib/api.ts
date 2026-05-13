@@ -32,6 +32,42 @@ export interface DeepExtractRow {
   ai_summary_at: string | null;
 }
 
+// One row of the deep-dive comparison — aggregated signals across a
+// site's sampled pages (own or competitor). Backend source:
+// `CompetitorSiteReport.to_dict()` in
+// backend/app/core_audit/competitors/deep_dive.py.
+export interface CompetitorDeepDivePage {
+  url: string;
+  status: string;
+  title?: string;
+  h1?: string;
+  has_price?: boolean;
+  has_booking_cta?: boolean;
+  has_reviews?: boolean;
+  has_phone?: boolean;
+  has_telegram?: boolean;
+  has_whatsapp?: boolean;
+  schema_types?: string[];
+  // TODO: type fully once backend response is documented
+  [key: string]: unknown;
+}
+
+export interface CompetitorDeepDiveSite {
+  domain: string;
+  pages?: CompetitorDeepDivePage[];
+  has_price: boolean;
+  has_booking_cta: boolean;
+  has_reviews: boolean;
+  has_phone: boolean;
+  has_telegram: boolean;
+  has_whatsapp: boolean;
+  schema_types: string[];
+  // TODO: type fully once backend response is documented. Index
+  // signature preserves the existing `Record<string, unknown>` consumer
+  // contract in app/studio/competitors/page.tsx.
+  [key: string]: unknown;
+}
+
 // Default site ID — in Phase 9 this becomes dynamic
 export const SITE_ID = process.env.NEXT_PUBLIC_SITE_ID || "1e11339f-c87e-4742-9d38-6f79463b0d16";
 
@@ -282,8 +318,11 @@ export const api = {
     apiFetch<{
       site_id: string;
       own_domain: string;
-      self: any;
-      competitors: any[];
+      // Aggregated signals for a site (own or competitor). Backend
+      // shape: CompetitorSiteReport.to_dict() in core_audit/competitors/
+      // deep_dive.py. Empty object when never run.
+      self: CompetitorDeepDiveSite | Record<string, never>;
+      competitors: CompetitorDeepDiveSite[];
     }>(`/sites/${siteId}/competitors/deep-dive`, { base: "admin" }),
 
   getGrowthOpportunities: (siteId: string) =>

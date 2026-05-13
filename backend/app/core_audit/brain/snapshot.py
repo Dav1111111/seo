@@ -198,7 +198,7 @@ class CompetitorFacts:
 
 @dataclass
 class BehavioralFacts:
-    """Behavioral signals — Yandex 2026 weighs these at 30-45%."""
+    """Behavioral signals — Yandex weighs them heavily, no published exact weight."""
     ctr_gaps_total: int = 0                    # number of under-clicking queries
     ctr_gaps_critical: int = 0
     ctr_gaps_high: int = 0
