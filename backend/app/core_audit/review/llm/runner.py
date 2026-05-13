@@ -22,6 +22,7 @@ from app.core_audit.review.llm.prompts import (
     SYSTEM_ENRICH,
     build_user_prompt,
 )
+from app.core_audit.review.llm.verify import filter_hallucinated_cargo_cult
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,10 @@ except Exception as _exc:
     logger.warning("llm_client unavailable: %s — Step 4 will fall back to Python-only", _exc)
 
 
-def _parse_response(tool_input: dict[str, Any]) -> LLMEnrichment:
+def _parse_response(
+    tool_input: dict[str, Any],
+    schema_blocks: list | None = None,
+) -> LLMEnrichment:
     rewrites = tuple(
         LLMRewrite(
             finding_id=str(r.get("finding_id", "")),
@@ -70,10 +74,25 @@ def _parse_response(tool_input: dict[str, Any]) -> LLMEnrichment:
         for l in (tool_input.get("link_proposals") or [])
         if l.get("anchor_ru") and l.get("target_url")
     )
-    cargo = tuple(
+
+    # Belt-and-braces cargo-cult filter — drop types the LLM claims are on
+    # the page but don't actually appear in the parsed JSON-LD blocks. The
+    # prompt already tells the model to return only present types, but
+    # production traffic showed the LLM echoing the cargo-cult deny-list
+    # back verbatim, so we defend in depth.
+    raw_cargo = [
         str(s) for s in (tool_input.get("detected_cargo_cult_schemas") or [])
         if s
-    )
+    ]
+    filtered_cargo = filter_hallucinated_cargo_cult(raw_cargo, schema_blocks)
+    dropped = len(raw_cargo) - len(filtered_cargo)
+    if dropped > 0:
+        logger.info(
+            "cargo_cult_filter dropped %d hallucinated types (raw=%r kept=%r)",
+            dropped, raw_cargo, filtered_cargo,
+        )
+    cargo = tuple(filtered_cargo)
+
     return LLMEnrichment(
         rewrites=rewrites,
         h2_drafts=h2_drafts,
@@ -85,8 +104,18 @@ def _parse_response(tool_input: dict[str, Any]) -> LLMEnrichment:
 def run_enrich(
     ri: ReviewInput,
     actionable: list[CheckFinding],
+    *,
+    schema_blocks: list | None = None,
 ) -> tuple[LLMEnrichment | None, dict[str, Any]]:
-    """Invoke LLM, parse, return (enrichment or None, usage stats)."""
+    """Invoke LLM, parse, return (enrichment or None, usage stats).
+
+    `schema_blocks` is the parsed JSON-LD blocks for this page (from
+    PageDeepExtract.schema_blocks). Forwarded to `_parse_response` so the
+    cargo-cult detection can be cross-checked against the page's actual
+    Schema.org types. Default `None` triggers fail-closed behaviour: any
+    cargo-cult types the LLM reports are dropped, because we have no
+    extracted JSON-LD to verify them against.
+    """
     if not actionable:
         return LLMEnrichment(), {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "model": None}
 
@@ -112,7 +141,7 @@ def run_enrich(
         return None, {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "model": None}
 
     try:
-        enrichment = _parse_response(tool_input)
+        enrichment = _parse_response(tool_input, schema_blocks=schema_blocks)
     except Exception as exc:
         logger.warning("llm response parse failed page=%s: %s", ri.page_id, exc)
         return None, usage

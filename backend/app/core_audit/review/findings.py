@@ -47,10 +47,16 @@ SIGNAL_TYPES: frozenset[str] = frozenset({
     # eeat_checks
     "eeat_signal_missing",
     "eeat_signal_present",
+    # Aggregate eeat finding — one per page, evidence.missing_items lists
+    # every signal that was absent. Collapses the 1-7 fan-out into a
+    # single «легальный блок» recommendation (audit 2026-05-14).
+    "eeat_signals_missing",
     # commercial_checks
     "commercial_factor_missing",
     "commercial_factor_present",
     "commercial_factor_deferred_to_llm",
+    # Aggregate commercial finding — analogue of eeat_signals_missing.
+    "commercial_factors_missing",
     # overoptimization
     "over_optimization_stuffing",
 })

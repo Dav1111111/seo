@@ -48,6 +48,52 @@ CARGO_CULT_SCHEMA_TYPES = frozenset({
 })
 
 
+def filter_hallucinated_cargo_cult(
+    detected: list[str],
+    schema_blocks: list | None,
+) -> list[str]:
+    """Drop cargo-cult types the LLM claims are on the page but aren't.
+
+    Compares `detected` against the actual `@type` values in `schema_blocks`
+    (the parsed JSON-LD blocks from the page snapshot). LLMs sometimes echo
+    the cargo-cult list back as detections; this is the Python-side guard.
+
+    Returns the filtered list — only types whose name appears as `@type` in
+    at least one schema_block. If `schema_blocks` is None (no extraction
+    available), returns an empty list — fail closed: better to silently drop
+    than to surface a false-positive recommendation.
+
+    Each block in `schema_blocks` is expected to be a dict with an `@type`
+    field. `@type` may be a single string or a list of strings (per
+    schema.org); both shapes are accepted. Comparison is case-insensitive
+    (`.casefold()`), but the returned strings preserve the original casing
+    that the LLM sent.
+    """
+    if schema_blocks is None:
+        return []
+    if not detected:
+        return []
+
+    # Collect every @type value from the parsed JSON-LD blocks. Normalise
+    # case so the LLM saying "touristtrip" still matches a block that says
+    # "TouristTrip" (and vice versa).
+    present: set[str] = set()
+    for block in schema_blocks:
+        if not isinstance(block, dict):
+            continue
+        raw_type = block.get("@type")
+        if raw_type is None:
+            continue
+        if isinstance(raw_type, list):
+            for t in raw_type:
+                if isinstance(t, str) and t:
+                    present.add(t.casefold())
+        elif isinstance(raw_type, str) and raw_type:
+            present.add(raw_type.casefold())
+
+    return [d for d in detected if isinstance(d, str) and d.casefold() in present]
+
+
 def _fact_leaked(after: str, source: str, regex: re.Pattern) -> bool:
     """True if a fact matching regex is in `after` but NOT in `source`."""
     after_hits = set(regex.findall(after or ""))

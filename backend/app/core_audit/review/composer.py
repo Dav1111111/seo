@@ -34,9 +34,11 @@ SIGNAL_CATEGORY: dict[str, RecCategory] = {
     "schema_cargo_cult_present": RecCategory.schema,
     "eeat_signal_missing": RecCategory.eeat,
     "eeat_signal_present": RecCategory.eeat,
+    "eeat_signals_missing": RecCategory.eeat,
     "commercial_factor_missing": RecCategory.commercial,
     "commercial_factor_present": RecCategory.commercial,
     "commercial_factor_deferred_to_llm": RecCategory.commercial,
+    "commercial_factors_missing": RecCategory.commercial,
     "over_optimization_stuffing": RecCategory.over_optimization,
 }
 
@@ -166,17 +168,26 @@ def _schema_missing(f: CheckFinding) -> Recommendation:
     ))
 
 
+# Human-readable labels for EEAT signal slugs. Lives here (not in the
+# profile) because composer prose is locale-specific and the profile
+# stays language-agnostic. Keep keys aligned with profile signal names.
+_EEAT_LABELS_RU: dict[str, str] = {
+    "rto_number": "номер в реестре туроператоров (РТО)",
+    "inn": "ИНН",
+    "ogrn": "ОГРН",
+    "license_section": "упоминание лицензии / свидетельства",
+    "author_byline": "подпись автора материала",
+    "reviews_block": "блок отзывов клиентов",
+    "yandex_maps_reviews": "ссылка на отзывы на Яндекс.Картах",
+}
+
+
 def _eeat_signal_missing(f: CheckFinding) -> Recommendation:
+    """Legacy per-signal composer — kept for back-compat with any code path
+    still emitting the granular finding. New paths use the aggregate
+    `eeat_signals_missing` finding handled below."""
     name = f.evidence.get("signal_name", "signal")
-    human = {
-        "rto_number": "номер в реестре туроператоров (РТО)",
-        "inn": "ИНН",
-        "ogrn": "ОГРН",
-        "license_section": "упоминание лицензии / свидетельства",
-        "author_byline": "подпись автора материала",
-        "reviews_block": "блок отзывов клиентов",
-        "yandex_maps_reviews": "ссылка на отзывы на Яндекс.Картах",
-    }.get(name, name)
+    human = _EEAT_LABELS_RU.get(name, name)
     return _rec(f, (
         f"Детектор не нашёл на странице: {human}. Это E-E-A-T сигнал для "
         f"Yandex Proksima. Если он действительно отсутствует — добавьте; "
@@ -184,13 +195,60 @@ def _eeat_signal_missing(f: CheckFinding) -> Recommendation:
     ))
 
 
+def _eeat_signals_missing(f: CheckFinding) -> Recommendation:
+    """Aggregate composer — one card listing every missing EEAT signal.
+
+    `before_text` enumerates what the detector did NOT find on the page
+    (comma list of Russian labels). `after_text` is a bulleted Markdown
+    list the owner can paste into the «О нас» / footer block.
+    """
+    items: list[str] = list(f.evidence.get("missing_items") or [])
+    labels = [_EEAT_LABELS_RU.get(name, name) for name in items]
+    before = "Не вижу на странице: " + ", ".join(labels) if labels else None
+    after_lines = ["Доверие компании — добавьте блок легальности:"] + [
+        f"- {label}" for label in labels
+    ]
+    after = "\n".join(after_lines) if labels else None
+    reasoning = (
+        f"Не нашёл блок легальности ({len(labels)} элемент(а)). "
+        f"Yandex Proksima использует эти сигналы для оценки E-E-A-T. "
+        f"Соберите всё в один блок в футере или на странице «О нас»."
+    )
+    return _rec(f, reasoning, before=before, after=after)
+
+
 def _commercial_factor_missing(f: CheckFinding) -> Recommendation:
+    """Legacy per-factor composer — see note in `_eeat_signal_missing`."""
     return _rec(f, (
         f"Не обнаружен коммерческий фактор: "
         f"{f.evidence.get('description_ru', f.evidence.get('factor_name'))}. "
         f"Коммерческие факторы — явный сигнал ранжирования в Яндексе. "
         f"Проверьте, отображается ли фактор на странице."
     ))
+
+
+def _commercial_factors_missing(f: CheckFinding) -> Recommendation:
+    """Aggregate composer for commercial factors. Mirrors `_eeat_signals_missing`."""
+    items: list[str] = list(f.evidence.get("missing_items") or [])
+    descriptions: list[str] = list(f.evidence.get("missing_descriptions") or [])
+    # Prefer description_ru (human-grade phrasing baked into the profile)
+    # and fall back to the slug if a profile entry didn't supply one.
+    labels: list[str] = []
+    for idx, name in enumerate(items):
+        desc = descriptions[idx] if idx < len(descriptions) and descriptions[idx] else name
+        labels.append(desc)
+    before = "Не вижу на странице: " + ", ".join(labels) if labels else None
+    after_lines = ["Коммерческие сигналы — добавьте на страницу:"] + [
+        f"- {label}" for label in labels
+    ]
+    after = "\n".join(after_lines) if labels else None
+    reasoning = (
+        f"Не нашёл коммерческие факторы ({len(labels)} штук(и)). "
+        f"Это явный сигнал ранжирования в Яндексе для коммерческих "
+        f"запросов. Проверьте, что эти элементы действительно "
+        f"отображаются на странице."
+    )
+    return _rec(f, reasoning, before=before, after=after)
 
 
 def _over_optimization_stuffing(f: CheckFinding) -> Recommendation:
@@ -217,6 +275,8 @@ _HANDLERS = {
     "missing_recommended_h2": _missing_h2_block,
     "schema_missing": _schema_missing,
     "eeat_signal_missing": _eeat_signal_missing,
+    "eeat_signals_missing": _eeat_signals_missing,
     "commercial_factor_missing": _commercial_factor_missing,
+    "commercial_factors_missing": _commercial_factors_missing,
     "over_optimization_stuffing": _over_optimization_stuffing,
 }

@@ -382,7 +382,13 @@ def test_diagnose_one_returns_jsonb_shape() -> None:
     assert fixes["h1_change"].startswith("Багги")
     assert fixes["meta_description_change"].startswith("Премиум")
     assert fixes["content_change_ru"].startswith("Убрать")
-    assert fixes["schema_recommendation"] == "Schema TouristTrip"
+    # 2026-05-14 hardening: the LLM's «Schema TouristTrip» mention is a
+    # deny-list-mirror hallucination because no `page_schema_blocks`
+    # was passed (caller doesn't have a snapshot here). The sanitizer
+    # blanks it instead of forwarding the bogus suggestion. JSONB
+    # shape is unchanged — only the value is now the «no data» marker.
+    assert fixes["schema_recommendation"] is not None
+    assert "TouristTrip" not in fixes["schema_recommendation"]
     assert fixes["noindex_recommended"] is False
 
 
@@ -528,3 +534,281 @@ def test_serp_depth_is_30() -> None:
     """If this changes, /studio/queries/harmful position threshold
     documentation goes stale."""
     assert SERP_DEPTH == 30
+
+
+# ── Cargo-cult schema deny-list mirror — 2026-05-14 hardening ──────
+#
+# Background: the system prompt enumerates cargo-cult Schema.org types
+# the LLM must NOT recommend (TouristTrip / TouristAttraction /
+# TouristDestination / Event / TravelAction / Trip). Without a Python
+# post-filter the LLM occasionally echoes that deny-list verbatim back
+# into `schema_recommendation`, surfacing «замените TouristTrip на
+# Product+Offer» on pages that never had TouristTrip in the first
+# place — same shape of bug that hit `review/llm/prompts.py`. The
+# guard below requires that any cargo-cult type the LLM mentions in
+# the recommendation is actually present in the page's JSON-LD blocks.
+
+
+def test_schema_recommendation_blanks_when_no_cargo_cult_on_page() -> None:
+    """LLM echoes «замени TouristTrip» but the page has only
+    BlogPosting → recommendation is replaced with a «no data» marker
+    so the owner never sees a hallucinated suggestion.
+    """
+    fake = {
+        "cause_ru": "Текст про экскурсии запутал Яндекс.",
+        "fix_title": None,
+        "fix_h1": None,
+        "fix_meta_description": None,
+        "fix_content_change_ru": "Убрать абзац про экскурсии.",
+        "schema_recommendation": (
+            "Заменить TouristTrip на Product + Offer + AggregateRating"
+        ),
+        "noindex_recommended": False,
+    }
+    with _diag_call(fake):
+        out = diagnose_one(
+            query="экскурсии", relevance="spam", relevance_reason=None,
+            business_narrative="n", business_primary="p", business_geo=[],
+            matched=_matched(),
+            page_title=None, page_h1=None, page_meta=None,
+            page_content=None,
+            page_schema_blocks=[{"@type": "BlogPosting"}],
+        )
+    rec = out["fixes"]["schema_recommendation"]
+    # Hallucination must be blanked — original deny-list type name
+    # must not survive into the JSONB the owner reads.
+    assert rec is not None  # we replace with a marker, not None
+    assert "TouristTrip" not in rec
+    assert "Не требуется" in rec or "нет данных" in rec.lower()
+
+
+def test_schema_recommendation_blanked_when_no_blocks_extracted() -> None:
+    """If `page_schema_blocks` is None (snapshot not available) and
+    the LLM still names cargo-cult types, fail-closed: blank the rec.
+    Better to silently drop than surface a false positive.
+    """
+    fake = {
+        "cause_ru": "x",
+        "fix_title": None, "fix_h1": None, "fix_meta_description": None,
+        "fix_content_change_ru": None,
+        "schema_recommendation": (
+            "Заменить TouristAttraction на Product + Offer"
+        ),
+        "noindex_recommended": False,
+    }
+    with _diag_call(fake):
+        out = diagnose_one(
+            query="q", relevance="spam", relevance_reason=None,
+            business_narrative="", business_primary="", business_geo=[],
+            matched=_matched(),
+            page_title=None, page_h1=None, page_meta=None,
+            page_content=None,
+            # No schema_blocks passed at all — caller didn't have one.
+        )
+    rec = out["fixes"]["schema_recommendation"]
+    assert rec is not None
+    assert "TouristAttraction" not in rec
+
+
+def test_real_cargo_cult_preserved() -> None:
+    """Page ACTUALLY has TouristTrip — the LLM's «заменить TouristTrip»
+    recommendation is legitimate and must pass through unchanged."""
+    fake = {
+        "cause_ru": "На странице стоит TouristTrip, Яндекс игнорирует.",
+        "fix_title": None,
+        "fix_h1": None,
+        "fix_meta_description": None,
+        "fix_content_change_ru": None,
+        "schema_recommendation": (
+            "Заменить TouristTrip на Product + Offer + AggregateRating"
+        ),
+        "noindex_recommended": False,
+    }
+    with _diag_call(fake):
+        out = diagnose_one(
+            query="q", relevance="disputed", relevance_reason=None,
+            business_narrative="", business_primary="", business_geo=[],
+            matched=_matched(),
+            page_title=None, page_h1=None, page_meta=None,
+            page_content=None,
+            page_schema_blocks=[{"@type": "TouristTrip"}],
+        )
+    rec = out["fixes"]["schema_recommendation"]
+    assert rec is not None
+    assert "TouristTrip" in rec
+    assert "Product" in rec
+
+
+def test_real_cargo_cult_preserved_case_insensitive() -> None:
+    """`@type` matching is case-insensitive — LLM writing
+    «touristtrip» (lowercase) against a page with «TouristTrip» must
+    pass through. Mirrors filter_hallucinated_cargo_cult casefold rule.
+    """
+    fake = {
+        "cause_ru": "x",
+        "fix_title": None, "fix_h1": None, "fix_meta_description": None,
+        "fix_content_change_ru": None,
+        "schema_recommendation": "Заменить touristtrip на Product",
+        "noindex_recommended": False,
+    }
+    with _diag_call(fake):
+        out = diagnose_one(
+            query="q", relevance="spam", relevance_reason=None,
+            business_narrative="", business_primary="", business_geo=[],
+            matched=_matched(),
+            page_title=None, page_h1=None, page_meta=None,
+            page_content=None,
+            page_schema_blocks=[{"@type": "TouristTrip"}],
+        )
+    rec = out["fixes"]["schema_recommendation"]
+    assert rec is not None
+    # passes through because the case-folded type is present
+    assert "touristtrip" in rec.lower()
+
+
+def test_schema_recommendation_pass_through_when_no_cargo_cult_words() -> None:
+    """LLM recommends «Product + Offer + AggregateRating» — no cargo-
+    cult vocabulary in the text → recommendation is wholly legitimate
+    and passes through regardless of what's in schema_blocks."""
+    fake = {
+        "cause_ru": "x",
+        "fix_title": None, "fix_h1": None, "fix_meta_description": None,
+        "fix_content_change_ru": None,
+        "schema_recommendation": "Добавить Product + Offer + AggregateRating",
+        "noindex_recommended": False,
+    }
+    with _diag_call(fake):
+        out = diagnose_one(
+            query="q", relevance="spam", relevance_reason=None,
+            business_narrative="", business_primary="", business_geo=[],
+            matched=_matched(),
+            page_title=None, page_h1=None, page_meta=None,
+            page_content=None,
+            page_schema_blocks=None,
+        )
+    assert (
+        out["fixes"]["schema_recommendation"]
+        == "Добавить Product + Offer + AggregateRating"
+    )
+
+
+def test_schema_recommendation_null_pass_through() -> None:
+    """LLM correctly returns null when there's nothing to recommend —
+    sanitizer must preserve None as None (no marker substitution)."""
+    fake = {
+        "cause_ru": "x",
+        "fix_title": None, "fix_h1": None, "fix_meta_description": None,
+        "fix_content_change_ru": None,
+        "schema_recommendation": None,
+        "noindex_recommended": False,
+    }
+    with _diag_call(fake):
+        out = diagnose_one(
+            query="q", relevance="spam", relevance_reason=None,
+            business_narrative="", business_primary="", business_geo=[],
+            matched=_matched(),
+            page_title=None, page_h1=None, page_meta=None,
+            page_content=None,
+            page_schema_blocks=[{"@type": "BlogPosting"}],
+        )
+    assert out["fixes"]["schema_recommendation"] is None
+
+
+def test_cause_ru_can_be_null() -> None:
+    """Tool schema now allows null for cause_ru — when the LLM omits
+    it (data too thin to explain), handler must accept without error."""
+    fake = {
+        "cause_ru": None,
+        "fix_title": None,
+        "fix_h1": None,
+        "fix_meta_description": None,
+        "fix_content_change_ru": None,
+        "schema_recommendation": None,
+        "noindex_recommended": False,
+    }
+    with _diag_call(fake):
+        out = diagnose_one(
+            query="q", relevance="spam", relevance_reason=None,
+            business_narrative="", business_primary="", business_geo=[],
+            matched=_matched(),
+            page_title=None, page_h1=None, page_meta=None,
+            page_content=None,
+        )
+    # JSONB shape must stay stable — falsy cause_ru is normalised to ""
+    # so the frontend's existing branch (`cause_ru ? <show> : null`)
+    # keeps working.
+    assert out["cause_ru"] in ("", None)
+    assert out["fixes"]["schema_recommendation"] is None
+
+
+def test_build_user_message_renders_schema_blocks() -> None:
+    """When schema_blocks are passed, the prompt surfaces the @type
+    values so the LLM can see what's actually on the page."""
+    matched = MatchedPageInfo(url="u", position=1, title="t", headline="h")
+    msg = _build_user_message(
+        query="q",
+        relevance="spam",
+        relevance_reason=None,
+        business_narrative="",
+        business_primary="",
+        business_geo=[],
+        matched=matched,
+        page_title=None,
+        page_h1=None,
+        page_meta=None,
+        page_content_excerpt="—",
+        page_schema_blocks=[
+            {"@type": "BlogPosting"},
+            {"@type": ["WebPage", "Article"]},
+        ],
+    )
+    assert "Schema.org блоки на странице:" in msg
+    assert "BlogPosting" in msg
+    assert "WebPage" in msg
+    assert "Article" in msg
+
+
+def test_build_user_message_renders_none_schema_blocks() -> None:
+    """None schema_blocks (snapshot not extracted) is rendered with
+    the «no data» marker so the LLM can see we don't know."""
+    matched = MatchedPageInfo(url="u", position=1, title="t", headline="h")
+    msg = _build_user_message(
+        query="q", relevance="spam", relevance_reason=None,
+        business_narrative="", business_primary="", business_geo=[],
+        matched=matched,
+        page_title=None, page_h1=None, page_meta=None,
+        page_content_excerpt="—",
+        page_schema_blocks=None,
+    )
+    assert "Schema.org блоки на странице:" in msg
+    assert "нет данных" in msg
+
+
+def test_build_user_message_renders_empty_schema_blocks() -> None:
+    """An empty list (snapshot WAS extracted, found zero JSON-LD)
+    is distinguishable from None in the prompt."""
+    matched = MatchedPageInfo(url="u", position=1, title="t", headline="h")
+    msg = _build_user_message(
+        query="q", relevance="spam", relevance_reason=None,
+        business_narrative="", business_primary="", business_geo=[],
+        matched=matched,
+        page_title=None, page_h1=None, page_meta=None,
+        page_content_excerpt="—",
+        page_schema_blocks=[],
+    )
+    assert "не найдено" in msg
+
+
+def test_tool_schema_marks_cause_ru_and_schema_rec_nullable() -> None:
+    """Pin: the tool schema must allow null for cause_ru and
+    schema_recommendation, and neither field is in the required list.
+    Drift here would re-introduce the «invent a cause» pressure on
+    the LLM that this hardening removes.
+    """
+    from app.core_audit.harmful_diagnoser import DIAGNOSE_TOOL
+    props = DIAGNOSE_TOOL["input_schema"]["properties"]
+    assert "null" in props["cause_ru"]["type"]
+    assert "null" in props["schema_recommendation"]["type"]
+    required = DIAGNOSE_TOOL["input_schema"]["required"]
+    assert "cause_ru" not in required
+    assert "schema_recommendation" not in required

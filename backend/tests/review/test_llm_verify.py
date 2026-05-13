@@ -233,3 +233,28 @@ def test_verify_h2_draft_hallucination():
     ))
     v = verify(en, ri, sent_finding_ids=set())
     assert v.h2_drafts == ()
+
+
+# ── filter_hallucinated_cargo_cult — exported sibling of verify() ─────────
+#
+# `verify()` keeps its enum-membership filter (only known cargo-cult names
+# survive); the new `filter_hallucinated_cargo_cult()` is layered in
+# upstream of it inside `runner._parse_response`. These tests make sure the
+# new helper is importable from verify and behaves as expected on the
+# real-world bug shape (BlogPosting page, LLM echoed deny-list).
+
+
+def test_filter_hallucinated_cargo_cult_exported_from_verify():
+    from app.core_audit.review.llm.verify import filter_hallucinated_cargo_cult
+    # BlogPosting page (real bug shape) — drops every echoed cargo-cult type
+    assert filter_hallucinated_cargo_cult(
+        ["TouristTrip", "TouristAttraction", "TouristDestination",
+         "Event", "TravelAction"],
+        schema_blocks=[{"@type": "BlogPosting"}],
+    ) == []
+
+
+def test_filter_hallucinated_cargo_cult_fails_closed_for_none_blocks():
+    from app.core_audit.review.llm.verify import filter_hallucinated_cargo_cult
+    # No extraction available → drop, don't surface anything to the owner.
+    assert filter_hallucinated_cargo_cult(["TouristTrip"], schema_blocks=None) == []

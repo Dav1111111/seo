@@ -42,7 +42,17 @@ class LLMLinkProposal:
 
 @dataclass(frozen=True)
 class LLMEnrichment:
-    """Structured LLM response after validation."""
+    """Structured LLM response after validation.
+
+    `detected_cargo_cult_schemas` lists Schema.org types the LLM claims to
+    have spotted on the page (TouristTrip, TouristAttraction, etc.). Per
+    `runner._parse_response`, the runner cross-checks this list against the
+    page's actual parsed JSON-LD blocks via
+    `verify.filter_hallucinated_cargo_cult` before it lands here — entries
+    that aren't really on the page (LLM hallucinations or echoes of the
+    deny-list in the prompt) are dropped. When schema_blocks isn't
+    available the filter fails closed and this tuple comes through empty.
+    """
     rewrites: tuple[LLMRewrite, ...] = ()
     h2_drafts: tuple[LLMH2Draft, ...] = ()
     link_proposals: tuple[LLMLinkProposal, ...] = ()

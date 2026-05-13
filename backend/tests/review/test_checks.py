@@ -176,12 +176,19 @@ def test_schema_present_emits_passed_with_llm_note():
 # ── eeat + commercial ─────────────────────────────────────────────────
 
 def test_eeat_missing_rto_critical():
-    # content_text without РТО → critical signal missing for tour_operator
+    # content_text without РТО → critical signal missing for tour_operator.
+    # Audit 2026-05-14: collapsed fan-out, so we now look at the single
+    # aggregate `eeat_signals_missing` finding and assert `rto_number`
+    # appears in its `evidence.missing_items` list.
     ri = _ri(content_text="Обычный текст без реквизитов")
     r = check_eeat(ri, TOURISM_TOUR_OPERATOR)
-    fails = [f for f in r.findings if f.signal_type == "eeat_signal_missing" and f.evidence.get("signal_name") == "rto_number"]
-    assert len(fails) == 1
-    assert fails[0].severity == "critical"
+    aggregates = [f for f in r.findings if f.signal_type == "eeat_signals_missing"]
+    assert len(aggregates) == 1
+    agg = aggregates[0]
+    assert agg.status == FindingStatus.fail
+    # Aggregate severity inherits the max — РТО is critical, so the card is critical.
+    assert agg.severity == "critical"
+    assert "rto_number" in agg.evidence["missing_items"]
 
 
 def test_commercial_deferred_for_pattern_none():

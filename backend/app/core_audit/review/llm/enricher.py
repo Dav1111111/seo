@@ -116,20 +116,27 @@ def _merge_recommendations(
     for lp in enrichment.link_proposals:
         updated.append(_link_to_rec(lp))
 
-    # Cargo-cult detections → one rec per type
-    for cargo in enrichment.detected_cargo_cult_schemas:
+    # Cargo-cult detections → ONE aggregate rec (was: one per type, audit
+    # 2026-05-14 collapse). Up to five deny-list types could trigger five
+    # near-identical «замени на Product+Offer» cards.
+    if enrichment.detected_cargo_cult_schemas:
+        types = list(enrichment.detected_cargo_cult_schemas)
+        joined = ", ".join(types)
+        # source_finding_id column is String(120). Reserve the prefix
+        # then truncate the payload so we never exceed the column limit.
+        prefix = "schema_cargo_cult_present:"
+        payload = ",".join(types)[: max(0, 120 - len(prefix))]
         updated.append(Recommendation(
             category=RecCategory.schema,
             priority=RecPriority.medium,
             reasoning_ru=(
-                f"На странице используется Schema.org тип «{cargo}», который Яндекс "
-                f"не парсит в расширенные сниппеты. Замените на Product + Offer для "
-                f"туристических продуктов."
+                f"На странице используются Schema.org типы, которые Яндекс не "
+                f"парсит в расширенные сниппеты: {joined}. Замените их на "
+                f"Product + Offer + AggregateRating для туристических продуктов."
             ),
-            before=cargo,
-            after="Product + Offer + AggregateRating",
-            # source_finding_id column is String(120) — truncate to fit
-            source_finding_id=f"schema_cargo_cult_present:{cargo}"[:120],
+            before=joined,
+            after="Замените эти типы на Product + Offer + AggregateRating",
+            source_finding_id=f"{prefix}{payload}",
         ))
 
     return updated

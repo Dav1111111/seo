@@ -148,11 +148,26 @@ SYSTEM_PROMPT = """\
   Конкретно: «убрать абзац про X», «добавить упоминание Y»,
   «переименовать раздел Z». Не «улучшить контент» — не помогает.
 
-  schema_recommendation — какую schema.org разметку добавить (или
-  null если не нужно). Для туров/экскурсий рекомендуй
-  «Product + Offer + AggregateRating». НЕ рекомендуй TouristTrip,
-  TouristAttraction, TouristDestination, Event, TravelAction — Яндекс
-  их игнорирует и в rich snippets не показывает.
+  schema_recommendation — рекомендация по schema.org разметке.
+  Правила СТРОГО:
+    • Если в данных (поле `Schema.org блоки на странице`) явно видно
+      cargo-cult типы TouristTrip / TouristAttraction /
+      TouristDestination / Event / TravelAction / Trip — напиши:
+      «Заменить {обнаруженный_тип} на Product + Offer + AggregateRating».
+    • Если этих типов в данных НЕ видно — верни null (или строку
+      «Не требуется (нет данных)»). НЕ переписывай deny-list
+      обратно в ответ. Если на странице вообще нет JSON-LD —
+      это не повод придумывать «заменить TouristTrip» — верни null.
+    • Не ссылайся на типы, которых не было в `Schema.org блоки на
+      странице` — даже как «убедись, что нет TouristTrip».
+  Яндекс игнорирует cargo-cult типы в rich snippets, поэтому ТОЛЬКО
+  Product + Offer + AggregateRating имеет смысл, и ТОЛЬКО если на
+  странице сейчас стоит мусорный тип.
+
+  cause_ru — null если данные не позволяют объяснить КОНКРЕТНО (нет
+  ни title/h1/контента, ни schema-блоков). Иначе — один абзац
+  (3-5 предложений) на русском с цитатой фразы из страницы. Не
+  выдумывай причину, если данных мало.
 
   noindex_recommended — true ТОЛЬКО если страница вообще не нужна
   на сайте (служебная, технический мусор, дубль). Иначе false.
@@ -174,10 +189,12 @@ DIAGNOSE_TOOL = {
         "type": "object",
         "properties": {
             "cause_ru": {
-                "type": "string",
+                "type": ["string", "null"],
                 "description": (
                     "Один абзац: какие слова страницы спутали Яндекс. "
-                    "Цитируй конкретное."
+                    "Цитируй конкретное. null если данные не показывают "
+                    "это явно (нет title/h1/контента — лучше промолчать, "
+                    "чем выдумать причину)."
                 ),
             },
             "fix_title": {
@@ -210,11 +227,14 @@ DIAGNOSE_TOOL = {
             "schema_recommendation": {
                 "type": ["string", "null"],
                 "description": (
-                    "Какую schema.org разметку добавить. Для туров/"
-                    "экскурсий рекомендуй Product + Offer + "
-                    "AggregateRating. НЕ рекомендуй TouristTrip/"
-                    "TouristAttraction/TouristDestination/Event/"
-                    "TravelAction — Яндекс их игнорирует."
+                    "Schema.org рекомендация. Заполняй ТОЛЬКО если в "
+                    "поле `Schema.org блоки на странице` видно cargo-"
+                    "cult тип (TouristTrip / TouristAttraction / "
+                    "TouristDestination / Event / TravelAction / Trip)"
+                    " — тогда напиши «Заменить {тип} на Product + "
+                    "Offer + AggregateRating». Иначе null. Не "
+                    "переписывай deny-list если этих типов на "
+                    "странице нет."
                 ),
             },
             "noindex_recommended": {
@@ -225,17 +245,59 @@ DIAGNOSE_TOOL = {
                 ),
             },
         },
+        # Note: `cause_ru` and `schema_recommendation` are nullable —
+        # NOT in `required`. The LLM is allowed (and encouraged) to
+        # return null when the input data doesn't support a confident
+        # answer. See the system prompt rules and post-filter below.
         "required": [
-            "cause_ru",
             "fix_title",
             "fix_h1",
             "fix_meta_description",
             "fix_content_change_ru",
-            "schema_recommendation",
             "noindex_recommended",
         ],
     },
 }
+
+
+def _format_schema_blocks_for_prompt(
+    schema_blocks: list[dict[str, Any]] | None,
+) -> str:
+    """Render the JSON-LD `@type` values on the page for the prompt.
+
+    The LLM only needs to know WHICH Schema.org types are present —
+    not the full JSON. We surface a comma-separated, deduped list of
+    `@type` values. When the list is None or empty, return a marker
+    string so the LLM (and the post-filter) can distinguish «we don't
+    know» from «we know there are zero blocks».
+
+    `@type` per schema.org may be either a string or an array of
+    strings; both shapes are accepted.
+    """
+    if schema_blocks is None:
+        return "(нет данных — JSON-LD не извлекался)"
+    if not schema_blocks:
+        return "(JSON-LD блоков не найдено)"
+    types: list[str] = []
+    seen: set[str] = set()
+    for block in schema_blocks:
+        if not isinstance(block, dict):
+            continue
+        raw_type = block.get("@type")
+        if raw_type is None:
+            continue
+        if isinstance(raw_type, list):
+            for t in raw_type:
+                if isinstance(t, str) and t and t.casefold() not in seen:
+                    seen.add(t.casefold())
+                    types.append(t)
+        elif isinstance(raw_type, str) and raw_type:
+            if raw_type.casefold() not in seen:
+                seen.add(raw_type.casefold())
+                types.append(raw_type)
+    if not types:
+        return "(JSON-LD блоков не найдено)"
+    return ", ".join(types)
 
 
 def _build_user_message(
@@ -250,8 +312,10 @@ def _build_user_message(
     page_h1: str | None,
     page_meta: str | None,
     page_content_excerpt: str,
+    page_schema_blocks: list[dict[str, Any]] | None = None,
 ) -> str:
     geo_str = ", ".join(business_geo) if business_geo else "—"
+    schema_line = _format_schema_blocks_for_prompt(page_schema_blocks)
     return (
         f"БИЗНЕС:\n"
         f"  основной продукт: {business_primary or '—'}\n"
@@ -268,12 +332,102 @@ def _build_user_message(
         f"  title: {page_title or '—'}\n"
         f"  H1: {page_h1 or '—'}\n"
         f"  meta description: {page_meta or '—'}\n"
+        f"  Schema.org блоки на странице: {schema_line}\n"
         f"  фрагмент контента (первые 1200 символов):\n"
         f"  {page_content_excerpt}\n"
         f"\n"
         f"Объясни почему страница ранжируется по этому запросу и что "
         f"переписать. Используй инструмент diagnose_harmful_visibility."
     )
+
+
+# Schema types the LLM is most likely to hallucinate back at us by
+# echoing the deny-list verbatim. Kept in sync with
+# `review.llm.verify.CARGO_CULT_SCHEMA_TYPES`; we deliberately do NOT
+# import that set to avoid pulling review/ internals into this module.
+_CARGO_CULT_TYPES = frozenset({
+    "touristtrip",
+    "touristattraction",
+    "touristdestination",
+    "event",
+    "travelaction",
+    "trip",
+})
+
+# Casefold-stable label for owners when we blank a hallucinated rec.
+_SCHEMA_REC_BLANKED = "Не требуется (нет данных)"
+
+
+def _present_types_casefold(
+    schema_blocks: list[dict[str, Any]] | None,
+) -> set[str]:
+    """Casefolded `@type` values actually present in the page snapshot.
+
+    Mirrors review.llm.verify.filter_hallucinated_cargo_cult's intake
+    shape (single string or list of strings).
+    """
+    if not schema_blocks:
+        return set()
+    present: set[str] = set()
+    for block in schema_blocks:
+        if not isinstance(block, dict):
+            continue
+        raw_type = block.get("@type")
+        if raw_type is None:
+            continue
+        if isinstance(raw_type, list):
+            for t in raw_type:
+                if isinstance(t, str) and t:
+                    present.add(t.casefold())
+        elif isinstance(raw_type, str) and raw_type:
+            present.add(raw_type.casefold())
+    return present
+
+
+# Word-boundary regex compiled once per cargo-cult type. Substring
+# matching alone would falsely flag «Trip» inside «TouristTrip»,
+# making the sanitizer over-eager.
+_CARGO_CULT_PATTERNS: dict[str, re.Pattern[str]] = {
+    t: re.compile(r"\b" + re.escape(t) + r"\b", re.IGNORECASE)
+    for t in _CARGO_CULT_TYPES
+}
+
+
+def _sanitize_schema_recommendation(
+    raw: str | None,
+    schema_blocks: list[dict[str, Any]] | None,
+) -> str | None:
+    """Drop cargo-cult mentions the page snapshot doesn't actually have.
+
+    If the LLM names any of the cargo-cult types in `raw` that are NOT
+    present in `schema_blocks`, the recommendation is replaced with a
+    short «no data» marker. If the LLM cited a type that IS on the
+    page, the recommendation passes through unchanged. If `raw` is
+    null/empty, returns None.
+
+    Matching is word-boundary regex (case-insensitive) so `Trip`
+    inside `TouristTrip` is not double-counted.
+    """
+    if not raw:
+        return None
+    mentioned: set[str] = set()
+    for t, pat in _CARGO_CULT_PATTERNS.items():
+        if pat.search(raw):
+            mentioned.add(t)
+    if not mentioned:
+        # No cargo-cult vocabulary in the text → assume the LLM is
+        # genuinely recommending Product+Offer or similar. Pass through.
+        return raw
+    present = _present_types_casefold(schema_blocks)
+    # Every mentioned cargo-cult type must actually be on the page.
+    if mentioned.issubset(present):
+        return raw
+    log.info(
+        "harmful_diagnoser.schema_rec_blanked "
+        "mentioned=%r present=%r raw=%r",
+        sorted(mentioned), sorted(present), raw,
+    )
+    return _SCHEMA_REC_BLANKED
 
 
 def diagnose_one(
@@ -289,8 +443,18 @@ def diagnose_one(
     page_h1: str | None,
     page_meta: str | None,
     page_content: str | None,
+    page_schema_blocks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """LLM-call wrapper. Returns the JSONB-shaped diagnosis dict."""
+    """LLM-call wrapper. Returns the JSONB-shaped diagnosis dict.
+
+    `page_schema_blocks` — optional list of parsed JSON-LD blocks from
+    the page's PageDeepExtract snapshot. When passed, the prompt
+    surfaces the `@type` values to the LLM, and the post-filter blanks
+    any cargo-cult schema mention the LLM echoed back without the
+    page actually having that type. Pass None when the caller doesn't
+    have a snapshot — the post-filter then assumes «no JSON-LD
+    extracted» and conservatively drops cargo-cult recommendations.
+    """
     excerpt = (page_content or "").strip()[:1200] or "—"
 
     user_msg = _build_user_message(
@@ -305,6 +469,7 @@ def diagnose_one(
         page_h1=page_h1,
         page_meta=page_meta,
         page_content_excerpt=excerpt,
+        page_schema_blocks=page_schema_blocks,
     )
 
     tool_input, usage = call_with_tool(
@@ -315,16 +480,26 @@ def diagnose_one(
         max_tokens=1500,
     )
 
+    raw_schema_rec = tool_input.get("schema_recommendation")
+    cleaned_schema_rec = _sanitize_schema_recommendation(
+        raw_schema_rec, page_schema_blocks,
+    )
+
     return {
         "matched_url": matched.url,
         "matched_position": matched.position,
+        # cause_ru is now nullable in the tool schema. When the LLM
+        # returns null (or omits it entirely) we coalesce to "" so the
+        # JSONB shape stays stable for existing UI consumers — the
+        # empty string is treated as «no cause» in the frontend the
+        # same as null. No KeyError on missing field.
         "cause_ru": tool_input.get("cause_ru") or "",
         "fixes": {
             "title_change": tool_input.get("fix_title"),
             "h1_change": tool_input.get("fix_h1"),
             "meta_description_change": tool_input.get("fix_meta_description"),
             "content_change_ru": tool_input.get("fix_content_change_ru"),
-            "schema_recommendation": tool_input.get("schema_recommendation"),
+            "schema_recommendation": cleaned_schema_rec,
             "noindex_recommended": bool(
                 tool_input.get("noindex_recommended") or False,
             ),

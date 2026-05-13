@@ -31,8 +31,12 @@ SYSTEM_ENRICH = """\
 4. link_proposals: используй ТОЛЬКО target_url из <link_candidates>. Любой URL вне списка \
 = провал задачи.
 5. Schema: для туров/экскурсий рекомендуй Product + Offer + AggregateRating. \
-НЕ рекомендуй TouristTrip, TouristAttraction, TouristDestination, Event, TravelAction — \
-Яндекс их игнорирует.
+Cargo-cult Schema.org типы (TouristTrip, TouristAttraction, TouristDestination, \
+Event, TravelAction) — Яндекс не парсит их в rich-сниппеты. Если такой тип \
+встречается в JSON-LD страницы — верни его в detected_cargo_cult_schemas. \
+ВАЖНО: верни только те типы, которые ПО-НАСТОЯЩЕМУ присутствуют на странице \
+в JSON-LD. НЕ цитируй обратно список запретов как «детектированные» — если \
+ни один из них не встречается на странице, верни ПУСТОЙ МАССИВ.
 6. Города (Лоо, Адлер, Хоста, Дагомыс, Красная Поляна) упоминай ТОЛЬКО если они есть \
 в <page_content> или <queries>.
 7. Драфты H2 — 180–320 слов, абзацами, без воды. От третьего лица компании. \
@@ -104,7 +108,11 @@ ENRICH_TOOL: dict = {
             },
             "detected_cargo_cult_schemas": {
                 "type": "array",
-                "description": "Cargo-cult Schema.org types detected on page (TouristTrip etc.)",
+                "description": (
+                    "Cargo-cult types that ACTUALLY APPEAR in this page's "
+                    "JSON-LD blocks. Empty array if none found. Do NOT include "
+                    "types just because the prompt mentions them."
+                ),
                 "items": {"type": "string"},
             },
         },
