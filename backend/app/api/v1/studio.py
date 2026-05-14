@@ -19,9 +19,12 @@ header `_require_admin` already used by `app/api/v1/admin_ops.py`.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
@@ -3704,6 +3707,13 @@ class DeepExtractRow(BaseModel):
     # we leave it `None` and the UI treats that as "freshness unknown".
     ai_summary_md: str | None = None
     ai_summary_at: str | None = None
+    # Pre-computed Schema.org audit (typed/issue-coded checks done in
+    # Python by `core_audit.schema_audit.audit_schema`). Lives on the
+    # row in API response so the UI can render a structured panel
+    # without recomputing. `None` = audit failed (fail-soft) or row
+    # has no JSON-LD/microdata yet. See `to_dict()` shape in
+    # `core_audit/schema_audit/__init__.py`.
+    schema_audit: dict | None = None
 
 
 @router.post(
@@ -3779,6 +3789,29 @@ def _row_to_extract(row) -> DeepExtractRow:
     raw_ts = layout_meta.get("ai_summary_at") if isinstance(layout_meta, dict) else None
     if isinstance(raw_ts, str) and raw_ts:
         ai_summary_at = raw_ts
+
+    # Run Schema.org audit on the fly so the API response contains the
+    # structured `schema_audit` block — frontend renders it directly.
+    # Fail-soft: any exception in the auditor must NOT 500 the endpoint;
+    # we just return `None` and log it. This is a defensive import too
+    # — keeps the studio module loadable even before the schema_audit
+    # package is fully wired in (other agent ships it on a parallel
+    # branch).
+    schema_audit_dict: dict | None = None
+    try:
+        from app.core_audit.schema_audit import audit_schema
+        audit = audit_schema(
+            schema_blocks=row.schema_blocks,
+            full_text=row.full_text,
+            url=row.url,
+            title=row.title,
+            h1=row.h1,
+        )
+        schema_audit_dict = audit.to_dict()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("schema_audit failed for extract=%s: %s", row.id, exc)
+        schema_audit_dict = None
+
     return DeepExtractRow(
         id=str(row.id),
         url=row.url,
@@ -3805,6 +3838,7 @@ def _row_to_extract(row) -> DeepExtractRow:
         has_screenshot_mobile=bool(row.screenshot_mobile_path),
         ai_summary_md=row.ai_summary_md,
         ai_summary_at=ai_summary_at,
+        schema_audit=schema_audit_dict,
     )
 
 
@@ -3863,6 +3897,7 @@ class DeepExtractAnalyzeOut(BaseModel):
     summary_md: str
     cost_usd: float
     model: str
+    ai_summary_at: str | None = None
 
 
 _DEEP_ANALYZE_SYSTEM = """\
@@ -4093,6 +4128,34 @@ def _format_business_context(site) -> str:
     return "\n".join(lines)
 
 
+def _schema_type_labels(schema: Any) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, str):
+            v = value.strip()
+            if v and v not in seen:
+                seen.add(v)
+                labels.append(v)
+        elif isinstance(value, list):
+            for item in value:
+                add(item)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        add(value.get("@type") or value.get("itemtype") or value.get("typeof"))
+        visit(value.get("@graph"))
+
+    visit(schema)
+    return labels
+
+
 def _format_extract_for_llm(extract) -> str:
     """Compact one-shot text representation of the extract for LLM."""
     parts: list[str] = []
@@ -4121,7 +4184,8 @@ def _format_extract_for_llm(extract) -> str:
             parts.append(f"  H{h.get('level')}: {h.get('text', '')[:120]}")
     perf = extract.performance or {}
     parts.append(
-        f"скорость: LCP={perf.get('lcp')} мс, FCP={perf.get('fcp')} мс, "
+        f"лабораторная скорость одного браузерного рендера: "
+        f"LCP={perf.get('lcp')} мс, FCP={perf.get('fcp')} мс, "
         f"CLS={perf.get('cls')}"
     )
     layout = extract.layout_meta or {}
@@ -4176,15 +4240,95 @@ def _format_extract_for_llm(extract) -> str:
             "шрифты: "
             + ", ".join(f"{f.get('family')}×{f.get('count')}" for f in (extract.fonts or [])[:5])
         )
-    if extract.schema_blocks:
-        types = []
-        for s in extract.schema_blocks:
-            t = s.get("@type") if isinstance(s, dict) else None
-            if t:
-                types.append(str(t))
-        parts.append(f"Schema.org блоки: {', '.join(types) if types else '—'}")
+    # ── Schema audit block (structured, deterministic) ─────────────
+    # We replace the old one-liner with a full audit block from
+    # `core_audit.schema_audit.audit_schema`. Reason: the analyzer LLM
+    # was previously hallucinating Schema.org issues (e.g. fabricated
+    # missing-Offer-currency warnings on pages that had none). By
+    # feeding the audit *facts* AND wrapping them with «ОБЯЗАТЕЛЬНО»
+    # constraints, we force the LLM to ground its Schema-claims in the
+    # detector output.
+    #
+    # `extract` here is usually the ORM `PageDeepExtract` row (see
+    # `analyze_deep_extract` → `_format_extract_for_llm(row)`). It has
+    # no `schema_audit` attribute, so we recompute. Tests can also
+    # pass a SimpleNamespace with `schema_audit=` pre-set — in which
+    # case we use that and skip the recompute. Fail-soft: any
+    # exception in the auditor falls back to the legacy one-liner so
+    # the LLM still gets something usable.
+    audit_payload: dict | None = getattr(extract, "schema_audit", None)
+    if audit_payload is None:
+        try:
+            from app.core_audit.schema_audit import audit_schema
+            audit_payload = audit_schema(
+                schema_blocks=getattr(extract, "schema_blocks", None),
+                full_text=getattr(extract, "full_text", None),
+                url=getattr(extract, "url", None),
+                title=getattr(extract, "title", None),
+                h1=getattr(extract, "h1", None),
+            ).to_dict()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("schema_audit failed in _format_extract_for_llm: %s", exc)
+            audit_payload = None
+
+    if isinstance(audit_payload, dict):
+        detected = audit_payload.get("detected_types") or []
+        formats = audit_payload.get("formats") or []
+        valid_n = audit_payload.get("valid_blocks_count") or 0
+        parse_errs = audit_payload.get("parse_error_count") or 0
+        issues = audit_payload.get("issues") or []
+        parts.append("=== SCHEMA AUDIT (детектор Python, не LLM) ===")
+        parts.append(
+            f"Найденные типы: {', '.join(detected) if detected else '—'}"
+        )
+        parts.append(
+            f"Форматы: {', '.join(formats) if formats else '—'}"
+        )
+        parts.append(
+            f"Найдено блоков: {valid_n} / parse errors: {parse_errs}"
+        )
+        if issues:
+            parts.append("ISSUES:")
+            for it in issues[:40]:
+                if not isinstance(it, dict):
+                    continue
+                code = it.get("code", "schema.unknown")
+                sev = it.get("severity", "info")
+                msg = it.get("message_ru") or ""
+                evidence = it.get("evidence") or ""
+                fix = it.get("fix_ru") or ""
+                line = f"- [{sev}] {code}: {msg}"
+                if evidence:
+                    line += f" Evidence: {str(evidence)[:200]}"
+                if fix:
+                    line += f" Fix: {fix}"
+                parts.append(line)
+        else:
+            parts.append("ISSUES: — (audit чист / нечего исправлять)")
+        parts.append("ОБЯЗАТЕЛЬНО:")
+        parts.append("- Используй ТОЛЬКО эти Schema-issue в своих рекомендациях")
+        parts.append("- НЕ выдумывай Schema-проблемы вне этого audit")
+        parts.append("- Если audit пуст или \"OK\" — не пиши про Schema вообще")
     else:
-        parts.append("Schema.org блоки: НЕТ — Яндекс не получит rich-сниппет")
+        # Fallback to legacy one-liner if audit unavailable (e.g.
+        # module not yet built or threw an unexpected exception).
+        if extract.schema_blocks:
+            types = []
+            for s in extract.schema_blocks:
+                types.extend(_schema_type_labels(s))
+            deduped_types = list(dict.fromkeys(types))
+            formats = sorted({
+                str(s.get("__format"))
+                for s in extract.schema_blocks
+                if isinstance(s, dict) and s.get("__format")
+            })
+            fmt_note = f" ({', '.join(formats)})" if formats else ""
+            parts.append(
+                f"Schema.org блоки{fmt_note}: "
+                f"{', '.join(deduped_types) if deduped_types else '—'}"
+            )
+        else:
+            parts.append("Schema.org блоки: НЕ НАЙДЕНЫ В БРАУЗЕРНОМ СНИМКЕ")
     # NB: js_errors already surfaced at top of report — don't repeat here.
     return "\n".join(parts)
 
@@ -4197,6 +4341,7 @@ def _format_extract_for_llm(extract) -> str:
 async def analyze_deep_extract(
     site_id: uuid.UUID,
     extract_id: uuid.UUID,
+    force: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
 ) -> DeepExtractAnalyzeOut:
     """Run LLM analysis of a deep extract, return Markdown report.
@@ -4223,12 +4368,19 @@ async def analyze_deep_extract(
             status_code=400,
             detail=f"extract is not completed: {row.status}",
         )
-    if row.ai_summary_md:
+    layout_meta = row.layout_meta or {}
+    ai_summary_at = (
+        layout_meta.get("ai_summary_at")
+        if isinstance(layout_meta, dict)
+        else None
+    )
+    if row.ai_summary_md and not force:
         return DeepExtractAnalyzeOut(
             extract_id=str(row.id),
             summary_md=row.ai_summary_md,
             cost_usd=0.0,
             model="cached",
+            ai_summary_at=ai_summary_at if isinstance(ai_summary_at, str) else None,
         )
 
     site_row = (await db.execute(
@@ -4280,6 +4432,7 @@ async def analyze_deep_extract(
         summary_md=summary_md,
         cost_usd=float(usage.get("cost_usd") or 0.0),
         model=usage.get("model") or "",
+        ai_summary_at=now_iso,
     )
 
 

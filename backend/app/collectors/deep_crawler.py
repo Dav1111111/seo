@@ -19,7 +19,7 @@ pulls a much richer dictionary of facts:
   - Layout meta: viewport, fold, page height, sticky header/CTA
   - Web vitals (LCP, FCP, CLS) from PerformanceObserver
   - JS console errors observed during render
-  - Schema.org JSON-LD blocks
+  - Schema.org blocks (JSON-LD plus basic microdata/RDFa markers)
   - Screenshots: desktop 1280x800 + mobile 375x800 (above-fold)
 
 Universal: works for both own pages (`is_competitor=False`) and
@@ -110,8 +110,31 @@ _EXTRACTION_SCRIPT = r"""
 
   // ── CTA inventory ─────────────────────────────────────────────
   const ctas = [];
-  const ctaSelectors = 'button, a.btn, a.button, [role="button"], input[type="submit"]';
-  document.querySelectorAll(ctaSelectors).forEach((el) => {
+  const ctaSelectors = [
+    'button',
+    'a.btn',
+    'a.button',
+    'a[class*="btn" i]',
+    'a[class*="button" i]',
+    'a[class*="cta" i]',
+    '[role="button"]',
+    'input[type="submit"]',
+    'input[type="button"]',
+    'a[href^="tel:"]',
+    'a[href^="https://wa.me/"]',
+    'a[href*="whatsapp" i]',
+    'a[href*="telegram" i]',
+  ].join(',');
+  const ctaTextRe = /(забронировать|заказать|купить|оставить заявку|получить|узнать цену|рассчитать|перезвон|позвонить|написать|связаться|записаться|отправить|подобрать|консультац|book|order|buy|contact|call|whatsapp|telegram)/i;
+  const ctaCandidates = new Set(Array.from(document.querySelectorAll(ctaSelectors)));
+  document.querySelectorAll('a[href]').forEach((a) => {
+    const text = (a.innerText || '').trim();
+    const href = a.href || '';
+    if (ctaTextRe.test(text) || href.startsWith('tel:') || /wa\.me|whatsapp|telegram/i.test(href)) {
+      ctaCandidates.add(a);
+    }
+  });
+  ctaCandidates.forEach((el) => {
     const text = (el.innerText || el.value || '').trim();
     if (!text || text.length > 80) return;  // skip empty / huge
     const rect = el.getBoundingClientRect();
@@ -219,15 +242,43 @@ _EXTRACTION_SCRIPT = r"""
       return cs.position === 'sticky' || cs.position === 'fixed';
     });
 
-  // ── Schema.org JSON-LD ───────────────────────────────────────
+  // ── Schema.org ───────────────────────────────────────────────
   const schemas = [];
   document.querySelectorAll('script[type="application/ld+json"]').forEach((s) => {
     try {
       const parsed = JSON.parse(s.textContent || '{}');
-      schemas.push(parsed);
+      if (Array.isArray(parsed)) {
+        schemas.push({ __format: 'json-ld', '@graph': parsed });
+        return;
+      }
+      if (parsed && typeof parsed === 'object') {
+        parsed.__format = 'json-ld';
+        schemas.push(parsed);
+        return;
+      }
+      schemas.push({ __format: 'json-ld', value: parsed });
     } catch (e) {
-      schemas.push({ __parse_error: String(e), __raw: (s.textContent || '').slice(0, 300) });
+      schemas.push({
+        __format: 'json-ld',
+        __parse_error: String(e),
+        __raw: (s.textContent || '').slice(0, 300),
+      });
     }
+  });
+  const seenSchemaMarkers = new Set();
+  document.querySelectorAll('[itemscope][itemtype]').forEach((el) => {
+    const itemtype = el.getAttribute('itemtype') || '';
+    const key = `microdata:${itemtype}`;
+    if (!itemtype || seenSchemaMarkers.has(key)) return;
+    seenSchemaMarkers.add(key);
+    schemas.push({ __format: 'microdata', '@type': itemtype });
+  });
+  document.querySelectorAll('[typeof]').forEach((el) => {
+    const type = el.getAttribute('typeof') || '';
+    const key = `rdfa:${type}`;
+    if (!type || seenSchemaMarkers.has(key)) return;
+    seenSchemaMarkers.add(key);
+    schemas.push({ __format: 'rdfa', '@type': type });
   });
 
   // ── Performance — pull from PerformanceObserver buffer ───────

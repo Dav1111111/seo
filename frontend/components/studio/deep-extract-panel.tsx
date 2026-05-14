@@ -2,9 +2,21 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { Microscope, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import {
+  Microscope,
+  Loader2,
+  AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
+  Info,
+} from "lucide-react";
 
-import { api, type DeepExtractRow } from "@/lib/api";
+import {
+  api,
+  type DeepExtractRow,
+  type SchemaAudit,
+  type SchemaAuditIssue,
+} from "@/lib/api";
 
 /**
  * Deep Extract panel — Playwright-rendered snapshot for a URL.
@@ -31,6 +43,17 @@ interface CompetitorProps {
 }
 
 type Props = OwnPageProps | CompetitorProps;
+
+type FormSnapshot = {
+  field_count?: number;
+  above_fold?: boolean;
+  fields?: Array<{ type?: string }>;
+};
+
+type JsErrorSnapshot = {
+  kind?: string;
+  message?: string;
+};
 
 export function DeepExtractPanel(props: Props) {
   const [running, setRunning] = useState(false);
@@ -97,9 +120,9 @@ export function DeepExtractPanel(props: Props) {
             Глубокий разбор страницы
           </h3>
           <p className="text-xs text-muted-foreground mt-1 max-w-xl">
-            Открываем страницу как настоящий браузер (с JS), смотрим реальные
-            кнопки, цвета, шрифты, форму, скорость загрузки, Schema-разметку.
-            Можно запустить заново — кнопкой «Обновить».
+            Открываем страницу в браузере с JS и сохраняем снимок: title/H1,
+            CTA, формы, Schema, цвета, шрифты, JS-ошибки, лабораторные
+            LCP/FCP/CLS и скриншоты. Можно запустить заново — кнопкой «Обновить».
           </p>
         </div>
         <button
@@ -126,7 +149,7 @@ export function DeepExtractPanel(props: Props) {
 
       {!extract && !running && (
         <p className="text-xs text-muted-foreground italic">
-          Пока не запускали. Нажми «Запустить» чтобы получить полный снимок.
+          Пока не запускали. Нажми «Запустить» чтобы получить браузерный снимок.
         </p>
       )}
 
@@ -161,13 +184,11 @@ function DeepExtractView({
     setAnalyzing(true);
     setAnalyzeErr(null);
     try {
-      const res = await api.studioAnalyzeDeepExtract(siteId, extract.id);
+      const res = await api.studioAnalyzeDeepExtract(siteId, extract.id, Boolean(summary));
       setSummary(res.summary_md);
-      // Cached server-side responses include `model: "cached"`; in
-      // that case we don't have a fresh server timestamp here, so
-      // we keep whatever we already had. For a real LLM call this is
-      // effectively "now" — matches what the server just persisted.
-      if (res.model && res.model !== "cached") {
+      if (res.ai_summary_at) {
+        setSummaryAt(res.ai_summary_at);
+      } else if (res.model && res.model !== "cached") {
         setSummaryAt(new Date().toISOString());
       }
     } catch (e) {
@@ -232,9 +253,9 @@ function DeepExtractView({
   const fonts = extract.fonts || [];
   const perf = extract.performance || {};
   const layout = extract.layout_meta || {};
-  const forms = extract.forms_inventory || [];
-  const errors = extract.js_errors || [];
-  const schemas = extract.schema_blocks || [];
+  const forms = (extract.forms_inventory || []) as FormSnapshot[];
+  const errors = (extract.js_errors || []) as JsErrorSnapshot[];
+  const schemaAudit: SchemaAudit | null = extract.schema_audit ?? null;
 
   return (
     <div className="space-y-4 text-sm">
@@ -301,7 +322,7 @@ function DeepExtractView({
           {/* Performance */}
           <div>
             <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">
-              Скорость (реальный рендер)
+              Скорость (лабораторный рендер)
             </div>
             <div className="flex flex-wrap gap-3 text-xs">
               <PerfChip label="LCP" value={perf.lcp} unit="ms" target={2500} />
@@ -329,7 +350,8 @@ function DeepExtractView({
             </div>
             {ctas.length === 0 ? (
               <p className="text-xs text-red-700 dark:text-red-400">
-                Кнопок не найдено — это уже проблема: некуда нажать = нет конверсии.
+                CTA-кнопок не найдено — проверь, не сделаны ли они обычными
+                ссылками или виджетами.
               </p>
             ) : (
               <div className="overflow-x-auto">
@@ -411,32 +433,15 @@ function DeepExtractView({
                     {f.above_fold && (
                       <span className="text-muted-foreground">(выше fold)</span>
                     )}{" "}
-                    — {(f.fields || []).map((x: any) => x.type).join(", ")}
+                    — {(f.fields || []).map((x) => x.type).join(", ")}
                   </li>
                 ))}
               </ul>
             </div>
           )}
 
-          {/* Schema */}
-          <div>
-            <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">
-              Schema.org JSON-LD ({schemas.length})
-            </div>
-            {schemas.length === 0 ? (
-              <p className="text-xs text-amber-700 dark:text-amber-400">
-                Нет Schema-разметки — без неё нет rich-сниппета (звёздочек, цены) в выдаче.
-              </p>
-            ) : (
-              <ul className="text-xs space-y-0.5">
-                {schemas.map((s: any, i) => (
-                  <li key={i}>
-                    {s["@type"] || s.__parse_error ? "ошибка парсинга" : "?"}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          {/* Schema.org audit */}
+          <SchemaAuditView audit={schemaAudit} />
 
           {/* JS errors */}
           {errors.length > 0 && (
@@ -445,7 +450,7 @@ function DeepExtractView({
                 JS-ошибки ({errors.length})
               </div>
               <ul className="text-xs space-y-0.5 text-red-700 dark:text-red-400">
-                {errors.slice(0, 8).map((e: any, i) => (
+                {errors.slice(0, 8).map((e, i) => (
                   <li key={i}>
                     [{e.kind}] {e.message?.slice(0, 200)}
                   </li>
@@ -460,9 +465,9 @@ function DeepExtractView({
               <div>
                 <div className="text-sm font-medium">📋 Что с этим делать</div>
                 <p className="text-xs text-muted-foreground mt-0.5 max-w-xl">
-                  AI прочитает все данные выше (кнопки, цвета, скорость, формы,
-                  Schema) и даст конкретный план: что мешает топ-5 и какие
-                  правки делать сначала.
+                  AI прочитает данные снимка (CTA, цвета, лабораторную скорость,
+                  формы, Schema) и даст конкретный план: что мешает росту
+                  к топ-5 и какие правки делать сначала.
                 </p>
               </div>
               <button
@@ -567,6 +572,203 @@ function renderInlineBold(text: string): React.ReactNode {
       <span key={i}>{p}</span>
     ),
   );
+}
+
+// ── Schema.org audit view ───────────────────────────────────────────
+// Renders a structured audit (detected types, issues grouped by
+// severity, fix recommendations) coming from the backend. Honest copy:
+// no absolute claims about rich snippets, no codes shown to the owner.
+
+const SEVERITY_ORDER: Array<SchemaAuditIssue["severity"]> = [
+  "critical",
+  "warning",
+  "info",
+];
+
+const SEVERITY_LABEL: Record<SchemaAuditIssue["severity"], string> = {
+  critical: "Критично",
+  warning: "Предупреждения",
+  info: "К сведению",
+};
+
+const SEVERITY_CARD: Record<SchemaAuditIssue["severity"], string> = {
+  critical:
+    "border border-red-300/40 bg-red-50 dark:bg-red-950/30 text-red-900 dark:text-red-200",
+  warning:
+    "border border-amber-300/40 bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200",
+  info: "border border-slate-200/40 bg-slate-50 dark:bg-slate-900/40 text-slate-900 dark:text-slate-200",
+};
+
+function SeverityIcon({ severity }: { severity: SchemaAuditIssue["severity"] }) {
+  if (severity === "critical") {
+    return <AlertCircle className="h-4 w-4 text-red-700 dark:text-red-300 flex-shrink-0 mt-0.5" />;
+  }
+  if (severity === "warning") {
+    return <AlertTriangle className="h-4 w-4 text-amber-700 dark:text-amber-300 flex-shrink-0 mt-0.5" />;
+  }
+  return <Info className="h-4 w-4 text-slate-600 dark:text-slate-300 flex-shrink-0 mt-0.5" />;
+}
+
+function SchemaAuditView({ audit }: { audit: SchemaAudit | null }) {
+  // Empty / not-detected → muted info card, no overclaims.
+  const isEmpty =
+    !audit ||
+    (audit.valid_blocks_count === 0 &&
+      audit.parse_error_count === 0 &&
+      audit.detected_types.length === 0 &&
+      audit.issues.length === 0 &&
+      audit.recommendations.length === 0);
+
+  if (isEmpty) {
+    return (
+      <div>
+        <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">
+          Schema.org разметка
+        </div>
+        <div className="flex items-start gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          <Info className="h-4 w-4 flex-shrink-0 mt-0.5" />
+          <span>
+            Schema.org разметка не найдена. Это не критично — поисковик
+            попытается распарсить страницу сам, но расширенный сниппет
+            менее вероятен.
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // audit is non-null here.
+  const a = audit as SchemaAudit;
+
+  // Group issues by severity, preserving SEVERITY_ORDER.
+  const issuesBySeverity = SEVERITY_ORDER.map((sev) => ({
+    severity: sev,
+    items: a.issues.filter((i) => i.severity === sev),
+  })).filter((g) => g.items.length > 0);
+
+  return (
+    <div className="space-y-3">
+      <div className="text-xs uppercase tracking-wide text-muted-foreground">
+        Schema.org разметка
+      </div>
+
+      {/* Detected types + formats + counts */}
+      {a.detected_types.length > 0 && (
+        <div className="space-y-1">
+          <div className="flex flex-wrap gap-1.5">
+            {a.detected_types.map((t) => (
+              <span
+                key={t}
+                className="inline-flex items-center gap-1 rounded-full bg-emerald-100 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 px-2 py-0.5 text-xs"
+              >
+                <CheckCircle2 className="h-3 w-3" />
+                {t}
+              </span>
+            ))}
+          </div>
+          {a.formats.length > 0 && (
+            <div className="text-xs text-muted-foreground">
+              Форматы: {a.formats.join(", ")}
+            </div>
+          )}
+          {a.valid_blocks_count > 0 && (
+            <div className="text-xs text-muted-foreground">
+              Найдено {a.valid_blocks_count}{" "}
+              {pluralBlocks(a.valid_blocks_count)}
+            </div>
+          )}
+          {a.parse_error_count > 0 && (
+            <div className="text-xs text-red-700 dark:text-red-400">
+              Ошибок парсинга: {a.parse_error_count}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* If there are no detected types but we still have a parse-error
+          count > 0 — surface that on its own so the owner sees the
+          breakage without a confusing empty "Detected" row. */}
+      {a.detected_types.length === 0 && a.parse_error_count > 0 && (
+        <div className="text-xs text-red-700 dark:text-red-400">
+          Ошибок парсинга: {a.parse_error_count}
+        </div>
+      )}
+
+      {/* Summary line */}
+      {a.summary_ru && (
+        <p className="text-xs text-muted-foreground">{a.summary_ru}</p>
+      )}
+
+      {/* Issues grouped by severity */}
+      {issuesBySeverity.length > 0 && (
+        <div className="space-y-3">
+          {issuesBySeverity.map((group) => (
+            <div key={group.severity} className="space-y-1.5">
+              <div className="text-xs font-medium text-muted-foreground">
+                {SEVERITY_LABEL[group.severity]} ({group.items.length})
+              </div>
+              <div className="space-y-1.5">
+                {group.items.map((issue, idx) => (
+                  <div
+                    key={`${issue.code}-${idx}`}
+                    className={`flex items-start gap-2 rounded-md px-3 py-2 text-xs ${SEVERITY_CARD[group.severity]}`}
+                  >
+                    <SeverityIcon severity={group.severity} />
+                    <div className="space-y-1 min-w-0">
+                      <div className="font-medium leading-snug">
+                        {issue.message_ru}
+                      </div>
+                      {issue.evidence && (
+                        <div className="opacity-80">
+                          <span className="font-medium">Что вижу: </span>
+                          <span className="font-mono break-all">
+                            {issue.evidence}
+                          </span>
+                        </div>
+                      )}
+                      {issue.fix_ru && (
+                        <div className="opacity-90">
+                          <span className="font-medium">Что починить: </span>
+                          {issue.fix_ru}
+                        </div>
+                      )}
+                      <div className="opacity-60 text-[10px] uppercase tracking-wide">
+                        Источник: {issue.source}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Recommendations digest */}
+      {a.recommendations.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-medium text-muted-foreground">
+            Что сделать в первую очередь
+          </div>
+          <ul className="text-xs space-y-1 list-disc pl-5">
+            {a.recommendations.map((r, i) => (
+              <li key={i} className="leading-snug">
+                {r}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function pluralBlocks(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "блок";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return "блока";
+  return "блоков";
 }
 
 function ScreenshotBox({ title, src }: { title: string; src: string }) {

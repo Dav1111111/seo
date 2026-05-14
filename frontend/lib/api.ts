@@ -1,6 +1,29 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
 const ADMIN_PROXY = "/admin-proxy";  // Next.js server-side proxy — holds the admin key in backend env only
 
+// Structured Schema.org audit returned alongside the raw `schema_blocks`
+// in the deep-extract response. Backend builds this from JSON-LD /
+// microdata / RDFa parsing + lint rules. Each issue carries an honest
+// human Russian message so the UI never has to surface raw codes.
+export interface SchemaAuditIssue {
+  code: string;
+  severity: "critical" | "warning" | "info";
+  message_ru: string;
+  evidence: string | null;
+  fix_ru: string;
+  source: "json-ld" | "microdata" | "rdfa" | "dom";
+}
+
+export interface SchemaAudit {
+  detected_types: string[];
+  formats: string[]; // subset of ["json-ld","microdata","rdfa"]
+  valid_blocks_count: number;
+  parse_error_count: number;
+  issues: SchemaAuditIssue[];
+  recommendations: string[];
+  summary_ru: string;
+}
+
 export interface DeepExtractRow {
   id: string;
   url: string;
@@ -23,6 +46,10 @@ export interface DeepExtractRow {
   performance: Record<string, any> | null;
   js_errors: Array<Record<string, any>> | null;
   schema_blocks: Array<Record<string, any>> | null;
+  // Structured audit over schema_blocks (lint rules + recommendations
+  // already filtered & deduped by backend). Null on legacy rows that
+  // pre-date the audit pipeline — UI treats null as "not analyzed yet".
+  schema_audit?: SchemaAudit | null;
   has_screenshot_desktop: boolean;
   has_screenshot_mobile: boolean;
   // AI summary + when it was generated. `ai_summary_at` is null on
@@ -428,9 +455,15 @@ export const api = {
     kind: "desktop" | "mobile",
   ) =>
     `/admin-proxy/studio/sites/${siteId}/deep-extracts/${extractId}/screenshot/${kind}`,
-  studioAnalyzeDeepExtract: (siteId: string, extractId: string) =>
-    apiFetch<{ extract_id: string; summary_md: string; cost_usd: number; model: string }>(
-      `/studio/sites/${siteId}/deep-extracts/${extractId}/analyze`,
+  studioAnalyzeDeepExtract: (siteId: string, extractId: string, force = false) =>
+    apiFetch<{
+      extract_id: string;
+      summary_md: string;
+      cost_usd: number;
+      model: string;
+      ai_summary_at: string | null;
+    }>(
+      `/studio/sites/${siteId}/deep-extracts/${extractId}/analyze${force ? "?force=1" : ""}`,
       { method: "POST", base: "admin" },
     ),
 
