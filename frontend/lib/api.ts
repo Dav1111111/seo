@@ -206,7 +206,7 @@ export async function runRobotsAudit(
   siteId: number | string,
 ): Promise<RobotsAuditResult> {
   return apiFetch<RobotsAuditResult>(
-    `/admin/sites/${siteId}/robots-audit`,
+    `/admin/studio/sites/${siteId}/robots-audit`,
     { method: "POST", base: "admin" },
   );
 }
@@ -219,7 +219,7 @@ export async function getRobotsAudit(
 ): Promise<RobotsAuditResult | null> {
   try {
     return await apiFetch<RobotsAuditResult>(
-      `/admin/sites/${siteId}/robots-audit`,
+      `/admin/studio/sites/${siteId}/robots-audit`,
       { base: "admin" },
     );
   } catch (e: unknown) {
