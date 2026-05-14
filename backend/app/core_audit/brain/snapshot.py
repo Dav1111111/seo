@@ -228,6 +228,15 @@ class BrainSnapshot:
     )
     competitors: CompetitorFacts = field(default_factory=CompetitorFacts)
     behavioral: BehavioralFacts = field(default_factory=BehavioralFacts)
+    # robots.txt audit signals — populated from the latest
+    # `analysis_events` row with stage="robots_audit". Defaults are
+    # «never ran, assume fine»: 0 critical issues, valid_for_yandex=True.
+    # Rule layer surfaces critical issues as a top-priority action;
+    # when the file is unavailable (valid_for_yandex=False) the brain
+    # cannot trust crawl/indexation conclusions and the dedicated rule
+    # nudges the owner to look.
+    robots_critical_issues: int = 0
+    robots_valid_for_yandex: bool = True
 
 
 # ── Loaders ──────────────────────────────────────────────────────────
@@ -1212,6 +1221,50 @@ async def _behavioral(db: AsyncSession, site_id: UUID) -> BehavioralFacts:
     )
 
 
+async def _robots_audit_facts(
+    db: AsyncSession, site_id: UUID,
+) -> tuple[int, bool]:
+    """Read the latest `analysis_events` row with stage='robots_audit'.
+
+    Returns (critical_issues, valid_for_yandex). Defaults to
+    (0, True) when no event exists — «never ran, assume nothing
+    is wrong yet». A done/failed/skipped run with no `extra` payload
+    is treated the same as «no signal».
+    """
+    row = (await db.execute(
+        select(AnalysisEvent.extra, AnalysisEvent.status)
+        .where(
+            AnalysisEvent.site_id == site_id,
+            AnalysisEvent.stage == "robots_audit",
+        )
+        .order_by(AnalysisEvent.ts.desc())
+        .limit(1)
+    )).first()
+    if row is None:
+        return 0, True
+
+    extra = row[0] if isinstance(row[0], dict) else {}
+    issues = extra.get("issues") if isinstance(extra, dict) else None
+    crit = 0
+    if isinstance(issues, list):
+        for it in issues:
+            if isinstance(it, dict) and it.get("severity") == "critical":
+                crit += 1
+
+    valid_raw = extra.get("valid_for_yandex") if isinstance(extra, dict) else None
+    if isinstance(valid_raw, bool):
+        valid = valid_raw
+    elif valid_raw is None:
+        # No explicit signal — assume valid so the rule stays silent;
+        # the dedicated «file unavailable» branch only fires on an
+        # explicit False from the audit module.
+        valid = True
+    else:
+        valid = bool(valid_raw)
+
+    return crit, valid
+
+
 async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
     """Pull every count the rules layer needs, in one round trip.
 
@@ -1233,6 +1286,7 @@ async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
         list(site.competitor_domains or []),
     )
     behavioral = await _behavioral(db, site_id)
+    robots_critical, robots_valid = await _robots_audit_facts(db, site_id)
 
     return BrainSnapshot(
         site_id=str(site_id),
@@ -1246,6 +1300,8 @@ async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
         activity=activity,
         competitors=competitors,
         behavioral=behavioral,
+        robots_critical_issues=robots_critical,
+        robots_valid_for_yandex=robots_valid,
     )
 
 

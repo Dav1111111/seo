@@ -160,6 +160,79 @@ export type StudioStrategicFocus = StudioStrategicFocusInput & {
 
 export type ChatMode = "answer" | "discussion" | "battle_plan";
 
+// ── robots.txt audit (Yandex-tuned) ────────────────────────────────
+// Backend module: `app.core_audit.yandex_robots` + the `studio.py`
+// endpoints `POST/GET /admin/sites/{site_id}/robots-audit`.
+// Field shape is frozen by `YandexRobotsAuditResult.to_dict()` —
+// any change there must be mirrored here.
+export type RobotsIssue = {
+  code: string;
+  severity: "critical" | "warning" | "info";
+  message_ru: string;
+  evidence: string;
+  fix_ru: string;
+};
+
+export type RobotsUrlCheck = {
+  url: string;
+  path: string;
+  user_agent: string;
+  allowed: boolean;
+  matched_user_agent: string;
+  matched_rule: string;
+  risk: "ok" | "warning" | "blocked";
+  explanation_ru: string;
+};
+
+export type RobotsAuditResult = {
+  robots_url: string;
+  http_status: number | null;
+  is_accessible: boolean;
+  size_bytes: number;
+  valid_for_yandex: boolean;
+  matched_groups: string[];
+  sitemaps: string[];
+  clean_params: string[];
+  issues: RobotsIssue[];
+  url_checks: RobotsUrlCheck[];
+  summary_ru: string;
+  recommendations_ru: string[];
+  // Optional — backend may attach when result was served from cache.
+  cached_at?: string;
+};
+
+// POST — trigger a fresh audit and return the result inline.
+export async function runRobotsAudit(
+  siteId: number | string,
+): Promise<RobotsAuditResult> {
+  return apiFetch<RobotsAuditResult>(
+    `/admin/sites/${siteId}/robots-audit`,
+    { method: "POST", base: "admin" },
+  );
+}
+
+// GET — fetch the last cached audit. Backend returns 404 when no
+// audit has been run yet; we surface that as `null` so callers can
+// distinguish «never ran» from «failed».
+export async function getRobotsAudit(
+  siteId: number | string,
+): Promise<RobotsAuditResult | null> {
+  try {
+    return await apiFetch<RobotsAuditResult>(
+      `/admin/sites/${siteId}/robots-audit`,
+      { base: "admin" },
+    );
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // apiFetch throws `API <status>: <body>` on non-2xx — peel out
+    // the 404 case and treat it as «no audit yet».
+    if (/^API 404\b/.test(msg)) {
+      return null;
+    }
+    throw e;
+  }
+}
+
 export const api = {
   // Health
   health: () => apiFetch<{ status: string; db: string; redis: string }>("/health"),

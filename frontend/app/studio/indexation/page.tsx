@@ -40,6 +40,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { cn, getErrorMessage } from "@/lib/utils";
+import { YandexRobotsCard } from "@/components/studio/yandex-robots-card";
 
 // getErrorMessage now in lib/utils.
 
@@ -249,6 +250,10 @@ export default function StudioIndexationPage() {
           </Button>
         </div>
       </div>
+
+      {/* robots.txt audit — sits upstream of every other indexation
+          check, so we surface it at the very top of the page. */}
+      <YandexRobotsCard siteId={siteId} />
 
       {/* Trigger feedback banner */}
       {banner && (

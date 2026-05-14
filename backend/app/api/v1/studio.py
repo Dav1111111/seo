@@ -3967,12 +3967,12 @@ WCAG contrast 4.5:1, размер touch-target 44×44 px)**. Если в сни�
 ────────────────────────────────────────────────────────────────────
 ЧЕК-ЛИСТ #3 — SCHEMA.ORG (валидация webmaster.yandex.com/tools/microtest/)
 ────────────────────────────────────────────────────────────────────
-- **Product + Offer как основной @type**: `name`, `description`, `offers` с `price` числом, `priceCurrency: "RUB"`, `availability: InStock`. Яндекс уверенно парсит Product/Offer в rich-сниппет с ценой; туристические @type вроде `TouristTrip` Яндекс **не разбирает в rich-сниппеты** (проверено в Yandex Webmaster microtest).
-- **Product+Offer**: `price` числом, `priceCurrency: "RUB"`, `availability: InStock`, `validFrom`+`priceValidUntil` (ISO 8601). `"от 2500"` строкой — Яндекс/Google игнорируют. Корректный Offer — необходимое условие для price-сниппета.
-- **AggregateRating + Review** на странице (не только в JSON). `reviewCount` ≥1 и те же отзывы должны рендериться в DOM — иначе расхождение DOM↔JSON-LD трактуется как cloaking.
+- **Туры/экскурсии**: не требуй `Product` как обязательную замену. Корректные варианты: `TouristTrip` или `Service` + `Offer/AggregateOffer` с ценой, валютой, availability и url. `Product` можно предлагать только как дополнительный вариант для пакетного тура, если это подтверждено валидатором и фактурой страницы.
+- **Offer/AggregateOffer**: `price`/`lowPrice` числом, `priceCurrency: "RUB"`, `availability`, `url`, при необходимости `validFrom`+`priceValidUntil` (ISO 8601). `"от 2500"` строкой — проблема; `от` должен быть в видимом тексте, а в JSON-LD — число/диапазон.
+- **AggregateRating + Review** только если отзывы реально видны на странице. `reviewCount` ≥1 и те же отзывы должны рендериться в DOM — иначе расхождение DOM↔JSON-LD трактуется как cloaking.
 - **Organization/TravelAgency с РТО+ИНН+ОГРН** через `taxID`, `identifier: {propertyID: "RTO", value: ...}`, `legalName`. Critical trust-сигнал для туризма по 132-ФЗ.
 - **BreadcrumbList**: `itemListElement` упорядочен (`position: 1,2,3`), все `item` — абсолютные URL. Хлебные крошки заменяют URL в сниппете и снижают bounce.
-- **Product + AggregateRating + Review** в связке существенно повышают вероятность rich-сниппета (звёзды, цена, доступность).
+- **TouristTrip не является ошибкой сам по себе**. Ошибка — когда нет Offer/цены/валюты, тип не соответствует странице, или JSON-LD противоречит видимому DOM.
 - **Чистка**: нет deprecated (`HowTo`, `SpecialAnnouncement`); все `@context = "https://schema.org"` (https); даты ISO 8601; нет плейсхолдеров `[Название]`.
 
 ────────────────────────────────────────────────────────────────────
@@ -4022,7 +4022,7 @@ WCAG contrast 4.5:1, размер touch-target 44×44 px)**. Если в сни�
 6. **СТРОГАЯ ПРИОРИТИЗАЦИЯ**: упорядочивай пункты «Что мешает» и «План
    правок» НЕ по порядку чек-листов, а по реальной критичности:
    (a) JS-ошибки/hydration ≥3 → P0, всегда первым
-   (b) Schema-пропуски (Offer, AggregateRating, areaServed) → P1
+   (b) Schema-пропуски (Offer/AggregateOffer, priceCurrency, areaServed) → P1
    (c) E-E-A-T trust (РТО, ИНН, отзывы) → P2
    (d) Content (FAQ, программа, «что включено») → P3
    (e) H1/title-семантика → P4
@@ -4561,6 +4561,211 @@ async def explain_recommendation(
         cached=False,
         cost_usd=float(usage.get("cost_usd") or 0.0),
     )
+
+
+# ── Yandex robots.txt audit ───────────────────────────────────────────
+#
+# Two routes share the same `analysis_events` row as truth:
+#   POST /admin/sites/{site_id}/robots-audit  → run + cache
+#   GET  /admin/sites/{site_id}/robots-audit  → read latest cached
+#
+# The POST handler is a thin wrapper over `_run_robots_audit_for_site`,
+# which is also imported by the pipeline-integration agent so the audit
+# can run as a chained Celery stage (with proper terminal events from
+# that side — we only own the manual entry point here).
+#
+# Note the URL prefix: this router is mounted under `/admin/studio` so
+# the full external path is `/api/v1/admin/studio/sites/{id}/robots-audit`.
+
+
+# Caps tuned for one-pass URL selection inside a request handler —
+# Yandex robots.txt audits don't need every page, just a representative
+# spread for the "important paths" + "clean-param" detector.
+_ROBOTS_IMPORTANT_URL_CAP = 50
+_ROBOTS_OBSERVED_URL_CAP = 200
+
+
+async def _gather_important_urls(db: AsyncSession, site_id: uuid.UUID) -> list[str]:
+    """Build the list of "must stay crawlable" URLs for this site.
+
+    Two sources, unioned then de-duplicated preserving first-seen order:
+      1. Pages currently in Yandex's index (`Page.in_yandex_index`) —
+         losing one of these to a robots rule is an obvious regression.
+      2. Pages whose dominant scored intent is commercial/transactional
+         (`PageIntentScore.intent_code` starts with `comm_` or `trans_`).
+         These are the revenue-bearing pages — blocking them silently
+         is the failure mode the audit is built to catch.
+
+    Capped at :data:`_ROBOTS_IMPORTANT_URL_CAP` total. Indexed pages
+    come first so we never drop them in favour of intent-scored ones.
+    """
+    from app.intent.models import PageIntentScore
+
+    indexed_rows = (await db.execute(
+        select(Page.url)
+        .where(
+            Page.site_id == site_id,
+            Page.in_yandex_index.is_(True),
+            Page.url.is_not(None),
+        )
+        .order_by(Page.last_seen_at.desc().nullslast())
+        .limit(_ROBOTS_IMPORTANT_URL_CAP),
+    )).scalars().all()
+
+    intent_rows = (await db.execute(
+        select(Page.url)
+        .join(PageIntentScore, PageIntentScore.page_id == Page.id)
+        .where(
+            Page.site_id == site_id,
+            Page.url.is_not(None),
+            PageIntentScore.intent_code.like("comm_%")
+            | PageIntentScore.intent_code.like("trans_%"),
+        )
+        .order_by(PageIntentScore.score.desc())
+        .limit(_ROBOTS_IMPORTANT_URL_CAP),
+    )).scalars().all()
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for url in list(indexed_rows) + list(intent_rows):
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        ordered.append(url)
+        if len(ordered) >= _ROBOTS_IMPORTANT_URL_CAP:
+            break
+    return ordered
+
+
+async def _gather_observed_urls(db: AsyncSession, site_id: uuid.UUID) -> list[str]:
+    """Last N URLs crawled for the site, deduplicated.
+
+    Used by the Yandex-specific Clean-param check inside the auditor —
+    it needs a representative sample of URLs (with query strings) the
+    crawler has actually seen so it can flag query-string noise that
+    Yandex would index as duplicates.
+    """
+    rows = (await db.execute(
+        select(Page.url)
+        .where(
+            Page.site_id == site_id,
+            Page.url.is_not(None),
+        )
+        .order_by(Page.last_seen_at.desc().nullslast(), Page.id.desc())
+        .limit(_ROBOTS_OBSERVED_URL_CAP),
+    )).scalars().all()
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for url in rows:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append(url)
+    return deduped
+
+
+async def _run_robots_audit_for_site(db: AsyncSession, site: Site) -> dict:
+    """Run a Yandex robots.txt audit for ``site`` and cache the result.
+
+    Side effects: writes one ``analysis_events`` row with
+    ``stage="robots_audit"`` and status ``"done"`` (or ``"failed"`` on
+    fetch errors that the auditor can't represent). Returns the result
+    as a JSON-serializable dict (the dataclass's ``.to_dict()`` shape)
+    augmented with ``cached_at`` so both the POST and the pipeline
+    chain agent can return the same envelope.
+
+    Imported by the pipeline-integration agent — keep the signature
+    stable: ``(session, site) -> dict``.
+    """
+    from app.collectors.robots_fetcher import fetch_robots_txt
+    from app.core_audit.yandex_robots import audit_yandex_robots
+
+    important_urls = await _gather_important_urls(db, site.id)
+    observed_urls = await _gather_observed_urls(db, site.id)
+
+    fetched = await fetch_robots_txt(site.domain)
+
+    audit_result = audit_yandex_robots(
+        robots_txt=fetched.get("body"),
+        robots_url=fetched.get("url", f"https://{site.domain}/robots.txt"),
+        http_status=fetched.get("status"),
+        important_urls=important_urls,
+        observed_urls=observed_urls,
+    )
+
+    payload = audit_result.to_dict()
+    now = datetime.now(timezone.utc)
+
+    event = AnalysisEvent(
+        site_id=site.id,
+        stage="robots_audit",
+        status="done",
+        message="Аудит robots.txt выполнен",
+        run_id=None,
+        ts=now,
+        extra=payload,
+    )
+    db.add(event)
+    await db.flush()
+
+    # Mirror the cached envelope shape used by the GET reader.
+    return {**payload, "cached_at": now.isoformat()}
+
+
+@router.post(
+    "/sites/{site_id}/robots-audit",
+    dependencies=[Depends(_require_admin)],
+)
+async def run_robots_audit(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Run a Yandex robots.txt audit for the site and cache the result.
+
+    Idempotent at the contract level — multiple calls overwrite nothing,
+    they just append a new ``analysis_events`` row that the GET reader
+    picks up as the latest.
+    """
+    site = await _site_or_404(db, site_id)
+    result = await _run_robots_audit_for_site(db, site)
+    await db.commit()
+    return result
+
+
+@router.get(
+    "/sites/{site_id}/robots-audit",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_robots_audit(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return the latest cached robots-audit result for the site.
+
+    404 if no audit has ever been run for this site — the frontend
+    uses that signal to render the "никогда не проверялся" CTA.
+    """
+    await _site_or_404(db, site_id)
+
+    row = (await db.execute(
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == site_id,
+            AnalysisEvent.stage == "robots_audit",
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(1),
+    )).scalar_one_or_none()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="robots audit has never been run for this site",
+        )
+
+    payload = row.extra if isinstance(row.extra, dict) else {}
+    return {**payload, "cached_at": row.ts.isoformat() if row.ts else None}
 
 
 __all__ = ["router"]

@@ -783,6 +783,70 @@ def _rule_ctr_gap(
     )
 
 
+def _rule_robots_critical(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
+    """Surface critical robots.txt issues as a top-priority action.
+
+    A broken robots.txt is upstream of everything else — if Yandex
+    can't parse it, the crawler may drop the whole site or honour
+    rules the owner never intended. The dedicated audit module
+    (`core_audit/yandex_robots`) publishes per-issue findings into
+    `analysis_events.extra["issues"]`; we read the count and surface
+    it. Stays silent at zero — never alarmist.
+
+    Severity is `critical` regardless of count: even one
+    «Disallow: /» style misfire can wipe out indexation.
+    """
+    n = snap.robots_critical_issues
+    if n <= 0:
+        return None
+
+    issue_word = _ru_plural(
+        n, ("критическая проблема", "критические проблемы", "критических проблем"),
+    )
+    title = (
+        f"В robots.txt найдено {n} {issue_word} для Яндекса"
+    )
+    if snap.robots_valid_for_yandex:
+        body = (
+            f"Аудит robots.txt нашёл {n} {issue_word}, из-за которых "
+            f"Яндекс может неправильно понять, какие страницы можно "
+            f"индексировать. robots.txt — это самый верх воронки: если "
+            f"в нём ошибка, всё остальное (sitemap, canonical, контент) "
+            f"для затронутых страниц не имеет значения."
+        )
+    else:
+        body = (
+            f"robots.txt сейчас недоступен или не распарсивается — "
+            f"плюс к этому аудит уже нашёл {n} {issue_word}. "
+            f"Это значит, что мы не можем гарантировать, по каким "
+            f"правилам YandexBot обходит сайт прямо сейчас."
+        )
+    what_to_do = (
+        "Открой «Индексация» → блок «Проверка robots.txt для Яндекса». "
+        "Там по каждой проблеме видно цитату из файла, объяснение и "
+        "конкретную правку. Начни с критических — они блокируют индекс."
+    )
+    return Action(
+        id="robots:critical",
+        severity="critical",
+        title=title,
+        body_ru=body,
+        what_to_do_ru=what_to_do,
+        link_to="/studio/indexation",
+        link_label="К проверке robots.txt",
+        evidence={
+            "critical_issues": n,
+            "valid_for_yandex": snap.robots_valid_for_yandex,
+        },
+        # robots.txt is site-wide — there's no per-focus signal to
+        # match. We default to False so the focus-first sort places it
+        # alongside other site-wide criticals.
+        in_focus=False,
+    )
+
+
 # ── Diagnostics: flag modules that haven't run yet ───────────────────
 
 
@@ -839,6 +903,7 @@ def _build_diagnostics(snap: BrainSnapshot) -> list[str]:
 
 
 _RULES = (
+    _rule_robots_critical,
     _rule_indexation_coverage,
     _rule_harmful_visibility,
     _rule_ctr_gap,

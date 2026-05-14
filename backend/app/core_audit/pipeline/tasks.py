@@ -171,6 +171,11 @@ async def _skip_after_primary_failure(
     extra = {"primary_failures": failures}
 
     await emit_terminal(
+        db, site_id, "robots_audit", "skipped",
+        f"Проверка robots.txt пропущена: сначала упал этап {failed_names}.",
+        extra=extra, run_id=run_id,
+    )
+    await emit_terminal(
         db, site_id, "business_truth", "skipped",
         f"Понимание бизнеса пропущено: сначала упал этап {failed_names}.",
         extra=extra, run_id=run_id,
@@ -214,6 +219,39 @@ async def _skip_after_primary_failure(
         db, site_id, "report", "skipped",
         "Отчёт пропущен — полный анализ завершился с ошибкой до аналитики.",
         extra=extra, run_id=run_id,
+    )
+
+
+def _queue_robots_audit(site_id: str, run_id: str | None) -> bool:
+    """Fire-and-forget robots.txt audit as part of full analysis.
+
+    The audit is cheap (single HTTP fetch + local parsing, no LLM),
+    site-wide, and gates indexation conclusions, so we run it once
+    per pipeline right after primary collection. If dispatch fails
+    the caller must emit a `robots_audit:failed` terminal so the
+    cascade closes cleanly (CLAUDE.md rule 1).
+    """
+    try:
+        robots_audit_task.apply_async(
+            args=[site_id],
+            kwargs={"run_id": run_id},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "pipeline.robots_audit_dispatch_failed site=%s err=%s",
+            site_id, exc,
+        )
+        return False
+
+
+async def _mark_robots_audit_dispatch_failed(
+    db, site_id: str, run_id: str | None,
+) -> None:
+    await emit_terminal(
+        db, site_id, "robots_audit", "failed",
+        "Не удалось запустить проверку robots.txt.",
+        run_id=run_id,
     )
 
 
@@ -406,6 +444,116 @@ def pipeline_intent_then_review_task(
     return result
 
 
+@celery_app.task(name="robots_audit", bind=True, max_retries=0)
+def robots_audit_task(
+    self,
+    site_id: str,
+    run_id: str | None = None,
+) -> dict:
+    """Fetch robots.txt + audit it for Yandex compliance.
+
+    Pipeline cascade invariant (CLAUDE.md rule 1): emits
+    `robots_audit:started` before the call and a terminal
+    (`done` / `failed`) after. The actual fetch + parse + audit
+    lives in `app.api.v1.studio._run_robots_audit_for_site`, which
+    persists the result and returns a JSON-serialisable summary.
+    The audit module owns the network + DTO; this stage is the
+    Celery orchestrator only.
+    """
+
+    async def _do() -> dict:
+        # Import lazily — the helper lives in studio.py (other agent's
+        # zone). Lazy import avoids pulling FastAPI route deps into
+        # Celery workers that don't need them, and keeps the pipeline
+        # module loadable even if the helper is renamed.
+        from app.api.v1.studio import _run_robots_audit_for_site
+
+        async with task_session() as db:
+            await log_event(
+                db, site_id, "robots_audit", "started",
+                "Проверяю robots.txt на ошибки для Яндекса…",
+                run_id=run_id,
+            )
+            try:
+                site = await db.get(Site, UUID(site_id))
+                if site is None:
+                    await emit_terminal(
+                        db, site_id, "robots_audit", "failed",
+                        "Сайт не найден — проверка robots.txt отменена.",
+                        run_id=run_id,
+                    )
+                    return {
+                        "status": "failed",
+                        "site_id": site_id,
+                        "error": "site_not_found",
+                    }
+                result = await _run_robots_audit_for_site(db, site)
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                await emit_terminal(
+                    db, site_id, "robots_audit", "failed",
+                    f"Проверка robots.txt упала: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "site_id": site_id,
+                    "error": str(exc),
+                }
+
+            payload = result if isinstance(result, dict) else {}
+            issues = payload.get("issues") or []
+            crit = sum(
+                1 for it in issues
+                if isinstance(it, dict) and it.get("severity") == "critical"
+            )
+            warn = sum(
+                1 for it in issues
+                if isinstance(it, dict) and it.get("severity") == "warning"
+            )
+            valid = bool(payload.get("valid_for_yandex", True))
+            if not valid:
+                msg = (
+                    "robots.txt недоступен или не распарсивается — "
+                    "проверь хост и доступность файла."
+                )
+            elif crit > 0:
+                msg = (
+                    f"robots.txt разобран: {crit} критических, "
+                    f"{warn} предупреждений."
+                )
+            else:
+                msg = (
+                    f"robots.txt в порядке для Яндекса "
+                    f"(предупреждений: {warn})."
+                )
+            # The brain reads these fields verbatim — keep keys stable.
+            extra = {
+                "valid_for_yandex": valid,
+                "issues": [
+                    it for it in issues if isinstance(it, dict)
+                ],
+                "critical_count": crit,
+                "warning_count": warn,
+            }
+            await emit_terminal(
+                db, site_id, "robots_audit", "done",
+                msg, extra=extra, run_id=run_id,
+            )
+            return {
+                "status": "ok",
+                "site_id": site_id,
+                "critical_count": crit,
+                "warning_count": warn,
+                "valid_for_yandex": valid,
+            }
+
+    return _run(_do())
+
+
 @celery_app.task(
     name="pipeline_after_primary", bind=True, max_retries=0,
 )
@@ -434,6 +582,21 @@ def pipeline_after_primary_task(
             "action": "skipped_downstream_after_primary_failure",
             "primary_failures": failures,
         }
+
+    # Step 3.5 — robots.txt audit. Cheap, site-wide, and feeds the
+    # brain (`robots_critical_issues`) so it can run between primary
+    # collection and the brain-driven rules without delaying review.
+    # Dispatch failure → emit a `robots_audit:failed` terminal so the
+    # cascade closes (CLAUDE.md rule 1); we don't abort downstream
+    # stages because the audit is informational, not a blocker.
+    if not _queue_robots_audit(site_id, run_id):
+        async def _mark_robots_failed() -> None:
+            async with task_session() as db:
+                await _mark_robots_audit_dispatch_failed(
+                    db, site_id, run_id,
+                )
+
+        _run(_mark_robots_failed())
 
     # Step 4 — BusinessTruth rebuild (fire-and-forget; its own task
     # emits started/done events under stage="business_truth").
@@ -499,4 +662,5 @@ __all__ = [
     "pipeline_intent_then_review_task",
     "pipeline_after_primary_task",
     "queue_intent_review_chain",
+    "robots_audit_task",
 ]

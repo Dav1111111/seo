@@ -143,3 +143,64 @@ async def test_review_snapshot_uses_latest_completed_reviews_per_intent(
     assert facts.top_pending_recommendations[0]["impact_score"] == 0.7
     assert facts.top_pending_recommendations[0]["confidence_score"] == 0.8
     assert facts.top_pending_recommendations[0]["ease_score"] == 0.9
+
+
+# ── robots.txt audit signal pulled into BrainSnapshot ────────────────
+
+
+async def test_snapshot_includes_robots_fields_with_defaults(
+    db: AsyncSession, test_site: Site,
+) -> None:
+    """No robots_audit event for the site → snapshot reports the
+    safe defaults: 0 critical issues, valid_for_yandex=True. This
+    is the «never ran» state — rule layer stays silent."""
+    snap = await build_snapshot(db, test_site)
+    assert snap.robots_critical_issues == 0
+    assert snap.robots_valid_for_yandex is True
+
+
+async def test_snapshot_reads_robots_from_latest_event(
+    db: AsyncSession, test_site: Site,
+) -> None:
+    """Latest robots_audit row drives the snapshot fields.
+
+    Seed an older event with one critical, then a newer event with
+    two criticals + one warning + valid_for_yandex=False. The
+    snapshot must reflect the newer row only: critical count == 2,
+    valid_for_yandex == False.
+    """
+    from app.models.analysis_event import AnalysisEvent
+
+    db.add(AnalysisEvent(
+        site_id=test_site.id,
+        stage="robots_audit",
+        status="done",
+        message="older audit",
+        extra={
+            "valid_for_yandex": True,
+            "issues": [
+                {"severity": "critical", "code": "ignored-old"},
+            ],
+        },
+        ts=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    ))
+    db.add(AnalysisEvent(
+        site_id=test_site.id,
+        stage="robots_audit",
+        status="done",
+        message="latest audit",
+        extra={
+            "valid_for_yandex": False,
+            "issues": [
+                {"severity": "critical", "code": "x1"},
+                {"severity": "critical", "code": "x2"},
+                {"severity": "warning", "code": "x3"},
+            ],
+        },
+        ts=datetime(2099, 1, 1, tzinfo=timezone.utc),
+    ))
+    await db.flush()
+
+    snap = await build_snapshot(db, test_site)
+    assert snap.robots_critical_issues == 2
+    assert snap.robots_valid_for_yandex is False
