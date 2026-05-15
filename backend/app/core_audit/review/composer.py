@@ -31,6 +31,8 @@ SIGNAL_CATEGORY: dict[str, RecCategory] = {
     "missing_recommended_h2": RecCategory.h1_structure,
     "schema_missing": RecCategory.schema,
     "schema_types_recommended": RecCategory.schema,
+    "schema_types_complete": RecCategory.schema,
+    "schema_missing_type": RecCategory.schema,
     "schema_cargo_cult_present": RecCategory.schema,
     "eeat_signal_missing": RecCategory.eeat,
     "eeat_signal_present": RecCategory.eeat,
@@ -163,9 +165,71 @@ def _schema_missing(f: CheckFinding) -> Recommendation:
     types_str = ", ".join(types)
     return _rec(f, (
         f"На странице отсутствует Schema.org разметка. Для текущего интента "
-        f"рекомендуется: {types_str}. Не используйте TouristTrip / "
-        f"TouristAttraction — Яндекс их не парсит в расширенные сниппеты."
+        f"рекомендуется: {types_str}. Для туров не заменяйте корректный "
+        f"TouristTrip/Service на Product автоматически: важнее передать "
+        f"Offer/AggregateOffer с ценой, валютой и ссылкой."
     ))
+
+
+# Severity → owner-facing Russian label for the per-type missing card.
+_SCHEMA_SEVERITY_LABEL_RU: dict[str, str] = {
+    "critical": "критично",
+    "high": "важно",
+    "medium": "желательно",
+    "low": "опционально",
+}
+
+
+def _schema_missing_type(f: CheckFinding) -> Recommendation:
+    """One paste-in recommendation per recommended Schema.org type the page
+    is currently missing. Renders a deterministic, LLM-free template card.
+
+    Evidence shape (set in schema_checks.check_schema):
+      missing_type           — bare schema.org class name (e.g. "FAQPage")
+      present_types          — list of normalized types we DID find
+                               (alias: `schema_types_present`, both populated)
+      recommended_types      — full list of recommended-for-intent types
+      intent                 — IntentCode.value string
+      example_jsonld         — paste-in template (may be absent for rare types)
+      rationale_ru           — short Russian explanation of the visible
+                               Yandex effect of this schema type
+    """
+    missing_type = f.evidence.get("missing_type", "")
+    intent = f.evidence.get("intent", "")
+    present = (
+        f.evidence.get("present_types")
+        or f.evidence.get("schema_types_present")
+        or []
+    )
+    example = f.evidence.get("example_jsonld")
+    rationale_ru = f.evidence.get("rationale_ru") or ""
+    severity_label = _SCHEMA_SEVERITY_LABEL_RU.get(f.severity or "medium", "желательно")
+
+    present_str = (
+        ", ".join(present)
+        if present
+        else "ничего из ожидаемой Schema.org разметки"
+    )
+    reasoning_parts = [
+        f"Не хватает разметки {missing_type} для интента «{intent}» "
+        f"({severity_label})."
+    ]
+    if rationale_ru:
+        reasoning_parts.append(rationale_ru)
+    reasoning_parts.append(
+        f"На странице сейчас найдено: {present_str}. Добавьте "
+        f"{missing_type} отдельным `<script type=\"application/ld+json\">` "
+        f"в `<head>` или перед `</body>`."
+    )
+    reasoning = " ".join(reasoning_parts)
+    before = "На странице найдено: " + present_str if present else None
+    after = (
+        f"Добавьте Schema.org {missing_type}. Пример JSON-LD:\n\n"
+        f"```json\n{example}\n```"
+    ) if example else (
+        f"Добавьте Schema.org {missing_type} в формате JSON-LD."
+    )
+    return _rec(f, reasoning, before=before, after=after)
 
 
 # Human-readable labels for EEAT signal slugs. Lives here (not in the
@@ -274,6 +338,7 @@ _HANDLERS = {
     "missing_critical_h2": _missing_h2_block,
     "missing_recommended_h2": _missing_h2_block,
     "schema_missing": _schema_missing,
+    "schema_missing_type": _schema_missing_type,
     "eeat_signal_missing": _eeat_signal_missing,
     "eeat_signals_missing": _eeat_signals_missing,
     "commercial_factor_missing": _commercial_factor_missing,

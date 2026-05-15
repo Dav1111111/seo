@@ -53,6 +53,15 @@ class ReviewInput:
     content_hash: str
     composite_hash: str                       # sha256(content_hash + title + meta + h1)
 
+    # Normalized top-level @type strings from the latest completed
+    # PageDeepExtract.schema_blocks (own-site, not competitor). Empty when no
+    # extract or no markup. Normalized: URL prefix stripped
+    # ("http://schema.org/TouristTrip" → "TouristTrip"). Used by schema_checks
+    # to perform per-type recommendation analysis (recommended-per-intent vs
+    # actually-present); has_schema above stays as the boolean fallback for
+    # legacy callers that don't construct schema_types.
+    schema_types: tuple[str, ...] = ()
+
     # Structured content signals (context_builder pre-extracts these so
     # Step 3 checks and Step 4 LLM don't re-parse lossy content_text)
     h2_blocks: tuple[str, ...] = ()           # existing H2 section titles, in order

@@ -45,7 +45,7 @@ class LLMEnrichment:
     """Structured LLM response after validation.
 
     `detected_cargo_cult_schemas` lists Schema.org types the LLM claims to
-    have spotted on the page (TouristTrip, TouristAttraction, etc.). Per
+    have spotted on the page and that our whitelist treats as harmful. Per
     `runner._parse_response`, the runner cross-checks this list against the
     page's actual parsed JSON-LD blocks via
     `verify.filter_hallucinated_cargo_cult` before it lands here — entries
@@ -79,4 +79,10 @@ def finding_id(f: CheckFinding) -> str:
         "commercial_factor_deferred_to_llm",
     ):
         return f"{f.signal_type}:{evidence.get('factor_name', '')}"
+    if f.signal_type == "schema_missing_type":
+        # Per-type identity — one card per missing recommended Schema.org type
+        # (FAQPage, Offer, TouristTrip, …). Lowercased so the merge key is
+        # deterministic regardless of casing in evidence.
+        missing_type = str(evidence.get("missing_type", "")).lower()
+        return f"schema.missing_type.{missing_type}"
     return f.signal_type

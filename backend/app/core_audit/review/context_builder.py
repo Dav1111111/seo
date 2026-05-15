@@ -19,7 +19,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core_audit.intent_codes import IntentCode
@@ -31,6 +31,7 @@ from app.fingerprint.models import PageFingerprint
 from app.intent.models import CoverageDecision, PageIntentScore, QueryIntent
 from app.models.daily_metric import DailyMetric
 from app.models.page import Page
+from app.models.page_deep_extract import PageDeepExtract
 from app.models.search_query import SearchQuery
 from app.models.site import Site
 
@@ -41,6 +42,36 @@ MIN_CONTENT_TOKENS = 50
 TOP_QUERIES_LIMIT = 5
 LOOKBACK_DAYS = 14
 LINK_CANDIDATES_LIMIT = 10
+
+_SCHEMA_URL_PREFIXES = (
+    "http://schema.org/",
+    "https://schema.org/",
+    "schema:",
+)
+
+
+def _normalize_schema_type(raw: str) -> str:
+    """Normalize a raw @type value to a bare schema.org class name.
+
+    Examples:
+      "http://schema.org/TouristTrip" → "TouristTrip"
+      "https://schema.org/Question"    → "Question"
+      "schema:LocalBusiness"           → "LocalBusiness"
+      " FAQPage "                      → "FAQPage"
+    Empty / unparseable input → "" (caller filters falsy out).
+    """
+    s = raw.strip()
+    if not s:
+        return ""
+    for prefix in _SCHEMA_URL_PREFIXES:
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    s = s.strip("/")
+    # Defensive: in case the URL has further segments, keep last token only.
+    if "/" in s:
+        s = s.split("/")[-1]
+    return s
 
 
 class ContextBuilder:
@@ -87,6 +118,7 @@ class ContextBuilder:
         top_queries = await self._load_top_queries(db, page.site_id, target_intent.value)
         score = await self._load_page_intent_score(db, page_id, target_intent.value)
         link_candidates = await self._load_link_candidates(db, page_id)
+        schema_types = await self._load_schema_types(db, page_id)
 
         composite_hash = compute_composite_hash(
             fingerprint.content_hash,
@@ -112,6 +144,7 @@ class ContextBuilder:
             images_count=page.images_count or 0,
             content_hash=fingerprint.content_hash,
             composite_hash=composite_hash,
+            schema_types=schema_types,
             h2_blocks=self._extract_h2_blocks(page),
             lemmas=(),                              # populated on demand in Step 3
             link_candidates=link_candidates,
@@ -194,6 +227,50 @@ class ContextBuilder:
         )
         rows = await db.execute(stmt)
         return tuple(q for q, _ in rows)
+
+    async def _load_schema_types(
+        self, db: AsyncSession, page_id: UUID,
+    ) -> tuple[str, ...]:
+        """Top-level @type strings from latest completed PageDeepExtract.
+
+        Returns () when no extract / no markup. Walks each top-level block
+        and emits one normalized name per @type entry. Handles two encodings:
+          - JSON-LD strings:        {"@type": "FAQPage", ...}
+          - microdata-style lists:  {"@type": ["LocalBusiness", "Organization"]}
+          - URL-form values:        {"@type": "http://schema.org/Question"}
+        Returned tuple is sorted + de-duplicated so order is stable across
+        runs and the set-difference comparison in schema_checks is cheap.
+        """
+        row = (await db.execute(
+            select(PageDeepExtract.schema_blocks)
+            .where(
+                PageDeepExtract.page_id == page_id,
+                PageDeepExtract.is_competitor.is_(False),
+                PageDeepExtract.status == "completed",
+            )
+            .order_by(desc(PageDeepExtract.extracted_at))
+            .limit(1)
+        )).first()
+        if row is None or not row[0]:
+            return ()
+        # Preserve insertion order across blocks while de-duplicating; a
+        # dict-keyed accumulator gives both for free.
+        seen: dict[str, None] = {}
+        for block in row[0]:
+            if not isinstance(block, dict):
+                continue
+            t = block.get("@type")
+            if isinstance(t, str):
+                norm = _normalize_schema_type(t)
+                if norm:
+                    seen.setdefault(norm, None)
+            elif isinstance(t, list):
+                for item in t:
+                    if isinstance(item, str):
+                        norm = _normalize_schema_type(item)
+                        if norm:
+                            seen.setdefault(norm, None)
+        return tuple(seen.keys())
 
     async def _load_link_candidates(
         self, db: AsyncSession, page_id: UUID,
