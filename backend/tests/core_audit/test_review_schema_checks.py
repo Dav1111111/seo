@@ -66,16 +66,17 @@ def _ri(**overrides) -> ReviewInput:
 # ── Branch 1: intent without rules → not_applicable ───────────────────
 
 
-def test_check_schema_intent_without_rules_via_monkey(monkeypatch):
-    """Branch coverage: `profile.schema_rules.get(intent)` returns None."""
-    # Simulate by patching the profile's schema_rules to drop an entry.
+def test_check_schema_intent_without_rules_via_monkey():
+    """Branch coverage: `profile.schema_rules.get(intent)` returns None.
+
+    SiteProfile is a frozen dataclass — use `dataclasses.replace` to
+    derive a stripped copy instead of monkeypatching.
+    """
+    from dataclasses import replace
     original = TOURISM_TOUR_OPERATOR.schema_rules
-    monkeypatch.setattr(
-        TOURISM_TOUR_OPERATOR,
-        "schema_rules",
-        {k: v for k, v in original.items() if k != IntentCode.COMM_MODIFIED},
-    )
-    result = check_schema(_ri(), TOURISM_TOUR_OPERATOR)
+    stripped = {k: v for k, v in original.items() if k != IntentCode.COMM_MODIFIED}
+    profile = replace(TOURISM_TOUR_OPERATOR, schema_rules=stripped)
+    result = check_schema(_ri(), profile)
     assert len(result.findings) == 1
     f = result.findings[0]
     assert f.signal_type == "schema_missing"
@@ -83,14 +84,14 @@ def test_check_schema_intent_without_rules_via_monkey(monkeypatch):
     assert f.evidence["reason"] == "unknown_intent_in_profile"
 
 
-def test_check_schema_intent_with_empty_rules_returns_not_applicable(monkeypatch):
+def test_check_schema_intent_with_empty_rules_returns_not_applicable():
     """Branch coverage: `profile.schema_rules[intent]` returns ()."""
-    monkeypatch.setattr(
+    from dataclasses import replace
+    profile = replace(
         TOURISM_TOUR_OPERATOR,
-        "schema_rules",
-        {**TOURISM_TOUR_OPERATOR.schema_rules, IntentCode.COMM_MODIFIED: ()},
+        schema_rules={**TOURISM_TOUR_OPERATOR.schema_rules, IntentCode.COMM_MODIFIED: ()},
     )
-    result = check_schema(_ri(), TOURISM_TOUR_OPERATOR)
+    result = check_schema(_ri(), profile)
     assert len(result.findings) == 1
     f = result.findings[0]
     assert f.signal_type == "schema_missing"
