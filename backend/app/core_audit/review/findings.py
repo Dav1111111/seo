@@ -43,6 +43,8 @@ SIGNAL_TYPES: frozenset[str] = frozenset({
     # schema_checks
     "schema_missing",
     "schema_types_recommended",
+    "schema_types_complete",
+    "schema_missing_type",
     "schema_cargo_cult_present",
     # eeat_checks
     "eeat_signal_missing",
