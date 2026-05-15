@@ -70,11 +70,16 @@ const SORT_OPTIONS: Array<{ value: SortMode; label: string }> = [
   { value: "alpha", label: "По алфавиту" },
 ];
 
+// All five tri-state buckets the backend can emit. Backend is mid-
+// rollout — both `stale_30d_plus` (new) and `stale_30d+` (legacy)
+// arrive in the wild, so we keep both keys mapped to the same meta.
 type StatusKey =
   | "fresh"
+  | "stale_30d_plus"
   | "stale_30d+"
   | "never_fetched"
-  | "fetch_returned_empty";
+  | "fetch_returned_empty"
+  | "invalid_phrase";
 
 const STATUS_META: Record<
   StatusKey,
@@ -84,22 +89,30 @@ const STATUS_META: Record<
     label: "свежее",
     className: "bg-emerald-50 text-emerald-800 border-emerald-300",
   },
+  stale_30d_plus: {
+    label: "устарело >30 дней",
+    className: "bg-amber-50 text-amber-800 border-amber-300",
+  },
   "stale_30d+": {
-    label: "устарело (>30 дней)",
+    label: "устарело >30 дней",
     className: "bg-amber-50 text-amber-800 border-amber-300",
   },
   never_fetched: {
-    label: "не собирали",
+    label: "ещё не собирали",
     className: "bg-muted text-muted-foreground border",
   },
   fetch_returned_empty: {
-    label: "Wordstat вернул 0 (редкая фраза)",
-    className: "bg-muted text-muted-foreground border",
+    label: "Wordstat: нет спроса",
+    className: "bg-sky-50 text-sky-800 border-sky-300",
+  },
+  invalid_phrase: {
+    label: "невалидная фраза",
+    className: "bg-amber-50 text-amber-800 border-amber-300",
   },
 };
 
 function StatusBadge({ status }: { status: StatusKey }) {
-  const meta = STATUS_META[status];
+  const meta = STATUS_META[status] ?? STATUS_META.never_fetched;
   return (
     <span
       className={cn(
@@ -110,6 +123,16 @@ function StatusBadge({ status }: { status: StatusKey }) {
       {meta.label}
     </span>
   );
+}
+
+/** True for rows whose `query_text` is actually a URL (e.g. an upstream
+ *  data-quality issue where a sitemap entry leaked into the query
+ *  pipeline). We render these with a «системная запись» badge so the
+ *  owner can spot them without us hiding the row entirely. */
+function isUrlLikeQuery(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim().toLowerCase();
+  return /^https?:\/\//.test(t) || (t.startsWith("www.") && t.includes("."));
 }
 
 // ── Relevance (Studio v2 etap 4) ────────────────────────────────────
@@ -266,6 +289,16 @@ export default function StudioQueriesPage() {
   const [hidden, setHidden] = useState<Set<RelevanceKey>>(
     () => new Set(["spam"]),
   );
+  // Wordstat coverage filter — separate from relevance filtering, so
+  // owner can drill into «никогда не собирали» without losing their
+  // own/adjacent/disputed selection.
+  type CoverageFilter =
+    | "all"
+    | "has_demand"
+    | "no_demand"
+    | "never_fetched"
+    | "invalid";
+  const [coverageFilter, setCoverageFilter] = useState<CoverageFilter>("all");
   const [banner, setBanner] = useState<{
     kind: "ok" | "deduped" | "err";
     text: string;
@@ -482,16 +515,54 @@ export default function StudioQueriesPage() {
   // ── Header ───────────────────────────────────────────────────────
 
   const coverage = data?.coverage;
+
+  // Tri-state coverage buckets. Prefer the new backend fields
+  // (with_demand / no_demand / never_fetched / invalid) when present;
+  // fall back to deriving from per-row data so this UI keeps working
+  // while the backend rollout is in flight.
+  const buckets = (() => {
+    const rows = data?.items ?? [];
+    const total = coverage?.total ?? rows.length;
+    let with_demand = coverage?.with_demand;
+    let no_demand = coverage?.no_demand;
+    let never_fetched = coverage?.never_fetched;
+    let invalid = coverage?.invalid;
+    if (
+      with_demand == null ||
+      no_demand == null ||
+      never_fetched == null ||
+      invalid == null
+    ) {
+      let wd = 0, nd = 0, nf = 0, iv = 0;
+      for (const r of rows) {
+        if (r.wordstat_volume != null && r.wordstat_volume > 0) wd += 1;
+        else if (r.wordstat_volume === 0) nd += 1;
+        else if (r.wordstat_status === "invalid_phrase") iv += 1;
+        else if (
+          r.wordstat_status === "fetch_returned_empty" &&
+          r.wordstat_updated_at != null
+        )
+          nd += 1;
+        else nf += 1;
+      }
+      with_demand = with_demand ?? wd;
+      no_demand = no_demand ?? nd;
+      never_fetched = never_fetched ?? nf;
+      invalid = invalid ?? iv;
+    }
+    return { total, with_demand, no_demand, never_fetched, invalid };
+  })();
+
   const subtitle = coverage
-    ? `${coverage.total} ${pluralRu(coverage.total, ["запрос", "запроса", "запросов"])} · ${coverage.with_volume} с объёмом · ${coverage.stale} ${pluralRu(coverage.stale, ["устарел", "устарели", "устарели"])}`
+    ? `${buckets.total} ${pluralRu(buckets.total, ["запрос", "запроса", "запросов"])} · ${buckets.with_demand} с подтверждённым спросом`
     : "загружаю…";
 
   // ── Empty-state messaging (CONCEPT §5: explain WHY) ──────────────
 
   const showEmptyAll =
-    data && coverage && coverage.total === 0;
+    data && coverage && buckets.total === 0;
   const showEmptyVolumes =
-    data && coverage && coverage.total > 0 && coverage.with_volume === 0;
+    data && coverage && buckets.total > 0 && buckets.with_demand === 0;
 
   return (
     <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
@@ -609,6 +680,81 @@ export default function StudioQueriesPage() {
           <span className="flex-1">
             {focus.label}. Не в фокусе — серым.
           </span>
+        </div>
+      )}
+
+      {/* Wordstat coverage banner — explains the tri-state breakdown
+          so «—» in the volume column stops looking like an error.
+          Hidden when there's no data yet. */}
+      {data && buckets.total > 0 && (
+        <div className="rounded-md border bg-slate-50 border-slate-200 px-3 py-2 text-sm text-slate-700 flex items-center gap-3">
+          <span className="text-base" aria-hidden>📊</span>
+          <div className="flex-1">
+            <strong>{buckets.with_demand}</strong>{" "}
+            {pluralRu(buckets.with_demand, ["запрос", "запроса", "запросов"])} с
+            подтверждённым спросом из <strong>{buckets.total}</strong>.
+            {buckets.never_fetched > 0 && (
+              <> Ещё <strong>{buckets.never_fetched}</strong> ждут сбора
+              Wordstat (запускается раз в неделю по вторникам).</>
+            )}
+            {buckets.no_demand > 0 && (
+              <> Wordstat вернул «нет спроса» для{" "}
+              <strong>{buckets.no_demand}</strong> — это нормально для редких/брендовых
+              фраз.</>
+            )}
+            {buckets.invalid > 0 && (
+              <> Невалидных фраз: <strong>{buckets.invalid}</strong> —
+              проверь, как они попали в карту спроса.</>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Wordstat coverage filter chips — orthogonal to the relevance
+          filter below. Drills the table into one bucket of the banner. */}
+      {data && buckets.total > 0 && (
+        <div className="flex flex-wrap gap-1.5 text-xs">
+          {(
+            [
+              ["all", `Все (${buckets.total})`],
+              ["has_demand", `С объёмом (${buckets.with_demand})`],
+              ["no_demand", `Без спроса (${buckets.no_demand})`],
+              ["never_fetched", `Не собирали (${buckets.never_fetched})`],
+              ...(buckets.invalid > 0
+                ? [["invalid", `Невалидные (${buckets.invalid})`] as const]
+                : []),
+            ] as Array<readonly [CoverageFilter, string]>
+          ).map(([key, label]) => {
+            const count =
+              key === "all"
+                ? buckets.total
+                : key === "has_demand"
+                  ? buckets.with_demand
+                  : key === "no_demand"
+                    ? buckets.no_demand
+                    : key === "never_fetched"
+                      ? buckets.never_fetched
+                      : buckets.invalid;
+            const isActive = coverageFilter === key;
+            const disabled = key !== "all" && count === 0;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => !disabled && setCoverageFilter(key)}
+                disabled={disabled}
+                className={cn(
+                  "rounded-md border px-2 py-0.5 transition-colors",
+                  isActive
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  disabled && "opacity-40 cursor-not-allowed",
+                )}
+              >
+                {label}
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -755,10 +901,10 @@ export default function StudioQueriesPage() {
               Объёмы Wordstat ещё не собраны
             </div>
             <p className="text-sm text-muted-foreground">
-              Запросов в БД: <strong>{coverage?.total}</strong>, но ни одного
-              с заполненным <code>wordstat_volume</code>. Нажми «Обновить
-              объёмы Wordstat» — это займёт ~{coverage?.total ?? 0}{" "}
-              {pluralRu(coverage?.total ?? 0, ["секунду", "секунды", "секунд"])}{" "}
+              Запросов в БД: <strong>{buckets.total}</strong>, но ни одного
+              с подтверждённым спросом. Нажми «Обновить объёмы Wordstat» —
+              это займёт ~{buckets.total}{" "}
+              {pluralRu(buckets.total, ["секунду", "секунды", "секунд"])}{" "}
               (по одному запросу в секунду).
             </p>
           </CardContent>
@@ -768,6 +914,28 @@ export default function StudioQueriesPage() {
           let visible = (data?.items || []).filter(
             (row) => !hidden.has(row.relevance as RelevanceKey),
           );
+          // Coverage chip filter (orthogonal to relevance hidden-set).
+          if (coverageFilter !== "all") {
+            visible = visible.filter((row) => {
+              const v = row.wordstat_volume;
+              const updated = row.wordstat_updated_at;
+              const status = row.wordstat_status;
+              if (coverageFilter === "has_demand")
+                return v != null && v > 0;
+              if (coverageFilter === "no_demand")
+                return (
+                  v === 0 ||
+                  (status === "fetch_returned_empty" && updated != null)
+                );
+              if (coverageFilter === "never_fetched")
+                return (
+                  updated == null && status !== "invalid_phrase" && v == null
+                );
+              if (coverageFilter === "invalid")
+                return status === "invalid_phrase";
+              return true;
+            });
+          }
           // Default ordering: focus-first when no explicit user sort.
           // Sort is stable in modern JS, so within each focus bucket
           // the server-supplied order (volume desc) is preserved.
@@ -815,13 +983,30 @@ export default function StudioQueriesPage() {
                     >
                       <TableCell className="font-medium">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span
-                            className={cn(
-                              row.relevance === "spam" && "text-muted-foreground line-through",
-                            )}
-                          >
-                            {row.query_text}
-                          </span>
+                          {isUrlLikeQuery(row.query_text) ? (
+                            <>
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] bg-amber-50 text-amber-800 border-amber-300"
+                              >
+                                системная запись
+                              </Badge>
+                              <span
+                                className="font-mono text-xs text-muted-foreground truncate max-w-[240px]"
+                                title={row.query_text}
+                              >
+                                {row.query_text}
+                              </span>
+                            </>
+                          ) : (
+                            <span
+                              className={cn(
+                                row.relevance === "spam" && "text-muted-foreground line-through",
+                              )}
+                            >
+                              {row.query_text}
+                            </span>
+                          )}
                           <FocusPill in_focus={row.in_focus} />
                           {row.is_branded && (
                             <Badge

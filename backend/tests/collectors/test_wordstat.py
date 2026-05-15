@@ -5,15 +5,22 @@ contract these tests pin down is what the Studio /queries module
 relies on:
 
   - empty / blank phrase short-circuits without an API call
+    (returns status="invalid_phrase")
   - missing API key / folder short-circuits without an API call
-  - HTTP 4xx returns None (not raise)
-  - empty `results` array returns None
-  - results with all-null counts returns None
-  - successful response: count is the SUM of monthly counts, NOT the
+    (returns status="error" — no creds is treated as a failure to
+    fetch, not a data-quality bug)
+  - HTTP 4xx returns status="error" (not raise)
+  - empty `results` array returns status="empty" (NOT an error —
+    Wordstat is telling us "no demand", a real answer)
+  - results with all-null counts returns status="empty"
+  - successful response: volume is the SUM of monthly counts, NOT the
     last month's count alone (this is the easy bug to introduce later)
   - trend is preserved per-month including months with null counts so
     UI can render data gaps
   - the `from_date` we expose is the LATEST month, not the earliest
+
+See also `test_wordstat_empty_vs_error.py` — narrower regression
+suite for the tri-state semantics added 2026-05-15.
 """
 
 from __future__ import annotations
@@ -24,7 +31,12 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 from app.collectors.wordstat import (
+    STATUS_EMPTY,
+    STATUS_ERROR,
+    STATUS_INVALID_PHRASE,
+    STATUS_OK,
     TREND_MONTHS,
+    WordstatFetchOutcome,
     WordstatTopRequest,
     WordstatVolume,
     fetch_top_requests,
@@ -48,34 +60,39 @@ def _ok_response(payload: dict):
 
 # ── Short-circuit guards (no network call) ─────────────────────────────
 
-def test_empty_phrase_returns_none_without_calling_network() -> None:
+def test_empty_phrase_short_circuits_without_calling_network() -> None:
     with patch("urllib.request.urlopen") as mock:
-        assert fetch_volume("") is None
-        assert fetch_volume("   ") is None
+        out_empty = fetch_volume("")
+        out_blank = fetch_volume("   ")
+        assert out_empty.status == STATUS_INVALID_PHRASE
+        assert out_blank.status == STATUS_INVALID_PHRASE
     mock.assert_not_called()
 
 
-def test_missing_api_key_returns_none_without_calling_network() -> None:
+def test_missing_api_key_short_circuits_without_calling_network() -> None:
     with patch("urllib.request.urlopen") as mock, \
          patch("app.collectors.wordstat.settings") as fake_settings:
         fake_settings.YANDEX_SEARCH_API_KEY = ""
         fake_settings.YANDEX_CLOUD_FOLDER_ID = "folder123"
-        assert fetch_volume("багги абхазия") is None
+        result = fetch_volume("багги абхазия")
+        assert result.status == STATUS_ERROR
+        assert "YANDEX_SEARCH_API_KEY" in (result.error or "")
     mock.assert_not_called()
 
 
-def test_missing_folder_id_returns_none_without_calling_network() -> None:
+def test_missing_folder_id_short_circuits_without_calling_network() -> None:
     with patch("urllib.request.urlopen") as mock, \
          patch("app.collectors.wordstat.settings") as fake_settings:
         fake_settings.YANDEX_SEARCH_API_KEY = "key123"
         fake_settings.YANDEX_CLOUD_FOLDER_ID = ""
-        assert fetch_volume("багги абхазия") is None
+        result = fetch_volume("багги абхазия")
+        assert result.status == STATUS_ERROR
     mock.assert_not_called()
 
 
 # ── Error responses ────────────────────────────────────────────────────
 
-def test_http_400_returns_none() -> None:
+def test_http_400_returns_status_error() -> None:
     err = HTTPError(
         "https://x", 400, "Bad Request", {},
         BytesIO(b'{"error": "bad enum value"}'),
@@ -84,30 +101,36 @@ def test_http_400_returns_none() -> None:
          patch("app.collectors.wordstat.settings") as s:
         s.YANDEX_SEARCH_API_KEY = "k"
         s.YANDEX_CLOUD_FOLDER_ID = "f"
-        assert fetch_volume("phrase") is None
+        result = fetch_volume("phrase")
+        assert result.status == STATUS_ERROR
+        assert result.http_code == 400
 
 
-def test_network_error_returns_none() -> None:
+def test_network_error_returns_status_error() -> None:
     with patch("urllib.request.urlopen", side_effect=URLError("dns")), \
          patch("app.collectors.wordstat.settings") as s:
         s.YANDEX_SEARCH_API_KEY = "k"
         s.YANDEX_CLOUD_FOLDER_ID = "f"
-        assert fetch_volume("phrase") is None
+        result = fetch_volume("phrase")
+        assert result.status == STATUS_ERROR
+        assert "network" in (result.error or "")
 
 
 # ── Empty / no-data responses ──────────────────────────────────────────
 
-def test_empty_results_array_returns_none() -> None:
+def test_empty_results_array_returns_status_empty() -> None:
     with patch(
         "urllib.request.urlopen",
         return_value=_ok_response({"results": []}),
     ), patch("app.collectors.wordstat.settings") as s:
         s.YANDEX_SEARCH_API_KEY = "k"
         s.YANDEX_CLOUD_FOLDER_ID = "f"
-        assert fetch_volume("very rare phrase") is None
+        result = fetch_volume("very rare phrase")
+        assert result.status == STATUS_EMPTY
+        assert result.volume == 0
 
 
-def test_results_with_only_null_counts_returns_none() -> None:
+def test_results_with_only_null_counts_returns_status_empty() -> None:
     """Yandex returns rows with `date` but no `count` for months with
     no data. If ALL rows are like that, treat as no-volume."""
     payload = {
@@ -122,7 +145,9 @@ def test_results_with_only_null_counts_returns_none() -> None:
     ), patch("app.collectors.wordstat.settings") as s:
         s.YANDEX_SEARCH_API_KEY = "k"
         s.YANDEX_CLOUD_FOLDER_ID = "f"
-        assert fetch_volume("rare phrase") is None
+        result = fetch_volume("rare phrase")
+        assert result.status == STATUS_EMPTY
+        assert result.volume == 0
 
 
 # ── Successful aggregation ─────────────────────────────────────────────

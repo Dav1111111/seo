@@ -779,3 +779,46 @@ def test_system_prompt_carries_broken_metrica_rule() -> None:
     assert "cs_ok" in prompt_lower or "cs_err" in prompt_lower
     # Instructs the model not to ground answers on Metrica numbers.
     assert "недостоверн" in prompt_lower or "не ссылайся" in prompt_lower
+
+
+# ── Wordstat tri-state coverage (audit-2026-05-15) ───────────────────
+
+
+def test_user_message_warns_about_partial_wordstat_coverage() -> None:
+    """When wordstat coverage is low, the user message must include
+    explicit guidance telling the LLM not to interpret missing volume
+    as «no demand». Anchored at the field level (with_demand / total /
+    never_fetched) so a future formatting change can't accidentally
+    drop the anti-hallucination signal."""
+    snap = _snap()
+    snap.queries.total = 13
+    snap.queries.with_volume_known = 4
+    snap.queries.with_demand = 3
+    snap.queries.never_fetched = 9
+    # Keep the back-compat alias in sync so any older formatter path
+    # also sees the same numbers.
+    snap.queries.with_volume = 4
+
+    msg = build_user_message(
+        domain="x", target_config={}, understanding={},
+        snap=snap, plan=_plan(), history=[], new_message="?",
+    )
+
+    # Tri-state counters surface verbatim.
+    assert "3 из 13" in msg or "3 / 13" in msg
+    # Explicit instruction NOT to read «no number» as «no demand».
+    assert "не успели" in msg.lower() or "не опрашивали" in msg.lower()
+    assert "не значит" in msg.lower() or "не означает" in msg.lower()
+
+
+def test_system_prompt_carries_wordstat_anti_fabrication_rule() -> None:
+    """Mirrors the user-message guard: the SYSTEM_PROMPT must instruct
+    the LLM not to conflate «не успели собраться» with «нет спроса»
+    even when the user-message formatting shifts."""
+    # Collapse whitespace so multi-line prompt text matches regardless
+    # of how the rule body is wrapped.
+    collapsed = " ".join(SYSTEM_PROMPT.lower().split())
+    assert "wordstat" in collapsed
+    assert "не успели собраться" in collapsed
+    # The rule must explicitly forbid the «no number = no demand» leap.
+    assert "нет спроса" in collapsed

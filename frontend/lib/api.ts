@@ -1,6 +1,47 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
 const ADMIN_PROXY = "/admin-proxy";  // Next.js server-side proxy — holds the admin key in backend env only
 
+// ── Wordstat status / coverage (Studio · Запросы) ───────────────────
+//
+// Closed set of states a query can be in regarding Wordstat data:
+//   - fresh                 : we have wordstat_volume > 0 and it's recent
+//   - stale_30d_plus        : data exists but is older than 30 days
+//   - fetch_returned_empty  : Wordstat replied successfully but the
+//                             phrase has 0 demand (volume = 0). Legit
+//                             "no demand" for niche/brand phrases.
+//   - never_fetched         : wordstat_updated_at IS NULL — we haven't
+//                             asked Wordstat yet. Cron runs Tuesdays.
+//   - invalid_phrase        : updated_at IS NOT NULL but volume IS NULL
+//                             — Wordstat rejected the phrase (URL,
+//                             garbage). Data-quality flag for owner.
+//
+// Backend may still emit the legacy "stale_30d+" spelling during the
+// rollout — both literals are accepted by the union.
+export type WordstatStatus =
+  | "fresh"
+  | "stale_30d_plus"
+  | "stale_30d+"
+  | "fetch_returned_empty"
+  | "never_fetched"
+  | "invalid_phrase";
+
+// Tri-state breakdown returned alongside the queries list. The backend
+// agent is mid-rollout: `with_demand` / `no_demand` / `never_fetched` /
+// `invalid` are the new shape; legacy `with_volume` / `without_volume`
+// / `stale` are kept optional so the UI can fall back during the
+// switchover.
+export type QueriesCoverage = {
+  total: number;
+  with_demand?: number;
+  no_demand?: number;
+  never_fetched?: number;
+  invalid?: number;
+  // legacy fields — still emitted by current backend
+  with_volume?: number;
+  without_volume?: number;
+  stale?: number;
+};
+
 // Structured Schema.org audit returned alongside the raw `schema_blocks`
 // in the deep-extract response. Backend builds this from JSON-LD /
 // microdata / RDFa parsing + lint rules. Each issue carries an honest
@@ -774,11 +815,7 @@ export const api = {
         is_branded: boolean;
         cluster: string | null;
         wordstat_volume: number | null;
-        wordstat_status:
-          | "fresh"
-          | "stale_30d+"
-          | "never_fetched"
-          | "fetch_returned_empty";
+        wordstat_status: WordstatStatus;
         wordstat_updated_at: string | null;
         wordstat_trend: Array<{ date: string; count: number | null }> | null;
         last_position: number | null;
@@ -792,12 +829,7 @@ export const api = {
         // any focus token; false when no focus is set.
         in_focus: boolean;
       }>;
-      coverage: {
-        total: number;
-        with_volume: number;
-        without_volume: number;
-        stale: number;
-      };
+      coverage: QueriesCoverage;
       relevance_counts: {
         own: number;
         adjacent: number;

@@ -117,8 +117,24 @@ class QueriesFacts:
     disputed: int
     spam: int
     unclassified: int
+    # Tri-state Wordstat coverage (audit-2026-05-15):
+    #   with_volume_known — Wordstat API gave us SOME answer
+    #     (wordstat_volume IS NOT NULL). Includes zeros — phrases for
+    #     which the API explicitly returned «no demand».
+    #   with_demand — Wordstat answer is > 0 → real demand we can
+    #     prioritise on.
+    #   never_fetched — wordstat_updated_at IS NULL → we have not yet
+    #     asked Wordstat about this phrase. NOT the same as «no
+    #     demand»; LLM rules must NOT conflate the two.
+    #
+    # `with_volume` is preserved as an alias for `with_volume_known`
+    # so existing callers / tests continue to compile. New code MUST
+    # pick the field that matches its semantic intent.
     with_volume: int
-    classified_at: datetime | None  # latest relevance_set_at
+    with_volume_known: int = 0
+    with_demand: int = 0
+    never_fetched: int = 0
+    classified_at: datetime | None = None  # latest relevance_set_at
     # Examples for the rule body — top-3 spam queries owner can
     # immediately recognise as «не моё», so the «37 вредных» count
     # gets a face. Each item: {query_text, relevance, reason_ru}.
@@ -599,13 +615,33 @@ async def _queries(db: AsyncSession, site_id: UUID) -> QueriesFacts:
                 SearchQuery.relevance == label,
             )
         )).scalar_one()
-    # Queries that have a Wordstat volume cached.
-    with_volume = (await db.execute(
-        select(func.count(SearchQuery.id)).where(
-            SearchQuery.site_id == site_id,
-            SearchQuery.wordstat_volume.is_not(None),
-        )
-    )).scalar_one()
+    # Tri-state Wordstat coverage in one round-trip via FILTER (WHERE …).
+    # Three honest counters (audit-2026-05-15):
+    #   with_volume_known — wordstat_volume IS NOT NULL (any answer,
+    #                       including the new «API said zero» state)
+    #   with_demand       — wordstat_volume > 0 (real demand)
+    #   never_fetched     — wordstat_updated_at IS NULL (never tried)
+    wordstat_row = (await db.execute(
+        select(
+            func.count(SearchQuery.id).filter(
+                SearchQuery.wordstat_volume.is_not(None)
+            ).label("with_volume_known"),
+            func.count(SearchQuery.id).filter(
+                SearchQuery.wordstat_volume.is_not(None),
+                SearchQuery.wordstat_volume > 0,
+            ).label("with_demand"),
+            func.count(SearchQuery.id).filter(
+                SearchQuery.wordstat_updated_at.is_(None)
+            ).label("never_fetched"),
+        ).where(SearchQuery.site_id == site_id)
+    )).one()
+    with_volume_known = int(wordstat_row.with_volume_known or 0)
+    with_demand = int(wordstat_row.with_demand or 0)
+    never_fetched = int(wordstat_row.never_fetched or 0)
+    # `with_volume` is kept as an alias of `with_volume_known` so
+    # existing callers / fixtures keep working. New consumers must
+    # pick the field that matches their intent.
+    with_volume = with_volume_known
     classified_at = (await db.execute(
         select(func.max(SearchQuery.relevance_set_at)).where(
             SearchQuery.site_id == site_id,
@@ -656,6 +692,9 @@ async def _queries(db: AsyncSession, site_id: UUID) -> QueriesFacts:
         spam=counts["spam"],
         unclassified=counts["unclassified"],
         with_volume=with_volume,
+        with_volume_known=with_volume_known,
+        with_demand=with_demand,
+        never_fetched=never_fetched,
         classified_at=classified_at,
         sample_harmful=sample_harmful,
         sample_own=sample_own,

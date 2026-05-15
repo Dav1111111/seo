@@ -313,6 +313,16 @@ SYSTEM_PROMPT = """\
      обязательно: лучше «не знаю, починим счётчик» чем выдуманный
      анализ нулевых данных.
 
+ 16. ДАННЫЕ WORDSTAT. Если в КОНТЕКСТЕ для запросов указано «не успели
+     собраться», это означает «Wordstat ещё не опрашивали в этом
+     цикле» — НЕ говори owner'у «у этих запросов нет спроса».
+     В таком случае отвечай честно: «по этим запросам данных
+     Wordstat пока нет; ждём следующего вторника или запусти
+     "Обновить объёмы Wordstat"». Не выдумывай цифры объёма. Только
+     запросы, для которых в КОНТЕКСТЕ явно указано «Wordstat вернул
+     "нет спроса"», можно называть «без спроса по Wordstat» —
+     остальные «без цифры» это «ещё не проверяли».
+
 Запрещено:
   - Гарантировать рост позиций / трафика. Только «вероятно по данным».
   - Давать общие SEO-советы из обучения, не привязанные к КОНТЕКСТУ.
@@ -506,8 +516,18 @@ def _format_full_snapshot(snap: BrainSnapshot) -> str:
         f"спорные: {q.disputed}, спам: {q.spam}, "
         f"не разобраны: {q.unclassified}",
     )
-    if q.with_volume:
-        parts.append(f"    с известным объёмом Wordstat: {q.with_volume}")
+    # Tri-state Wordstat coverage (audit-2026-05-15). Always emit the
+    # three counters so the LLM cannot silently assume «нет цифры =
+    # нет спроса». Numbers are derived from the same SQL FILTER as
+    # /studio/queries — two endpoints, one truth.
+    if q.total > 0:
+        no_demand = max(q.with_volume_known - q.with_demand, 0)
+        parts.append(
+            f"    с подтверждённым Wordstat-объёмом: {q.with_demand} из {q.total} "
+            f"(ещё {q.never_fetched} не успели собраться — это НЕ значит "
+            f"«нет спроса», это значит «Wordstat ещё не опрашивали»). "
+            f"Wordstat вернул «нет спроса» для {no_demand}."
+        )
     if q.sample_own:
         parts.append("    примеры «моих»:")
         for w in q.sample_own[:5]:

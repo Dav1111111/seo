@@ -23,13 +23,44 @@ commit 1cfded7 where we made the connector tolerant of either key.
 We aggregate the monthly counts into a single 12-month volume and
 expose the per-month trend as a JSON-friendly list.
 
+Tri-state semantics (2026-05-15)
+--------------------------------
+The previous contract collapsed three very different outcomes into
+`None`:
+
+  - API returned 200 with no rows for a legitimately-rare phrase
+    (e.g. "багги сочи гранд")
+  - API returned 4xx/5xx or the network blew up (transient)
+  - Caller passed a URL or empty string by mistake (data-quality bug)
+
+That collapse caused the weekly Celery beat to retry legitimately-
+empty phrases forever — `wordstat_updated_at` was never written, so
+the row stayed in the «never fetched» bucket and got picked up by the
+next beat. Live probe on 2026-05-15: 9 of 13 queries on prod were
+stuck in this loop.
+
+The new return type `WordstatFetchOutcome` distinguishes:
+
+  - status="ok"             — API returned data, volume > 0 (or 0 if
+                              every monthly count was zero or null)
+  - status="empty"          — 200 with no rows. Caller SHOULD write
+                              volume=0 and stamp `wordstat_updated_at`
+                              so the row exits the retry loop.
+  - status="error"          — HTTP error, network failure, malformed
+                              JSON. Caller SHOULD NOT touch the row
+                              and will retry on the next beat.
+  - status="invalid_phrase" — input is a URL, empty, or otherwise
+                              unusable. Caller SHOULD stamp
+                              `wordstat_updated_at` (to stop the loop)
+                              and surface a data-quality warning.
+
 Design
 ------
 - stdlib urllib (matches yandex_serp.py style — no httpx dep dance).
 - Synchronous; called from Celery worker threads via anyio executor.
-- Fail-soft: every error path returns None instead of raising. The
-  Celery task wraps each per-query call in try/except anyway, but a
-  single-quote regression here shouldn't crash the entire batch.
+- Tri-state result via `WordstatFetchOutcome`. The legacy
+  `WordstatVolume` dataclass is preserved as an alias for any out-of-
+  tree code that still imports it.
 """
 
 from __future__ import annotations
@@ -61,32 +92,87 @@ TREND_MONTHS = 12
 REQUEST_TIMEOUT_SEC = 12.0
 
 
-@dataclasses.dataclass(frozen=True)
-class WordstatVolume:
-    """Result of a successful Wordstat dynamics fetch.
+# Tri-state status values for WordstatFetchOutcome.
+STATUS_OK = "ok"
+STATUS_EMPTY = "empty"
+STATUS_ERROR = "error"
+STATUS_INVALID_PHRASE = "invalid_phrase"
 
-    `count` is the total search volume across the trend window
-    (sum of all monthly counts that came back). `trend` is the per-
-    month series, oldest → newest, suitable for plotting and for
-    serialising into the `wordstat_trend` JSONB column.
-    `from_date` is the timestamp of the latest month for which we
-    have data — used as the freshness marker.
+
+@dataclasses.dataclass(frozen=True)
+class WordstatFetchOutcome:
+    """Tri-state result of a single `fetch_volume` call.
+
+    See module docstring for the four `status` values and what the
+    caller should do for each.
+
+    Fields:
+      phrase       — the cleaned phrase that was queried (or attempted)
+      status       — one of {"ok","empty","error","invalid_phrase"}
+      volume       — total trend-window volume; 0 if status != "ok"
+      trend        — per-month series for "ok"; [] otherwise
+      from_date    — RFC3339 of the latest data month for "ok"; None
+                     otherwise. Kept for backwards compat with old
+                     `WordstatVolume.from_date`.
+      latest_date  — alias of `from_date` for readability at call sites
+      fetched_at   — when the fetch was attempted (always populated;
+                     callers stamp `wordstat_updated_at` from this)
+      error        — short human-readable error string for
+                     status in {"error","invalid_phrase"}; None for ok
+      http_code    — HTTP status code when we got one (None for network
+                     failures and non-HTTP errors)
     """
 
     phrase: str
-    count: int
-    from_date: str  # RFC3339 of latest data month
-    trend: list[dict]  # [{date: "2025-04-01T...", count: 12345}, ...]
+    status: str
+    volume: int
+    trend: list[dict]
+    from_date: str | None
+    latest_date: str | None
     fetched_at: datetime
+    error: str | None = None
+    http_code: int | None = None
+
+    @property
+    def is_actionable(self) -> bool:
+        """True if the caller should write something to the DB.
+
+        For "ok"/"empty" we have a real answer (a real volume or a
+        verified zero) and should stamp `wordstat_updated_at`. For
+        "error" the failure may be transient — leave the row alone so
+        the next beat retries. "invalid_phrase" is a borderline case:
+        the caller should also stamp the timestamp (to break the retry
+        loop) but should NOT trust `volume`. Hence we return True for
+        invalid as well — callers distinguish via `status`.
+        """
+        return self.status in (STATUS_OK, STATUS_EMPTY, STATUS_INVALID_PHRASE)
 
     def to_dict(self) -> dict:
         return {
             "phrase": self.phrase,
-            "count": self.count,
-            "from_date": self.from_date,
+            "status": self.status,
+            "volume": self.volume,
             "trend": list(self.trend),
+            "from_date": self.from_date,
+            "latest_date": self.latest_date,
             "fetched_at": self.fetched_at.isoformat(),
+            "error": self.error,
+            "http_code": self.http_code,
         }
+
+    # ── Backwards-compat aliases ──────────────────────────────────
+    # The old `WordstatVolume.count` field was the same number as
+    # `volume`. Keep a property so any straggling caller that still
+    # reads `.count` keeps working.
+    @property
+    def count(self) -> int:
+        return self.volume
+
+
+# Legacy alias — out-of-tree code may still `from … import WordstatVolume`.
+# A successful fetch is structurally compatible: it has `count`,
+# `from_date`, `trend`, `fetched_at` (the historical surface).
+WordstatVolume = WordstatFetchOutcome
 
 
 def _twelve_months_ago_iso() -> str:
@@ -94,6 +180,20 @@ def _twelve_months_ago_iso() -> str:
     base = datetime.now(timezone.utc).replace(day=1)
     target = (base - timedelta(days=365)).replace(day=1)
     return target.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _looks_like_url(phrase: str) -> bool:
+    """True if the phrase is clearly a URL or domain rather than a
+    search phrase. Wordstat will 400 these every time, so reject at
+    boundary to keep them out of the error counter."""
+    p = phrase.strip().lower()
+    if not p:
+        return False
+    if "://" in p:
+        return True
+    if p.startswith(("http://", "https://", "www.")):
+        return True
+    return False
 
 
 def _post(
@@ -134,6 +234,29 @@ def _post(
         return 0, None, f"exception: {type(exc).__name__}"
 
 
+def _outcome(
+    *,
+    phrase: str,
+    status: str,
+    volume: int = 0,
+    trend: list[dict] | None = None,
+    latest_date: str | None = None,
+    error: str | None = None,
+    http_code: int | None = None,
+) -> WordstatFetchOutcome:
+    return WordstatFetchOutcome(
+        phrase=phrase,
+        status=status,
+        volume=volume,
+        trend=trend or [],
+        from_date=latest_date,
+        latest_date=latest_date,
+        fetched_at=datetime.now(timezone.utc),
+        error=error,
+        http_code=http_code,
+    )
+
+
 def fetch_volume(
     phrase: str,
     *,
@@ -142,27 +265,48 @@ def fetch_volume(
     timeout: float = REQUEST_TIMEOUT_SEC,
     api_key: str | None = None,
     folder_id: str | None = None,
-) -> WordstatVolume | None:
-    """Pull 12-month dynamics for `phrase`. None on any failure.
+) -> WordstatFetchOutcome:
+    """Pull 12-month dynamics for `phrase`.
 
-    None semantics:
-      - empty/blank phrase → caller bug, returns None silently
-      - missing API key / folder → can't even try, returns None
-      - HTTP 4xx/5xx, network error, malformed JSON → returns None
-        (call sites that need to report the cause should look at logs)
-      - 200 but `results` empty / no monthly counts → returns None
-        (Wordstat sometimes returns empty for very rare phrases —
-         that's data-absence, not an error, but for our purposes
-         "no volume to record" is the same outcome)
+    Always returns a `WordstatFetchOutcome` — never `None`. Inspect
+    `outcome.status` to dispatch:
+
+      - "ok"              — outcome.volume / outcome.trend populated
+      - "empty"           — API said zero demand for this phrase
+      - "error"           — transient failure (HTTP/network)
+      - "invalid_phrase"  — input rejected without hitting the API
+
+    See module docstring for the full contract.
     """
     cleaned = (phrase or "").strip()
     if not cleaned:
-        return None
+        log.warning("wordstat.invalid_phrase reason=empty")
+        return _outcome(
+            phrase="",
+            status=STATUS_INVALID_PHRASE,
+            error="phrase is empty or whitespace",
+        )
+
+    if _looks_like_url(cleaned):
+        log.warning("wordstat.invalid_phrase phrase=%r reason=url_shape", cleaned)
+        return _outcome(
+            phrase=cleaned,
+            status=STATUS_INVALID_PHRASE,
+            error="phrase looks like a URL, not a search phrase",
+        )
 
     key = api_key or settings.YANDEX_SEARCH_API_KEY
     folder = folder_id or settings.YANDEX_CLOUD_FOLDER_ID
     if not key or not folder:
-        return None
+        log.warning(
+            "wordstat.no_credentials phrase=%r — missing API key or folder",
+            cleaned,
+        )
+        return _outcome(
+            phrase=cleaned,
+            status=STATUS_ERROR,
+            error="missing YANDEX_SEARCH_API_KEY or YANDEX_CLOUD_FOLDER_ID",
+        )
 
     body = {
         "phrase": cleaned,
@@ -175,8 +319,16 @@ def fetch_volume(
 
     code, data, err = _post(body, key, timeout)
     if err:
-        log.info("wordstat.fetch_failed phrase=%r code=%s err=%s", cleaned, code, err)
-        return None
+        log.warning(
+            "wordstat.fetch_failed phrase=%r code=%s err=%s",
+            cleaned, code, err,
+        )
+        return _outcome(
+            phrase=cleaned,
+            status=STATUS_ERROR,
+            error=err,
+            http_code=code if code else None,
+        )
 
     # Yandex returns the series under `results`. Be tolerant of both
     # keys in case it ever harmonises with /regions and /queries that
@@ -213,21 +365,32 @@ def fetch_volume(
                 latest_date = date
 
     if not trend or total == 0 or latest_date is None:
-        # Nothing useful came back — treat as no-data
-        log.info(
+        # 200 with empty or all-null `results` — Wordstat is telling us
+        # this phrase has no measurable demand. That's a real answer:
+        # callers should record volume=0 and stamp `wordstat_updated_at`
+        # so the weekly beat doesn't retry forever.
+        log.warning(
             "wordstat.empty_result phrase=%r rows=%d total=%d",
             cleaned,
             len(rows),
             total,
         )
-        return None
+        return _outcome(
+            phrase=cleaned,
+            status=STATUS_EMPTY,
+            volume=0,
+            trend=trend,  # may still contain null-count rows for UI
+            latest_date=None,
+            http_code=code,
+        )
 
-    return WordstatVolume(
+    return _outcome(
         phrase=cleaned,
-        count=total,
-        from_date=latest_date,
+        status=STATUS_OK,
+        volume=total,
         trend=trend,
-        fetched_at=datetime.now(timezone.utc),
+        latest_date=latest_date,
+        http_code=code,
     )
 
 
@@ -297,13 +460,13 @@ def fetch_top_requests(
         body, key, timeout, endpoint=WORDSTAT_TOP_REQUESTS_ENDPOINT,
     )
     if code == 429 and retry_on_429:
-        log.info("wordstat.top_requests_429 seed=%r — backoff 30s", cleaned)
+        log.warning("wordstat.top_requests_429 seed=%r — backoff 30s", cleaned)
         _time.sleep(30.0)
         code, data, err = _post(
             body, key, timeout, endpoint=WORDSTAT_TOP_REQUESTS_ENDPOINT,
         )
     if err:
-        log.info(
+        log.warning(
             "wordstat.top_requests_failed seed=%r code=%s err=%s",
             cleaned, code, err,
         )
@@ -329,11 +492,16 @@ def fetch_top_requests(
 
 
 __all__ = [
-    "WordstatVolume",
+    "WordstatFetchOutcome",
+    "WordstatVolume",  # legacy alias of WordstatFetchOutcome
     "WordstatTopRequest",
     "fetch_volume",
     "fetch_top_requests",
     "WORDSTAT_DYNAMICS_ENDPOINT",
     "WORDSTAT_TOP_REQUESTS_ENDPOINT",
     "TREND_MONTHS",
+    "STATUS_OK",
+    "STATUS_EMPTY",
+    "STATUS_ERROR",
+    "STATUS_INVALID_PHRASE",
 ]

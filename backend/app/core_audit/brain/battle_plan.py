@@ -461,8 +461,18 @@ def _missing_data(snap: BrainSnapshot, plan: Plan) -> list[str]:
         out.append("Нет deep-dive по SEO-признакам конкурентов: нельзя честно сравнить цены, CTA, отзывы, schema и структуру страниц.")
     if snap.indexation.pages_unknown > 0:
         out.append(f"У {snap.indexation.pages_unknown} страниц статус индексации unknown: это не ошибка, но нужен per-URL Webmaster check.")
-    if snap.queries.with_volume == 0 and snap.queries.total > 0:
-        out.append("Нет Wordstat-объёмов: нельзя честно ранжировать запросы по спросу.")
+    # Wordstat-coverage warning fires whenever fewer than half the
+    # classified queries have an answer from Wordstat (audit-2026-05-15).
+    # Mirrors `_rule_wordstat_partial_coverage` in rules.py so the
+    # battle plan and the action plan stay in sync.
+    if snap.queries.total > 0:
+        coverage = snap.queries.with_volume_known / snap.queries.total
+        if coverage < 0.5:
+            out.append(
+                f"Wordstat-объёмы собраны только для "
+                f"{snap.queries.with_volume_known} из {snap.queries.total} "
+                f"запросов: без этого нельзя честно ранжировать по спросу."
+            )
     return _unique(out)[:6]
 
 

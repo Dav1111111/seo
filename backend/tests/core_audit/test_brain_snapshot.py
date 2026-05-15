@@ -5,10 +5,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core_audit.brain.snapshot import _review, build_snapshot
+from app.core_audit.brain.snapshot import _queries, _review, build_snapshot
 from app.core_audit.review.models import PageReview, PageReviewRecommendation
 from app.models.page import Page
 from app.models.page_deep_extract import PageDeepExtract
+from app.models.search_query import SearchQuery
 from app.models.site import Site
 
 
@@ -279,3 +280,54 @@ async def test_snapshot_reads_robots_from_latest_event(
     snap = await build_snapshot(db, test_site)
     assert snap.robots_critical_issues == 2
     assert snap.robots_valid_for_yandex is False
+
+
+# ── Tri-state Wordstat coverage (audit-2026-05-15) ───────────────────
+
+
+async def test_queries_facts_tri_state_wordstat_counters(
+    db: AsyncSession, test_site: Site,
+) -> None:
+    """QueriesFacts splits Wordstat coverage into three honest counters:
+    with_volume_known (any answer), with_demand (volume>0), never_fetched
+    (no row). Regression test for the audit-2026-05-15 silent-coverage
+    bug — prod showed `with_volume_known=4, total=13` and consumers
+    silently treated the other 9 as «no demand»."""
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+
+    # 3 queries — Wordstat answered with real demand (volume > 0)
+    for i in range(3):
+        db.add(SearchQuery(
+            site_id=test_site.id,
+            query_text=f"phrase-with-demand-{i}",
+            relevance="own",
+            wordstat_volume=100 + i,
+            wordstat_updated_at=now,
+        ))
+    # 1 query — Wordstat answered «no demand» (volume == 0, updated_at set)
+    db.add(SearchQuery(
+        site_id=test_site.id,
+        query_text="phrase-api-said-zero",
+        relevance="own",
+        wordstat_volume=0,
+        wordstat_updated_at=now,
+    ))
+    # 9 queries — never fetched yet (both fields NULL)
+    for i in range(9):
+        db.add(SearchQuery(
+            site_id=test_site.id,
+            query_text=f"phrase-never-fetched-{i}",
+            relevance="own",
+            wordstat_volume=None,
+            wordstat_updated_at=None,
+        ))
+    await db.flush()
+
+    facts = await _queries(db, test_site.id)
+
+    assert facts.total == 13
+    assert facts.with_volume_known == 4   # 3 with demand + 1 «API said zero»
+    assert facts.with_demand == 3         # only those with volume > 0
+    assert facts.never_fetched == 9       # both NULLs
+    # Backwards-compat alias must equal `with_volume_known`.
+    assert facts.with_volume == facts.with_volume_known

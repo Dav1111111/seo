@@ -847,6 +847,78 @@ def _rule_robots_critical(
     )
 
 
+def _rule_wordstat_partial_coverage(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
+    """Wordstat-volume coverage is below 50% — owner can't prioritise.
+
+    Old version of this rule fired only when `with_volume_known == 0`,
+    which silently passed through the common middle ground («4 из 13
+    собрано»). Now it fires whenever fewer than half the classified
+    queries have a Wordstat answer.
+
+    Severity:
+      critical → coverage below 20% (almost nothing to prioritise on)
+      warning  → coverage 20-49% (we have a partial picture)
+      silent   → coverage ≥50% OR no queries at all
+
+    Stays silent when total == 0 (nothing to assess) and when we have
+    no «never_fetched» rows (all phrases were tried — owner already
+    can't squeeze more from this lever; the diagnostic blurb in
+    `_build_diagnostics` still mentions it).
+    """
+    q = snap.queries
+    if q.total == 0:
+        return None
+    coverage = q.with_volume_known / q.total
+    if coverage >= 0.5:
+        return None
+    if q.never_fetched == 0:
+        # No new fetches would help — every phrase was already tried.
+        # Surface this through the diagnostics blurb instead, not as
+        # an action with no useful CTA.
+        return None
+    missing = q.total - q.with_volume_known
+    sev: Severity = "critical" if coverage < 0.2 else "high"
+    word_q = _ru_plural(q.total, ("запроса", "запросов", "запросов"))
+    title = (
+        f"Wordstat-объёмы собраны только для {q.with_volume_known} из "
+        f"{q.total} {word_q}"
+    )
+    body = (
+        f"Без объёма Wordstat нельзя честно приоритизировать запросы "
+        f"по реальному спросу. Сейчас {missing} запросов ещё не "
+        f"опрашивали в Wordstat — это не «нет спроса», это «не успели "
+        f"собраться». Запусти ручную сборку «Обновить объёмы "
+        f"Wordstat», или дождись следующего вторника (еженедельный "
+        f"автозапуск). Если все запросы много раз пытались собрать и "
+        f"Wordstat возвращает пусто, проверь регион в настройках сайта."
+    )
+    what_to_do = (
+        "Открой Запросы и нажми «Обновить объёмы Wordstat». После "
+        "сбора плана priority-скоринг сможет сравнить запросы по "
+        "реальному спросу."
+    )
+    return Action(
+        id="wordstat:partial_coverage",
+        severity=sev,
+        title=title,
+        body_ru=body,
+        what_to_do_ru=what_to_do,
+        link_to="/studio/queries",
+        link_label="К запросам",
+        evidence={
+            "total": q.total,
+            "with_volume_known": q.with_volume_known,
+            "with_demand": q.with_demand,
+            "never_fetched": q.never_fetched,
+            "coverage_pct": round(coverage * 100, 1),
+        },
+        # Coverage gap is site-wide — no per-focus signal to match.
+        in_focus=False,
+    )
+
+
 # ── Diagnostics: flag modules that haven't run yet ───────────────────
 
 
@@ -879,7 +951,7 @@ def _build_diagnostics(snap: BrainSnapshot) -> list[str]:
             "страницу. Открой Конкуренты и запусти «Услуги без страниц» "
             "— одна минута, ~10 центов LLM."
         )
-    if snap.queries.with_volume == 0 and snap.queries.total > 0:
+    if snap.queries.with_volume_known == 0 and snap.queries.total > 0:
         out.append(
             "У меня нет данных о том, как часто люди ищут эти запросы "
             "(Wordstat-объёмов). Без этого я не могу сказать, какой "
@@ -907,6 +979,7 @@ _RULES = (
     _rule_indexation_coverage,
     _rule_harmful_visibility,
     _rule_ctr_gap,
+    _rule_wordstat_partial_coverage,
     _rule_missing_landings,
     _rule_pages_without_review,
     _rule_pending_recs,

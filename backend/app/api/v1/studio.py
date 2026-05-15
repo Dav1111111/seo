@@ -83,6 +83,24 @@ def _wordstat_status(updated_at: datetime | None, has_volume: bool) -> str:
     return "fresh"
 
 
+def _wordstat_demand_status(
+    wordstat_volume: int | None, wordstat_updated_at: datetime | None,
+) -> str:
+    """Tri-state demand label for one row (audit-2026-05-15).
+
+    `unknown`    — Wordstat hasn't answered yet (volume IS NULL,
+                   regardless of updated_at). UI must NOT show this
+                   as «no demand»; it means «not yet asked».
+    `no_demand`  — Wordstat answered, volume == 0. Real signal.
+    `has_demand` — Wordstat answered, volume > 0. Real signal.
+    """
+    if wordstat_volume is None:
+        return "unknown"
+    if wordstat_volume == 0:
+        return "no_demand"
+    return "has_demand"
+
+
 async def _site_or_404(db: AsyncSession, site_id: uuid.UUID) -> Site:
     site = await db.get(Site, site_id)
     if site is None:
@@ -158,6 +176,10 @@ class QueryRow(BaseModel):
     cluster: str | None
     wordstat_volume: int | None
     wordstat_status: str
+    # Typed tri-state demand label (audit-2026-05-15) so the UI does
+    # not have to infer «no demand» vs «not yet asked» from a null
+    # `wordstat_volume`. Values: "unknown" | "no_demand" | "has_demand".
+    wordstat_demand_status: str
     wordstat_updated_at: datetime | None
     wordstat_trend: list[dict] | None
     last_position: float | None
@@ -229,7 +251,22 @@ async def list_queries(
             site_id=site_id,
             total=0,
             items=[],
-            coverage={"total": 0, "with_volume": 0, "without_volume": 0, "stale": 0},
+            coverage={
+                "total": 0,
+                # Backwards-compat key kept stable for existing UI:
+                # `with_volume` = number of phrases with real demand
+                # (volume > 0). Same meaning as `with_demand` below.
+                "with_volume": 0,
+                "without_volume": 0,
+                "stale": 0,
+                # Tri-state Wordstat counters (audit-2026-05-15) — keep
+                # in sync with brain.QueriesFacts. UI / chat use these
+                # to honestly distinguish «не успели собраться» from
+                # «нет спроса».
+                "with_volume_known": 0,
+                "with_demand": 0,
+                "never_fetched": 0,
+            },
             relevance_counts={
                 "own": 0, "adjacent": 0, "disputed": 0, "spam": 0,
                 "unclassified": 0,
@@ -275,18 +312,41 @@ async def list_queries(
             )
 
     items: list[QueryRow] = []
-    coverage = {"total": 0, "with_volume": 0, "without_volume": 0, "stale": 0}
+    coverage = {
+        "total": 0,
+        # Existing key — kept identical to «with_demand» so the UI
+        # and existing tests don't break.
+        "with_volume": 0,
+        "without_volume": 0,
+        "stale": 0,
+        # Tri-state counters (audit-2026-05-15) — mirrored from
+        # brain.QueriesFacts so /studio/queries + brain.snapshot
+        # cannot drift apart.
+        "with_volume_known": 0,
+        "with_demand": 0,
+        "never_fetched": 0,
+    }
 
     for q in rows:
         coverage["total"] += 1
         has_volume = q.wordstat_volume is not None and q.wordstat_volume > 0
         status = _wordstat_status(q.wordstat_updated_at, has_volume)
+        demand_status = _wordstat_demand_status(
+            q.wordstat_volume, q.wordstat_updated_at,
+        )
         if has_volume:
             coverage["with_volume"] += 1
         else:
             coverage["without_volume"] += 1
         if status == "stale_30d+":
             coverage["stale"] += 1
+        # Tri-state mirror of brain.QueriesFacts:
+        if q.wordstat_volume is not None:
+            coverage["with_volume_known"] += 1
+            if q.wordstat_volume > 0:
+                coverage["with_demand"] += 1
+        if q.wordstat_updated_at is None:
+            coverage["never_fetched"] += 1
 
         m = latest_metric_by_qid.get(q.id)
         last_position = float(m.avg_position) if m and m.avg_position is not None else None
@@ -311,6 +371,7 @@ async def list_queries(
                 cluster=q.cluster,
                 wordstat_volume=q.wordstat_volume,
                 wordstat_status=status,
+                wordstat_demand_status=demand_status,
                 wordstat_updated_at=q.wordstat_updated_at,
                 wordstat_trend=trend,
                 last_position=last_position,

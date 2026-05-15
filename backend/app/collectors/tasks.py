@@ -792,9 +792,20 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
     """
     import time
     import anyio
-    from app.collectors.wordstat import fetch_volume
+    from app.collectors.wordstat import (
+        fetch_volume,
+        STATUS_OK,
+        STATUS_EMPTY,
+        STATUS_ERROR,
+        STATUS_INVALID_PHRASE,
+    )
     from app.core_audit.activity import emit_terminal, log_event
     from app.models.search_query import SearchQuery
+
+    # Cap on how many per-query error records we put into the terminal
+    # event's `extra` JSONB. Beyond this the count is still accurate
+    # but we drop the per-row detail to keep the events row small.
+    MAX_ERROR_DETAILS = 50
 
     async def _run():
         async with task_session() as db:
@@ -834,16 +845,35 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
                 run_id=run_id,
             )
 
-            updated = 0
+            # Tri-state counters (mirroring fetch_volume's outcome.status):
+            #   ok      — got real volume; row updated
+            #   empty   — API said legitimately zero; row stamped with 0
+            #             so next beat doesn't retry forever (bug fix
+            #             2026-05-15: previously this counted as "empty"
+            #             but `wordstat_updated_at` was NEVER written)
+            #   invalid — phrase is a URL / empty / garbage; stamp the
+            #             timestamp to exit the retry loop, surface in
+            #             errors list as data-quality warning
+            #   failed  — transient (HTTP/network); leave row alone so
+            #             the next beat retries
+            ok = 0
             empty = 0
+            invalid = 0
             failed = 0
+            error_details: list[dict] = []
+
+            def _record_error(entry: dict) -> None:
+                if len(error_details) < MAX_ERROR_DETAILS:
+                    error_details.append(entry)
 
             for i, q in enumerate(queries):
                 # Off-load the blocking urllib call so the event loop
                 # stays free between queries — same pattern as the
-                # existing indexation task.
+                # existing indexation task. The new fetch_volume never
+                # raises on normal failures (returns status="error"),
+                # but keep the try/except as defense in depth.
                 try:
-                    volume = await anyio.to_thread.run_sync(
+                    outcome = await anyio.to_thread.run_sync(
                         fetch_volume, q.query_text,
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -852,14 +882,48 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
                         q.query_text, exc,
                     )
                     failed += 1
+                    _record_error({
+                        "query": q.query_text,
+                        "code": "exception",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
                 else:
-                    if volume is None:
+                    if outcome.status == STATUS_OK:
+                        q.wordstat_volume = outcome.volume
+                        q.wordstat_trend = outcome.trend
+                        q.wordstat_updated_at = outcome.fetched_at
+                        ok += 1
+                    elif outcome.status == STATUS_EMPTY:
+                        # Legit «no demand» — record 0 + stamp the
+                        # timestamp so the weekly beat exits the loop.
+                        # `wordstat_trend` may be [] or carry null-count
+                        # rows; either is fine for the UI sparkline.
+                        q.wordstat_volume = 0
+                        q.wordstat_trend = outcome.trend
+                        q.wordstat_updated_at = outcome.fetched_at
                         empty += 1
-                    else:
-                        q.wordstat_volume = volume.count
-                        q.wordstat_trend = volume.to_dict()["trend"]
-                        q.wordstat_updated_at = volume.fetched_at
-                        updated += 1
+                    elif outcome.status == STATUS_INVALID_PHRASE:
+                        # URL / empty string in `query_text` — data
+                        # quality bug upstream. Stamp the timestamp to
+                        # stop retrying; leave `wordstat_volume` as-is
+                        # (likely NULL) so the UI shows «нет данных»
+                        # rather than a fake 0.
+                        q.wordstat_updated_at = outcome.fetched_at
+                        invalid += 1
+                        _record_error({
+                            "query": q.query_text,
+                            "code": "invalid_phrase",
+                            "error": outcome.error,
+                        })
+                    else:  # STATUS_ERROR — transient
+                        # DO NOT touch the row. Next beat will retry.
+                        failed += 1
+                        _record_error({
+                            "query": q.query_text,
+                            "code": "fetch_error",
+                            "http_code": outcome.http_code,
+                            "error": outcome.error,
+                        })
 
                 # Commit in batches of 25 so partial progress survives
                 # if the worker is killed mid-run.
@@ -873,24 +937,40 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
             # Final commit catches the last <25 rows.
             await db.commit()
 
-            stats = {
+            recorded = ok + empty + invalid
+            stats: dict = {
                 "queries_total": len(queries),
-                "updated": updated,
+                "ok": ok,
                 "empty": empty,
+                "invalid": invalid,
                 "failed": failed,
+                # Keep the legacy `updated` key so existing dashboards /
+                # alerts that read it from `agent_runs` extras continue
+                # to work — it now means "ok" (real volume written).
+                "updated": ok,
+                "errors": error_details,
             }
-            if updated == 0:
+
+            # Terminal classification:
+            #   * everything errored             → "failed"
+            #   * at least one row was recorded  → "done" (even if some
+            #                                      transient errors —
+            #                                      retry next beat)
+            if recorded == 0 and failed > 0:
                 message = (
                     f"Wordstat не отдал данных ни по одному из {len(queries)} "
                     "запросов. Проверь YANDEX_SEARCH_API_KEY на /studio/connections."
                 )
                 terminal = "failed"
             else:
-                message = (
-                    f"Wordstat обновлён: {updated} запросов получили объёмы, "
-                    f"{empty} вернули пусто (редкие фразы), {failed} упали с "
-                    "ошибкой."
-                )
+                parts = [f"{ok} получили объёмы"]
+                if empty:
+                    parts.append(f"{empty} без спроса (записали 0)")
+                if invalid:
+                    parts.append(f"{invalid} некорректных фраз")
+                if failed:
+                    parts.append(f"{failed} временных ошибок (повторим)")
+                message = "Wordstat обновлён: " + ", ".join(parts) + "."
                 terminal = "done"
 
             await emit_terminal(
