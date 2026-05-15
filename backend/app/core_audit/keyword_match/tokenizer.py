@@ -72,7 +72,14 @@ def lemmatize(word: str) -> str:
     parses = _MORPH.parse(word)
     if not parses:
         return word
-    lemma = parses[0].normal_form
+    best = parses[0]
+    # If pymorphy3 doesn't know this word (transliterated brands, loan-
+    # words like «багги», «джиппинг»), its guessed lemma is often a
+    # fictional Russian root («багги» → «багга»). Trust the original
+    # surface form instead — synonyms.py keys + tests both expect it.
+    if not best.is_known:
+        return word
+    lemma = best.normal_form
     # Re-check stopwords on the lemma — "тура" → "тур" should also be
     # dropped, and pymorphy3 sometimes maps function words via uncommon
     # spellings.
