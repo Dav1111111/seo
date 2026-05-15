@@ -255,7 +255,15 @@ SYSTEM_PROMPT = """\
      просит «развернуть конкретную страницу из группы» — переключайся
      на плоский список рекомендаций (он ниже в контексте).
 
- 12. ВНУТРЕННИЕ КОДЫ. В КОНТЕКСТЕ могут встречаться технические
+ 12. СВЕЖИЕ СНИМКИ ПОСЛЕ РЕВЬЮ. Если у рекомендации указано
+     «свежий снимок после ревью», НЕ говори её как точный текущий
+     дефект. Формулируй честно: «ревью старое, после него есть свежий
+     браузерный снимок; по свежему снимку видно ...; надо перезапустить
+     ревью/проверку, чтобы закрыть рекомендацию». Если свежий снимок
+     показывает, что поле уже появилось, скажи «похоже, это уже
+     починили», а не повторяй старую проблему.
+
+ 13. ВНУТРЕННИЕ КОДЫ. В КОНТЕКСТЕ могут встречаться технические
      идентификаторы (`source_finding_id`, `signal=X`, finding-ID,
      rec_id и подобные строки с подчёркиваниями/точками вида
      `commercial.missing_phone_in_header`). Это для тебя ориентир —
@@ -264,7 +272,7 @@ SYSTEM_PROMPT = """\
      человеческими словами на русском: «не нашёл телефон в шапке»,
      а не «source_finding_id=commercial.missing_phone_in_header».
 
- 13. РЕЖИМ БОЕВОГО SEO-ПЛАНА. Если в КОНТЕКСТЕ указан режим
+ 14. РЕЖИМ БОЕВОГО SEO-ПЛАНА. Если в КОНТЕКСТЕ указан режим
      «боевой план», собери план под цель топ-5, но не обещай топ-5.
      Максимум 5 действий. Каждое действие должно иметь: страница или
      модуль, почему это важно по фактам, что сделать, ожидаемый эффект
@@ -291,6 +299,19 @@ SYSTEM_PROMPT = """\
      владельца НЕ совместим с фактами (просит «оптимизация под бренд»,
      а в seed нет ничего про бренд) — честно скажи «таких данных не
      вижу, давай по тому что есть».
+
+ 15. ДАННЫЕ МЕТРИКИ. Если в КОНТЕКСТЕ в блоке «Метрика» указано
+     «предупреждение: код Метрики на сайте не отвечает» (любой
+     статус кроме CS_OK — например CS_ERR_UNKNOWN,
+     CS_ERR_NOT_INSTALLED), то ВСЕ цифры из блока Метрики — визиты,
+     просмотры, посадочные, источники, конверсии — недостоверны.
+     Не ссылайся на них как на факты. Не делай выводов про отказы,
+     поведение, конверсии. Скажи владельцу честно: «по данным
+     Метрики ничего сказать не могу — счётчик показывает что код не
+     установлен / не отвечает на сайте; первое действие — проверь
+     установку кода Метрики, потом запусти сбор заново». Это
+     обязательно: лучше «не знаю, починим счётчик» чем выдуманный
+     анализ нулевых данных.
 
 Запрещено:
   - Гарантировать рост позиций / трафика. Только «вероятно по данным».
@@ -608,6 +629,12 @@ def _format_full_snapshot(snap: BrainSnapshot) -> str:
         f"    рекомендаций ждут решения: {r.recs_pending} "
         f"(из них высокого приоритета: {r.recs_high_priority_pending})",
     )
+    if getattr(r, "recs_with_fresh_snapshot_after_review", 0):
+        parts.append(
+            "    переданных рекомендаций со свежим браузерным снимком после ревью: "
+            f"{r.recs_with_fresh_snapshot_after_review}; их нельзя "
+            "называть текущими проблемами без повторного ревью",
+        )
     parts.append(
         "    источник рекомендаций: последние завершённые ревью по "
         "каждой паре страница+интент; это тот же текущий слой, "
@@ -636,6 +663,12 @@ def _format_full_snapshot(snap: BrainSnapshot) -> str:
             urls = g.get("sample_urls") or []
             if urls:
                 line += f" | примеры: {', '.join(urls[:3])}"
+            fresh_count = int(g.get("fresh_snapshot_after_review_count") or 0)
+            if fresh_count:
+                line += (
+                    f" | свежий снимок после ревью: {fresh_count} "
+                    "страниц — перепроверь перед утверждением"
+                )
             after = (g.get("after_sample") or "").strip()
             if after:
                 line += f" | правка-шаблон: «{after[:120]}»"
@@ -690,6 +723,9 @@ def _format_full_snapshot(snap: BrainSnapshot) -> str:
                 line += f" | сейчас: «{before}»"
             if after:
                 line += f" | правка: «{after}»"
+            fresh = _format_current_snapshot(rec.get("current_snapshot"))
+            if fresh:
+                line += f" | {fresh}"
             parts.append(line)
 
     # Missing landings
@@ -724,6 +760,85 @@ def _format_full_snapshot(snap: BrainSnapshot) -> str:
     parts.append(f"    всего применено: {o.applied_total}")
     parts.append(f"    за последние 14 дней: {o.applied_last_14d}")
     parts.append(f"    ждут замера через 14 дней: {o.pending_followup}")
+
+    # Metrica
+    met = getattr(snap, "metrica", None)
+    parts.append("  Метрика / поведение посетителей:")
+    if met is None or not met.latest_date:
+        parts.append("    данных нет: нельзя делать выводы о визитах, отказах и конверсиях")
+    else:
+        status_bits = []
+        if met.counter_status:
+            status_bits.append(f"status={met.counter_status}")
+        if met.counter_activity_status:
+            status_bits.append(f"activity={met.counter_activity_status}")
+        if met.counter_code_status:
+            status_bits.append(f"code_status={met.counter_code_status}")
+        if status_bits:
+            parts.append("    счётчик: " + ", ".join(status_bits))
+        # If the counter code isn't reporting back, every other Metrica
+        # number is meaningless («0 визитов» = «нет данных», not «нет
+        # трафика»). Spell this out explicitly so the LLM doesn't draw
+        # behavioral conclusions on garbage data.
+        if met.counter_code_status and met.counter_code_status != "CS_OK":
+            parts.append(
+                "    предупреждение: код Метрики на сайте не отвечает или не "
+                "установлен (статус «{status}»). «0 визитов» при таком "
+                "статусе означает «нет данных», НЕ «нет трафика». Не "
+                "делай выводов про отказы, конверсии, посадочные "
+                "страницы — данные недостоверны, пока счётчик не "
+                "починят.".format(status=met.counter_code_status)
+            )
+        parts.append(
+            f"    последние 7 дней до {_format_date(met.latest_date)}: "
+            f"{met.visits_7d} визитов, {met.pageviews_7d} просмотров"
+        )
+        if met.avg_bounce_rate is not None or met.avg_duration_sec is not None:
+            line = "    поведение:"
+            if met.avg_bounce_rate is not None:
+                line += f" отказы {_format_decimal_pct(met.avg_bounce_rate)}"
+            if met.avg_duration_sec is not None:
+                line += f", среднее время {met.avg_duration_sec:.0f} сек."
+            parts.append(line)
+        if met.visits_7d == 0:
+            parts.append(
+                "    правило интерпретации: визитов нет — не делай выводы "
+                "об отказах, качестве страниц или конверсиях",
+            )
+        if met.top_landing_pages:
+            parts.append("    топ посадочных по Метрике:")
+            for item in met.top_landing_pages[:6]:
+                line = (
+                    f"      - {item.get('url', '')}: "
+                    f"{item.get('visits', 0)} визитов, "
+                    f"{item.get('pageviews', 0)} просмотров"
+                )
+                if item.get("bounce_rate") is not None:
+                    line += f", отказы {_format_decimal_pct(item.get('bounce_rate'))}"
+                if item.get("avg_duration_sec") is not None:
+                    line += f", время {float(item.get('avg_duration_sec') or 0):.0f} сек."
+                if not item.get("mapped_page_id"):
+                    line += " (не сопоставлено с Page)"
+                parts.append(line)
+        if met.traffic_sources:
+            parts.append("    источники трафика:")
+            for item in met.traffic_sources[:6]:
+                parts.append(
+                    f"      - {item.get('source', '')}: "
+                    f"{item.get('visits', 0)} визитов, "
+                    f"{item.get('pageviews', 0)} просмотров",
+                )
+        if met.goals:
+            parts.append("    цели Метрики:")
+            for goal in met.goals[:8]:
+                line = (
+                    f"      - {goal.get('name') or goal.get('goal_id')}: "
+                    f"{goal.get('reaches', 0)} достижений, "
+                    f"{goal.get('target_visits', 0)} целевых визитов"
+                )
+                if goal.get("conversion_rate") is not None:
+                    line += f", конверсия {float(goal.get('conversion_rate') or 0):.2f}%"
+                parts.append(line)
 
     # Activity
     a = snap.activity
@@ -787,6 +902,42 @@ def _format_mode_block(mode: str) -> str:
     ])
 
 
+def _format_current_snapshot(snapshot: Any) -> str:
+    if not isinstance(snapshot, dict) or not snapshot:
+        return ""
+    prefix = (
+        "свежий снимок после ревью"
+        if snapshot.get("after_review")
+        else "последний браузерный снимок"
+    )
+    bits: list[str] = []
+    if snapshot.get("extracted_at"):
+        bits.append(str(snapshot.get("extracted_at")))
+    if snapshot.get("title"):
+        bits.append(f"title сейчас «{str(snapshot.get('title'))[:80]}»")
+    if snapshot.get("h1"):
+        bits.append(f"H1 сейчас «{str(snapshot.get('h1'))[:80]}»")
+    schema_types = snapshot.get("schema_types")
+    if isinstance(schema_types, list) and schema_types:
+        bits.append("schema сейчас: " + ", ".join(map(str, schema_types[:8])))
+    schema_issues = snapshot.get("schema_issue_codes")
+    if isinstance(schema_issues, list) and schema_issues:
+        bits.append(
+            "schema issues: " + ", ".join(map(str, schema_issues[:6])),
+        )
+    if snapshot.get("lcp_ms"):
+        bits.append(f"LCP {snapshot.get('lcp_ms')} мс")
+    if snapshot.get("js_error_count") is not None:
+        bits.append(f"JS errors {snapshot.get('js_error_count')}")
+    if snapshot.get("current_contains_after_text") is True:
+        bits.append("предложенный текст уже найден на странице")
+    if snapshot.get("current_contains_before_text") is False:
+        bits.append("старый текст из ревью уже не найден")
+    if snapshot.get("freshness_warning"):
+        bits.append("вывод: старое ревью, нужна перепроверка")
+    return f"{prefix}: " + "; ".join(bits[:8]) if bits else prefix
+
+
 def _format_dt(value: Any) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()
@@ -797,6 +948,13 @@ def _format_date(value: Any) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _format_decimal_pct(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "—"
 
 
 def _format_extra(extra: dict[str, Any] | None) -> str:

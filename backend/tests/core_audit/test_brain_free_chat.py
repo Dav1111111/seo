@@ -302,6 +302,55 @@ def test_user_message_marks_recommendations_as_full_list_when_uncapped() -> None
     assert "current h1" in msg
 
 
+def test_user_message_marks_old_review_when_fresh_snapshot_exists() -> None:
+    snap = _snap()
+    snap.review.recs_pending = 1
+    snap.review.recs_high_priority_pending = 1
+    snap.review.recs_with_fresh_snapshot_after_review = 1
+    snap.review.top_pending_recommendations = [
+        {
+            "rec_id": "1",
+            "priority": "high",
+            "category": "schema",
+            "url": "https://x/a",
+            "reasoning_ru": "Добавить Product",
+            "current_snapshot": {
+                "extracted_at": "2026-05-15T10:00:00+00:00",
+                "after_review": True,
+                "title": "Свежий title",
+                "h1": "Свежий H1",
+                "schema_types": ["TouristTrip", "Offer", "FAQPage"],
+                "schema_issue_codes": ["info:schema.tourist_trip.offer_hint"],
+                "lcp_ms": 3276,
+                "js_error_count": 0,
+                "freshness_warning": "latest_browser_snapshot_is_newer_than_review",
+            },
+        },
+    ]
+    snap.review.recommendation_groups = [
+        {
+            "priority": "high",
+            "category": "schema",
+            "count": 1,
+            "reasoning_sample": "Добавить Product",
+            "sample_urls": ["https://x/a"],
+            "fresh_snapshot_after_review_count": 1,
+        },
+    ]
+
+    msg = build_user_message(
+        domain="x", target_config={}, understanding={},
+        snap=snap, plan=_plan(), history=[],
+        new_message="это ещё актуально?",
+    )
+
+    assert "переданных рекомендаций со свежим браузерным снимком после ревью: 1" in msg
+    assert "их нельзя называть текущими проблемами без повторного ревью" in msg
+    assert "свежий снимок после ревью: 2026-05-15T10:00:00+00:00" in msg
+    assert "schema сейчас: TouristTrip, Offer, FAQPage" in msg
+    assert "вывод: старое ревью, нужна перепроверка" in msg
+
+
 def test_user_message_carries_examples_for_grounding() -> None:
     """Every section's sample_* fields surface so the LLM can quote
     real names instead of «один из спам-запросов»."""
@@ -690,3 +739,43 @@ def test_free_chat_rejects_empty_message() -> None:
             snap=_snap(), plan=_plan(), history=[],
             new_message="   ",
         )
+
+
+def test_user_message_warns_about_broken_metrica_counter() -> None:
+    """When counter_code_status is non-CS_OK, the user message must
+    include a clear warning telling the LLM that visits=0 means «нет
+    данных», not «нет трафика», and forbidding behavioral conclusions.
+
+    Reproduces audit 2026-05-15: chat answers were quoting «у тебя 0
+    визитов» as a fact even when the Metrica counter was reporting
+    CS_ERR_UNKNOWN (code not installed)."""
+    snap = _snap()
+    snap.metrica.latest_date = datetime(2026, 5, 10, tzinfo=timezone.utc).date()
+    snap.metrica.counter_code_status = "CS_ERR_UNKNOWN"
+    snap.metrica.visits_7d = 0
+
+    msg = build_user_message(
+        domain="x", target_config={}, understanding={},
+        snap=snap, plan=_plan(), history=[],
+        new_message="как трафик?",
+    )
+
+    # The exact status code lands in the context so the LLM can name it
+    # back if asked.
+    assert "CS_ERR_UNKNOWN" in msg or "код Метрики" in msg
+    # The warning makes explicit that this is «нет данных», not «нет трафика».
+    assert "нет данных" in msg.lower() or "не отвечает" in msg.lower()
+    # And explicitly forbids drawing conclusions from the broken
+    # counter's zeros.
+    assert "не делай" in msg.lower() or "недостоверн" in msg.lower()
+
+
+def test_system_prompt_carries_broken_metrica_rule() -> None:
+    """The behavioral rule must also live in SYSTEM_PROMPT so the LLM
+    knows what to do even when the warning line in the user message
+    happens to be paraphrased / truncated."""
+    prompt_lower = SYSTEM_PROMPT.lower()
+    # Mentions the broken-counter status family.
+    assert "cs_ok" in prompt_lower or "cs_err" in prompt_lower
+    # Instructs the model not to ground answers on Metrica numbers.
+    assert "недостоверн" in prompt_lower or "не ссылайся" in prompt_lower

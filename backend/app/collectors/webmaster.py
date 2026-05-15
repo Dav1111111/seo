@@ -369,7 +369,8 @@ class WebmasterCollector(BaseCollector):
                     pages_indexed=pages_ok,
                     extra={"http_4xx": pages_4xx, "http_5xx": pages_5xx},
                 ).on_conflict_do_update(
-                    index_elements=["site_id", "date", "metric_type", "dimension_id"],
+                    index_elements=["site_id", "date", "metric_type"],
+                    index_where=DailyMetric.dimension_id.is_(None),
                     set_={
                         "pages_indexed": pages_ok,
                         "extra": {"http_4xx": pages_4xx, "http_5xx": pages_5xx},
@@ -406,7 +407,8 @@ class WebmasterCollector(BaseCollector):
                     pages_in_search=app_count,
                     extra={"removed_from_search": rem_count},
                 ).on_conflict_do_update(
-                    index_elements=["site_id", "date", "metric_type", "dimension_id"],
+                    index_elements=["site_id", "date", "metric_type"],
+                    index_where=DailyMetric.dimension_id.is_(None),
                     set_={
                         "pages_in_search": app_count,
                         "extra": {"removed_from_search": rem_count},

@@ -111,7 +111,12 @@ async def _collect_metrica_for_site(site: dict) -> dict:
     )
     try:
         async with task_session() as db:
-            result = await collector.collect_and_store(db, site["id"], days_back=7)
+            result = await collector.collect_and_store(
+                db,
+                site["id"],
+                days_back=7,
+                site_domain=site.get("domain"),
+            )
         return result
     finally:
         await collector.close()
@@ -434,20 +439,56 @@ def crawl_all_sites_weekly(self):
 
 
 @celery_app.task(name="collect_site_metrica")
-def collect_site_metrica(site_id: str):
-    """Collect Metrica data for a specific site (for manual trigger)."""
+def collect_site_metrica(site_id: str, run_id: str | None = None):
+    """Collect Metrica data for a specific site (manual trigger).
+
+    Mirrors the `collect_site_webmaster` contract:
+      - `started` event when fetching begins,
+      - terminal `done` / `failed` / `skipped` event when finished.
+
+    A non-CS_OK `counter_code_status` is treated as `skipped` (счётчик
+    в обрыве — Метрика возвращает нули не потому что трафика нет, а
+    потому что код не установлен / не отвечает). Real exceptions are
+    `failed`. Otherwise `done`.
+    """
     from app.config import settings
+    from app.core_audit.activity import emit_terminal, log_event
 
     async def _run():
         async with task_session() as db:
             result = await db.execute(select(Site).where(Site.id == UUID(site_id)))
             site = result.scalar_one_or_none()
             if not site:
-                return {"error": "Site not found"}
+                await emit_terminal(
+                    db, site_id, "metrica_collect", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "metrica_collect",
+                    "error": "Site not found",
+                }
 
             counter_id = site.yandex_metrica_counter_id or settings.YANDEX_METRICA_COUNTER_ID
             if not counter_id:
-                return {"status": "skipped", "reason": "no counter_id"}
+                await emit_terminal(
+                    db, site_id, "metrica_collect", "skipped",
+                    "Счётчик Метрики не привязан к сайту.",
+                    extra={"reason": "no counter_id"},
+                    run_id=run_id,
+                )
+                return {
+                    "status": "skipped",
+                    "stage": "metrica_collect",
+                    "reason": "no counter_id",
+                }
+
+            await log_event(
+                db, site_id, "metrica_collect", "started",
+                "Тяну данные из Яндекс.Метрики…",
+                run_id=run_id,
+            )
 
             collector = MetricaCollector(
                 oauth_token=_site_oauth_token(
@@ -457,9 +498,68 @@ def collect_site_metrica(site_id: str):
                 counter_id=counter_id,
             )
             try:
-                return await collector.collect_and_store(db, site.id, days_back=7)
+                out = await collector.collect_and_store(
+                    db,
+                    site.id,
+                    days_back=7,
+                    site_domain=site.domain,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await emit_terminal(
+                    db, site_id, "metrica_collect", "failed",
+                    f"Метрика ответила ошибкой: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "metrica_collect",
+                    "error": str(exc),
+                }
             finally:
                 await collector.close()
+
+            # Counter-status check: non-CS_OK means the JS code isn't
+            # firing on the site, so `visits=0` is «no data», not «no
+            # traffic». Treat as `skipped` with a human-readable hint
+            # so the owner fixes the install before retrying.
+            counter_info = out.get("counter") if isinstance(out, dict) else None
+            code_status = (
+                counter_info.get("counter_code_status") if isinstance(counter_info, dict) else None
+            )
+            stats_summary = {
+                "traffic_days": int(out.get("traffic_days", 0) or 0) if isinstance(out, dict) else 0,
+                "landing_pages": int(out.get("landing_pages", 0) or 0) if isinstance(out, dict) else 0,
+                "traffic_sources": int(out.get("traffic_sources", 0) or 0) if isinstance(out, dict) else 0,
+                "goals": int(out.get("goals", 0) or 0) if isinstance(out, dict) else 0,
+                "counter_code_status": code_status,
+            }
+            if code_status and code_status != "CS_OK":
+                await emit_terminal(
+                    db, site_id, "metrica_collect", "skipped",
+                    "Счётчик Метрики в обрыве — проверьте установку кода "
+                    f"на сайте (статус «{code_status}»).",
+                    extra=stats_summary,
+                    run_id=run_id,
+                )
+                return {
+                    "status": "skipped",
+                    "stage": "metrica_collect",
+                    "reason": "counter_code_status",
+                    "counter_code_status": code_status,
+                    **stats_summary,
+                }
+
+            await emit_terminal(
+                db, site_id, "metrica_collect", "done",
+                (
+                    f"Метрика: {stats_summary['traffic_days']} дней трафика, "
+                    f"{stats_summary['landing_pages']} посадочных, "
+                    f"{stats_summary['goals']} целей."
+                ),
+                extra=stats_summary,
+                run_id=run_id,
+            )
+            return out
 
     return _run_async(_run())
 

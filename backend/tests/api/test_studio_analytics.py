@@ -27,6 +27,7 @@ from app.api.v1.studio import (
     get_analytics,
 )
 from app.models.daily_metric import DailyMetric
+from app.models.page import Page
 from app.models.site import Site
 
 
@@ -191,3 +192,82 @@ async def test_get_analytics_respects_days_window(
     resp = await get_analytics(site_id=test_site.id, db=db, days=30)
     assert resp.series == []
     assert resp.totals.indexed_latest is None
+
+
+async def test_get_analytics_surfaces_metrica_drilldowns(
+    db: AsyncSession, test_site: Site,
+) -> None:
+    """Metrica is useful only if the UI/assistant can see landing pages,
+    traffic sources and goals, not just site-wide visit totals."""
+    today = date.today()
+    page = Page(
+        site_id=test_site.id,
+        url="https://example.com/tours/abhazia",
+        path="/tours/abhazia",
+        title="Абхазия",
+    )
+    db.add(page)
+    await db.flush()
+
+    db.add_all([
+        DailyMetric(
+            site_id=test_site.id,
+            date=today,
+            metric_type="site_traffic",
+            dimension_id=None,
+            visits=12,
+            pageviews=24,
+            extra={
+                "counter_status": "Active",
+                "counter_activity_status": "low",
+                "counter_code_status": "CS_OK",
+            },
+        ),
+        DailyMetric(
+            site_id=test_site.id,
+            date=today,
+            metric_type="landing_page_traffic",
+            dimension_id=page.id,
+            visits=10,
+            pageviews=20,
+            bounce_rate=0.25,
+            avg_duration=80,
+            extra={"landing_url": page.url, "mapped_page_id": str(page.id)},
+        ),
+        DailyMetric(
+            site_id=test_site.id,
+            date=today,
+            metric_type="traffic_source",
+            dimension_id=uuid.uuid4(),
+            visits=8,
+            pageviews=16,
+            extra={"source": "Переходы из поисковых систем"},
+        ),
+        DailyMetric(
+            site_id=test_site.id,
+            date=today,
+            metric_type="goal_conversion",
+            dimension_id=uuid.uuid4(),
+            visits=2,
+            extra={
+                "goal_id": "123",
+                "name": "Заявка",
+                "type": "action",
+                "reaches": 3,
+                "target_visits": 2,
+                "conversion_rate": 16.67,
+            },
+        ),
+    ])
+    await db.flush()
+
+    resp = await get_analytics(site_id=test_site.id, db=db, days=30)
+
+    assert resp.metrica_status.counter_status == "Active"
+    assert resp.metrica_status.has_recent_visits is True
+    assert resp.metrica_top_pages[0].page_id == str(page.id)
+    assert resp.metrica_top_pages[0].mapped_to_page is True
+    assert resp.metrica_top_pages[0].bounce_rate == pytest.approx(0.25)
+    assert resp.metrica_sources[0].source == "Переходы из поисковых систем"
+    assert resp.metrica_goals[0].name == "Заявка"
+    assert resp.metrica_goals[0].reaches == 3

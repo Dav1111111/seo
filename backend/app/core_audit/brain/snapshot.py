@@ -11,7 +11,7 @@ rather than «no problem».
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -23,6 +23,7 @@ from app.models.analysis_event import AnalysisEvent
 from app.models.daily_metric import DailyMetric
 from app.models.outcome_snapshot import OutcomeSnapshot
 from app.models.page import Page
+from app.models.page_deep_extract import PageDeepExtract
 from app.models.search_query import SearchQuery
 from app.models.site import Site
 
@@ -137,6 +138,10 @@ class ReviewFacts:
     # capped by REVIEW_RECOMMENDATIONS_CONTEXT_LIMIT and the formatter
     # states that explicitly.
     top_pending_recommendations: list[dict[str, Any]] = None  # type: ignore[assignment]
+    # Pending recommendations whose latest browser-rendered snapshot was
+    # taken after the review. These are still useful, but they must be
+    # phrased as "needs re-check", not as guaranteed current defects.
+    recs_with_fresh_snapshot_after_review: int = 0
     # Same recommendations re-grouped by (category, priority, problem
     # signature) so the assistant can talk about TOPICS (e.g. "title
     # too long on 12 pages") instead of repeating the same reasoning
@@ -208,6 +213,22 @@ class BehavioralFacts:
 
 
 @dataclass
+class MetricaFacts:
+    latest_date: date | None = None
+    visits_7d: int = 0
+    pageviews_7d: int = 0
+    avg_bounce_rate: float | None = None
+    avg_duration_sec: float | None = None
+    counter_status: str | None = None
+    counter_activity_status: str | None = None
+    counter_code_status: str | None = None
+    counter_site: Any | None = None
+    top_landing_pages: list[dict[str, Any]] = field(default_factory=list)
+    traffic_sources: list[dict[str, Any]] = field(default_factory=list)
+    goals: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class BrainSnapshot:
     site_id: str
     domain: str
@@ -228,6 +249,7 @@ class BrainSnapshot:
     )
     competitors: CompetitorFacts = field(default_factory=CompetitorFacts)
     behavioral: BehavioralFacts = field(default_factory=BehavioralFacts)
+    metrica: MetricaFacts = field(default_factory=MetricaFacts)
     # robots.txt audit signals — populated from the latest
     # `analysis_events` row with stage="robots_audit". Defaults are
     # «never ran, assume fine»: 0 critical issues, valid_for_yandex=True.
@@ -676,6 +698,35 @@ async def _review(db: AsyncSession, site_id: UUID) -> ReviewFacts:
         .where(latest_completed_reviews.c.rn == 1)
     )
 
+    latest_deep_extracts = (
+        select(
+            PageDeepExtract.id.label("extract_id"),
+            PageDeepExtract.page_id.label("page_id"),
+            PageDeepExtract.extracted_at.label("extracted_at"),
+            PageDeepExtract.title.label("title"),
+            PageDeepExtract.h1.label("h1"),
+            PageDeepExtract.meta_description.label("meta_description"),
+            PageDeepExtract.full_text.label("full_text"),
+            PageDeepExtract.performance.label("performance"),
+            PageDeepExtract.js_errors.label("js_errors"),
+            PageDeepExtract.schema_blocks.label("schema_blocks"),
+            func.row_number().over(
+                partition_by=PageDeepExtract.page_id,
+                order_by=(
+                    PageDeepExtract.extracted_at.desc(),
+                    PageDeepExtract.id.desc(),
+                ),
+            ).label("rn"),
+        )
+        .where(
+            PageDeepExtract.site_id == site_id,
+            PageDeepExtract.page_id.is_not(None),
+            PageDeepExtract.status == "completed",
+            PageDeepExtract.is_competitor.is_(False),
+        )
+        .subquery()
+    )
+
     # Pages with at least one current completed review.
     with_review = (await db.execute(
         select(func.count(func.distinct(latest_completed_reviews.c.page_id))).where(
@@ -738,9 +789,24 @@ async def _review(db: AsyncSession, site_id: UUID) -> ReviewFacts:
             PageReviewRecommendation.impact_score,
             PageReviewRecommendation.confidence_score,
             PageReviewRecommendation.ease_score,
+            PageReview.reviewed_at,
+            latest_deep_extracts.c.extract_id,
+            latest_deep_extracts.c.extracted_at,
+            latest_deep_extracts.c.title,
+            latest_deep_extracts.c.h1,
+            latest_deep_extracts.c.meta_description,
+            latest_deep_extracts.c.full_text,
+            latest_deep_extracts.c.performance,
+            latest_deep_extracts.c.js_errors,
+            latest_deep_extracts.c.schema_blocks,
         )
         .join(PageReview, PageReview.id == PageReviewRecommendation.review_id)
         .join(Page, Page.id == PageReview.page_id)
+        .outerjoin(
+            latest_deep_extracts,
+            (latest_deep_extracts.c.page_id == PageReview.page_id)
+            & (latest_deep_extracts.c.rn == 1),
+        )
         .where(
             PageReviewRecommendation.site_id == site_id,
             PageReviewRecommendation.user_status == "pending",
@@ -769,9 +835,31 @@ async def _review(db: AsyncSession, site_id: UUID) -> ReviewFacts:
             "impact_score": float(r[10]) if r[10] is not None else None,
             "confidence_score": float(r[11]) if r[11] is not None else None,
             "ease_score": float(r[12]) if r[12] is not None else None,
+            "current_snapshot": _current_snapshot_for_recommendation(
+                url=r[7],
+                category=r[1],
+                source_finding_id=r[9],
+                before_text=r[5],
+                after_text=r[6],
+                reviewed_at=r[13],
+                extract_id=r[14],
+                extracted_at=r[15],
+                title=r[16],
+                h1=r[17],
+                meta_description=r[18],
+                full_text=r[19],
+                performance=r[20],
+                js_errors=r[21],
+                schema_blocks=r[22],
+            ),
         }
         for r in top_rec_rows
     ]
+    recs_with_fresh_snapshot = sum(
+        1
+        for rec in top_recs
+        if (rec.get("current_snapshot") or {}).get("after_review")
+    )
 
     return ReviewFacts(
         pages_with_review=with_review,
@@ -780,6 +868,7 @@ async def _review(db: AsyncSession, site_id: UUID) -> ReviewFacts:
         recs_high_priority_pending=recs_high,
         sample_unreviewed_urls=sample_unreviewed,
         top_pending_recommendations=top_recs,
+        recs_with_fresh_snapshot_after_review=recs_with_fresh_snapshot,
         recommendation_groups=_group_recommendations(top_recs),
     )
 
@@ -836,9 +925,12 @@ def _group_recommendations(
                 "reasoning_sample": (r.get("reasoning_ru") or "")[:200],
                 "after_sample": (r.get("after_text") or "")[:200],
                 "rec_ids": [],
+                "fresh_snapshot_after_review_count": 0,
             }
             buckets[key] = b
         b["count"] += 1
+        if (r.get("current_snapshot") or {}).get("after_review"):
+            b["fresh_snapshot_after_review_count"] += 1
         url = r.get("url")
         if url and len(b["sample_urls"]) < 5 and url not in b["sample_urls"]:
             b["sample_urls"].append(url)
@@ -855,6 +947,193 @@ def _group_recommendations(
         ),
     )
     return groups
+
+
+def _current_snapshot_for_recommendation(
+    *,
+    url: str | None,
+    category: str | None,
+    source_finding_id: str | None,
+    before_text: str | None,
+    after_text: str | None,
+    reviewed_at: datetime | None,
+    extract_id: UUID | None,
+    extracted_at: datetime | None,
+    title: str | None,
+    h1: str | None,
+    meta_description: str | None,
+    full_text: str | None,
+    performance: dict[str, Any] | None,
+    js_errors: list[dict[str, Any]] | None,
+    schema_blocks: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Compact current-page overlay for chat recommendations.
+
+    Page reviews can be older than the latest Playwright snapshot. In
+    that case the assistant must not present the recommendation as a
+    guaranteed current defect. This overlay gives it fresh facts without
+    dumping the whole rendered page into every chat turn.
+    """
+    if extract_id is None or extracted_at is None:
+        return None
+
+    after_review = _is_after(extracted_at, reviewed_at)
+    current_text = _field_for_category(
+        category=category,
+        title=title,
+        h1=h1,
+        meta_description=meta_description,
+        full_text=full_text,
+    )
+    source = (source_finding_id or "").lower()
+    cat = (category or "").lower()
+    needs_schema = cat == "schema" or "schema" in source
+    schema_audit = (
+        _schema_audit_digest(
+            schema_blocks=schema_blocks,
+            full_text=full_text,
+            url=url,
+            title=title,
+            h1=h1,
+        )
+        if needs_schema
+        else None
+    )
+
+    out: dict[str, Any] = {
+        "extract_id": str(extract_id),
+        "extracted_at": extracted_at.isoformat(),
+        "after_review": after_review,
+        "title": _trim(title, 140),
+        "h1": _trim(h1, 140),
+        "lcp_ms": _safe_int((performance or {}).get("lcp")),
+        "js_error_count": len(js_errors or []),
+    }
+
+    before_present = _contains(current_text, before_text)
+    after_present = _contains(current_text, after_text)
+    if before_present is not None:
+        out["current_contains_before_text"] = before_present
+    if after_present is not None:
+        out["current_contains_after_text"] = after_present
+
+    if schema_audit:
+        out.update(schema_audit)
+
+    if after_review:
+        out["freshness_warning"] = (
+            "latest_browser_snapshot_is_newer_than_review"
+        )
+    return out
+
+
+def _field_for_category(
+    *,
+    category: str | None,
+    title: str | None,
+    h1: str | None,
+    meta_description: str | None,
+    full_text: str | None,
+) -> str:
+    cat = (category or "").lower()
+    if cat == "title":
+        return title or ""
+    if cat in {"h1", "h1_structure"}:
+        return h1 or ""
+    if cat in {"meta", "meta_description"}:
+        return meta_description or ""
+    return full_text or ""
+
+
+def _schema_audit_digest(
+    *,
+    schema_blocks: list[dict[str, Any]] | None,
+    full_text: str | None,
+    url: str | None,
+    title: str | None,
+    h1: str | None,
+) -> dict[str, Any]:
+    try:
+        from app.core_audit.schema_audit import audit_schema
+
+        audit = audit_schema(
+            schema_blocks=schema_blocks,
+            full_text=full_text,
+            url=url,
+            title=title,
+            h1=h1,
+        )
+        payload = audit.to_dict()
+        issues = payload.get("issues") or []
+        issue_codes = []
+        for item in issues:
+            if not isinstance(item, dict):
+                continue
+            code = item.get("code")
+            severity = item.get("severity")
+            if code:
+                issue_codes.append(f"{severity}:{code}" if severity else str(code))
+        return {
+            "schema_types": list(payload.get("detected_types") or [])[:12],
+            "schema_issue_codes": issue_codes[:12],
+            "schema_summary": _trim(payload.get("summary_ru"), 180),
+        }
+    except Exception:  # noqa: BLE001 — chat must survive validator bugs
+        return {
+            "schema_types": _extract_schema_types(schema_blocks)[:12],
+        }
+
+
+def _extract_schema_types(schema_blocks: Any) -> list[str]:
+    out: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            typ = value.get("@type")
+            if isinstance(typ, str):
+                out.append(typ.rsplit("/", 1)[-1])
+            elif isinstance(typ, list):
+                for item in typ:
+                    if isinstance(item, str):
+                        out.append(item.rsplit("/", 1)[-1])
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    walk(schema_blocks or [])
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in out:
+        if item and item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+
+def _contains(haystack: str | None, needle: str | None) -> bool | None:
+    norm_needle = _normalise_text(needle)
+    if len(norm_needle) < 8:
+        return None
+    norm_haystack = _normalise_text(haystack)
+    return norm_needle in norm_haystack
+
+
+def _normalise_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(str(value).replace("ё", "е").lower().split())
+
+
+def _is_after(left: datetime, right: datetime | None) -> bool:
+    if right is None:
+        return False
+    if left.tzinfo is None:
+        left = left.replace(tzinfo=timezone.utc)
+    if right.tzinfo is None:
+        right = right.replace(tzinfo=timezone.utc)
+    return left > right
 
 
 def _missing_landings(target_config: dict[str, Any] | None) -> MissingLandingsFacts:
@@ -1221,6 +1500,168 @@ async def _behavioral(db: AsyncSession, site_id: UUID) -> BehavioralFacts:
     )
 
 
+async def _metrica(db: AsyncSession, site_id: UUID) -> MetricaFacts:
+    """Visitor-behaviour facts from Yandex Metrica.
+
+    This stays deterministic: raw collector rows in, compact facts out.
+    The LLM may interpret, but cannot invent landing pages, sources or goals.
+    """
+    cutoff = date.today() - timedelta(days=7)
+
+    traffic_rows = (await db.execute(
+        select(DailyMetric)
+        .where(
+            DailyMetric.site_id == site_id,
+            DailyMetric.metric_type == "site_traffic",
+            DailyMetric.date >= cutoff,
+            DailyMetric.dimension_id.is_(None),
+        )
+        .order_by(
+            DailyMetric.date.desc(),
+            DailyMetric.updated_at.desc(),
+            DailyMetric.id.desc(),
+        )
+        .limit(14)
+    )).scalars().all()
+
+    by_date: dict[date, DailyMetric] = {}
+    for metric in traffic_rows:
+        if metric.date not in by_date:
+            by_date[metric.date] = metric
+
+    latest_date = max(by_date.keys()) if by_date else None
+    ordered_traffic = [by_date[d] for d in sorted(by_date.keys())]
+    visits = sum(int(m.visits or 0) for m in ordered_traffic)
+    pageviews = sum(int(m.pageviews or 0) for m in ordered_traffic)
+    bounce_values = [
+        float(m.bounce_rate)
+        for m in ordered_traffic
+        if m.bounce_rate is not None
+    ]
+    duration_values = [
+        float(m.avg_duration)
+        for m in ordered_traffic
+        if m.avg_duration is not None
+    ]
+    latest_extra = {}
+    if latest_date and isinstance(by_date[latest_date].extra, dict):
+        latest_extra = by_date[latest_date].extra
+
+    latest_landing_date = (await db.execute(
+        select(func.max(DailyMetric.date)).where(
+            DailyMetric.site_id == site_id,
+            DailyMetric.metric_type == "landing_page_traffic",
+        )
+    )).scalar_one_or_none()
+    top_landing_pages: list[dict[str, Any]] = []
+    if latest_landing_date:
+        landing_rows = (await db.execute(
+            select(DailyMetric, Page.url.label("page_url"))
+            .outerjoin(Page, Page.id == DailyMetric.dimension_id)
+            .where(
+                DailyMetric.site_id == site_id,
+                DailyMetric.metric_type == "landing_page_traffic",
+                DailyMetric.date == latest_landing_date,
+            )
+            .order_by(desc(DailyMetric.visits), desc(DailyMetric.pageviews))
+            .limit(8)
+        )).all()
+        for metric, page_url in landing_rows:
+            extra = metric.extra if isinstance(metric.extra, dict) else {}
+            top_landing_pages.append({
+                "url": page_url
+                or extra.get("landing_url")
+                or extra.get("normalized_url")
+                or "",
+                "visits": int(metric.visits or 0),
+                "pageviews": int(metric.pageviews or 0),
+                "bounce_rate": (
+                    float(metric.bounce_rate)
+                    if metric.bounce_rate is not None else None
+                ),
+                "avg_duration_sec": (
+                    float(metric.avg_duration)
+                    if metric.avg_duration is not None else None
+                ),
+                "mapped_page_id": extra.get("mapped_page_id"),
+            })
+
+    latest_source_date = (await db.execute(
+        select(func.max(DailyMetric.date)).where(
+            DailyMetric.site_id == site_id,
+            DailyMetric.metric_type == "traffic_source",
+        )
+    )).scalar_one_or_none()
+    traffic_sources: list[dict[str, Any]] = []
+    if latest_source_date:
+        source_rows = (await db.execute(
+            select(DailyMetric)
+            .where(
+                DailyMetric.site_id == site_id,
+                DailyMetric.metric_type == "traffic_source",
+                DailyMetric.date == latest_source_date,
+            )
+            .order_by(desc(DailyMetric.visits), desc(DailyMetric.pageviews))
+            .limit(8)
+        )).scalars().all()
+        for metric in source_rows:
+            extra = metric.extra if isinstance(metric.extra, dict) else {}
+            traffic_sources.append({
+                "source": extra.get("source") or extra.get("source_id") or "",
+                "visits": int(metric.visits or 0),
+                "pageviews": int(metric.pageviews or 0),
+            })
+
+    latest_goal_date = (await db.execute(
+        select(func.max(DailyMetric.date)).where(
+            DailyMetric.site_id == site_id,
+            DailyMetric.metric_type == "goal_conversion",
+        )
+    )).scalar_one_or_none()
+    goals: list[dict[str, Any]] = []
+    if latest_goal_date:
+        goal_rows = (await db.execute(
+            select(DailyMetric)
+            .where(
+                DailyMetric.site_id == site_id,
+                DailyMetric.metric_type == "goal_conversion",
+                DailyMetric.date == latest_goal_date,
+            )
+            .order_by(desc(DailyMetric.visits), desc(DailyMetric.updated_at))
+            .limit(12)
+        )).scalars().all()
+        for metric in goal_rows:
+            extra = metric.extra if isinstance(metric.extra, dict) else {}
+            goals.append({
+                "goal_id": extra.get("goal_id") or str(metric.dimension_id),
+                "name": extra.get("name"),
+                "type": extra.get("type"),
+                "reaches": int(extra.get("reaches") or 0),
+                "target_visits": int(extra.get("target_visits") or metric.visits or 0),
+                "conversion_rate": extra.get("conversion_rate"),
+            })
+
+    return MetricaFacts(
+        latest_date=latest_date,
+        visits_7d=visits,
+        pageviews_7d=pageviews,
+        avg_bounce_rate=(
+            sum(bounce_values) / len(bounce_values) if bounce_values else None
+        ),
+        avg_duration_sec=(
+            sum(duration_values) / len(duration_values)
+            if duration_values else None
+        ),
+        counter_status=latest_extra.get("counter_status"),
+        counter_activity_status=latest_extra.get("counter_activity_status"),
+        counter_code_status=latest_extra.get("counter_code_status"),
+        counter_site=latest_extra.get("counter_site"),
+        top_landing_pages=top_landing_pages,
+        traffic_sources=traffic_sources,
+        goals=goals,
+    )
+
+
 async def _robots_audit_facts(
     db: AsyncSession, site_id: UUID,
 ) -> tuple[int, bool]:
@@ -1286,6 +1727,7 @@ async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
         list(site.competitor_domains or []),
     )
     behavioral = await _behavioral(db, site_id)
+    metrica = await _metrica(db, site_id)
     robots_critical, robots_valid = await _robots_audit_facts(db, site_id)
 
     return BrainSnapshot(
@@ -1300,6 +1742,7 @@ async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
         activity=activity,
         competitors=competitors,
         behavioral=behavioral,
+        metrica=metrica,
         robots_critical_issues=robots_critical,
         robots_valid_for_yandex=robots_valid,
     )
@@ -1315,6 +1758,7 @@ __all__ = [
     "ActivityFacts",
     "CompetitorFacts",
     "BehavioralFacts",
+    "MetricaFacts",
     "REVIEW_RECOMMENDATIONS_CONTEXT_LIMIT",
     "build_snapshot",
 ]

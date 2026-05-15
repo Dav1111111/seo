@@ -1,6 +1,16 @@
 import uuid
 from datetime import date
-from sqlalchemy import String, Integer, Numeric, Date, ForeignKey, BigInteger, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base, TimestampMixin
@@ -8,7 +18,17 @@ from app.database import Base, TimestampMixin
 
 class DailyMetric(Base, TimestampMixin):
     __tablename__ = "daily_metrics"
-    __table_args__ = (UniqueConstraint("site_id", "date", "metric_type", "dimension_id"),)
+    __table_args__ = (
+        UniqueConstraint("site_id", "date", "metric_type", "dimension_id"),
+        Index(
+            "uq_daily_metrics_site_date_type_null_dim",
+            "site_id",
+            "date",
+            "metric_type",
+            unique=True,
+            postgresql_where=text("dimension_id IS NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     site_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sites.id"), index=True)

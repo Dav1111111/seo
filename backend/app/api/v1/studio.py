@@ -2034,6 +2034,40 @@ class AnalyticsTotals(BaseModel):
     days_with_traffic_data: int = 0
 
 
+class MetricaTopPage(BaseModel):
+    page_id: str | None = None
+    url: str
+    visits: int = 0
+    pageviews: int = 0
+    bounce_rate: float | None = None
+    avg_duration_sec: float | None = None
+    mapped_to_page: bool = False
+
+
+class MetricaTrafficSource(BaseModel):
+    source: str
+    visits: int = 0
+    pageviews: int = 0
+
+
+class MetricaGoalSummary(BaseModel):
+    goal_id: str
+    name: str | None = None
+    goal_type: str | None = None
+    reaches: int = 0
+    target_visits: int = 0
+    conversion_rate: float | None = None
+
+
+class MetricaStatus(BaseModel):
+    counter_status: str | None = None
+    counter_activity_status: str | None = None
+    counter_code_status: str | None = None
+    counter_site: Any | None = None
+    has_recent_visits: bool = False
+    warning: str | None = None
+
+
 class AnalyticsResponse(BaseModel):
     site_id: str
     days: int
@@ -2042,6 +2076,10 @@ class AnalyticsResponse(BaseModel):
     # Honest lag indicators — UI shows "Webmaster данные с лагом 5 дней"
     webmaster_latest_date: str | None
     metrica_latest_date: str | None
+    metrica_status: MetricaStatus = Field(default_factory=MetricaStatus)
+    metrica_top_pages: list[MetricaTopPage] = Field(default_factory=list)
+    metrica_sources: list[MetricaTrafficSource] = Field(default_factory=list)
+    metrica_goals: list[MetricaGoalSummary] = Field(default_factory=list)
 
 
 ANALYTICS_DEFAULT_DAYS = 90
@@ -2086,36 +2124,66 @@ async def get_analytics(
     # MetricaCollector writes visits/pageviews/bounce_rate/avg_duration
     # into the dedicated columns (see collectors/metrica.py:131-148);
     # those columns are the canonical source.
-    traffic_rows = (await db.execute(
+    traffic_ranked = (
         select(
-            DailyMetric.date,
-            DailyMetric.visits,
-            DailyMetric.pageviews,
-            DailyMetric.bounce_rate,
-            DailyMetric.avg_duration,
+            DailyMetric.date.label("date"),
+            DailyMetric.visits.label("visits"),
+            DailyMetric.pageviews.label("pageviews"),
+            DailyMetric.bounce_rate.label("bounce_rate"),
+            DailyMetric.avg_duration.label("avg_duration"),
+            DailyMetric.extra.label("extra"),
+            sa_func.row_number()
+            .over(
+                partition_by=DailyMetric.date,
+                order_by=(DailyMetric.updated_at.desc(), DailyMetric.id.desc()),
+            )
+            .label("rn"),
         )
         .where(
             DailyMetric.site_id == site.id,
             DailyMetric.metric_type == "site_traffic",
             DailyMetric.date >= cutoff,
+            DailyMetric.dimension_id.is_(None),
         )
-        .order_by(DailyMetric.date),
+    ).subquery()
+    traffic_rows = (await db.execute(
+        select(
+            traffic_ranked.c.date,
+            traffic_ranked.c.visits,
+            traffic_ranked.c.pageviews,
+            traffic_ranked.c.bounce_rate,
+            traffic_ranked.c.avg_duration,
+            traffic_ranked.c.extra,
+        )
+        .where(traffic_ranked.c.rn == 1)
+        .order_by(traffic_ranked.c.date),
     )).all()
 
     # 3. Webmaster indexing — daily snapshot of pages_indexed.
     # webmaster.py:286-299 writes the count into the dedicated
     # `pages_indexed` column; `impressions` is 0 for these rows.
-    indexing_rows = (await db.execute(
+    indexing_ranked = (
         select(
-            DailyMetric.date,
-            DailyMetric.pages_indexed,
+            DailyMetric.date.label("date"),
+            DailyMetric.pages_indexed.label("pages_indexed"),
+            sa_func.row_number()
+            .over(
+                partition_by=DailyMetric.date,
+                order_by=(DailyMetric.updated_at.desc(), DailyMetric.id.desc()),
+            )
+            .label("rn"),
         )
         .where(
             DailyMetric.site_id == site.id,
             DailyMetric.metric_type == "indexing",
             DailyMetric.date >= cutoff,
+            DailyMetric.dimension_id.is_(None),
         )
-        .order_by(DailyMetric.date),
+    ).subquery()
+    indexing_rows = (await db.execute(
+        select(indexing_ranked.c.date, indexing_ranked.c.pages_indexed)
+        .where(indexing_ranked.c.rn == 1)
+        .order_by(indexing_ranked.c.date),
     )).all()
 
     # Merge by date.
@@ -2129,6 +2197,7 @@ async def get_analytics(
 
     webmaster_latest: str | None = None
     metrica_latest: str | None = None
+    latest_metrica_extra: dict[str, Any] = {}
 
     for row in search_rows:
         bucket = _ensure(row.date)
@@ -2150,6 +2219,8 @@ async def get_analytics(
         if row.avg_duration is not None:
             bucket["avg_duration_sec"] = float(row.avg_duration)
         metrica_latest = max(metrica_latest or "", row.date.isoformat())
+        if isinstance(row.extra, dict):
+            latest_metrica_extra = row.extra
 
     for row in indexing_rows:
         bucket = _ensure(row.date)
@@ -2175,6 +2246,137 @@ async def get_analytics(
     days_with_search = sum(1 for p in series if p.impressions is not None)
     days_with_traffic = sum(1 for p in series if p.visits is not None)
 
+    # 4. Metrica drilldowns — latest aggregate window only.
+    latest_landing_date = (await db.execute(
+        select(sa_func.max(DailyMetric.date)).where(
+            DailyMetric.site_id == site.id,
+            DailyMetric.metric_type == "landing_page_traffic",
+            DailyMetric.date >= cutoff,
+        )
+    )).scalar_one_or_none()
+    top_pages: list[MetricaTopPage] = []
+    if latest_landing_date:
+        landing_rows = (await db.execute(
+            select(
+                DailyMetric,
+                Page.id.label("page_id"),
+                Page.url.label("page_url"),
+            )
+            .outerjoin(Page, Page.id == DailyMetric.dimension_id)
+            .where(
+                DailyMetric.site_id == site.id,
+                DailyMetric.metric_type == "landing_page_traffic",
+                DailyMetric.date == latest_landing_date,
+            )
+            .order_by(desc(DailyMetric.visits), desc(DailyMetric.pageviews))
+            .limit(10)
+        )).all()
+        for metric, page_id, page_url in landing_rows:
+            extra = metric.extra if isinstance(metric.extra, dict) else {}
+            url = str(
+                page_url
+                or extra.get("landing_url")
+                or extra.get("normalized_url")
+                or ""
+            )
+            top_pages.append(MetricaTopPage(
+                page_id=str(page_id or extra.get("mapped_page_id") or "") or None,
+                url=url,
+                visits=int(metric.visits or 0),
+                pageviews=int(metric.pageviews or 0),
+                bounce_rate=(
+                    float(metric.bounce_rate)
+                    if metric.bounce_rate is not None else None
+                ),
+                avg_duration_sec=(
+                    float(metric.avg_duration)
+                    if metric.avg_duration is not None else None
+                ),
+                mapped_to_page=bool(page_id or extra.get("mapped_page_id")),
+            ))
+
+    latest_source_date = (await db.execute(
+        select(sa_func.max(DailyMetric.date)).where(
+            DailyMetric.site_id == site.id,
+            DailyMetric.metric_type == "traffic_source",
+            DailyMetric.date >= cutoff,
+        )
+    )).scalar_one_or_none()
+    sources: list[MetricaTrafficSource] = []
+    if latest_source_date:
+        source_rows = (await db.execute(
+            select(DailyMetric)
+            .where(
+                DailyMetric.site_id == site.id,
+                DailyMetric.metric_type == "traffic_source",
+                DailyMetric.date == latest_source_date,
+            )
+            .order_by(desc(DailyMetric.visits), desc(DailyMetric.pageviews))
+            .limit(10)
+        )).scalars().all()
+        for metric in source_rows:
+            extra = metric.extra if isinstance(metric.extra, dict) else {}
+            sources.append(MetricaTrafficSource(
+                source=str(extra.get("source") or extra.get("source_id") or "unknown"),
+                visits=int(metric.visits or 0),
+                pageviews=int(metric.pageviews or 0),
+            ))
+
+    latest_goal_date = (await db.execute(
+        select(sa_func.max(DailyMetric.date)).where(
+            DailyMetric.site_id == site.id,
+            DailyMetric.metric_type == "goal_conversion",
+            DailyMetric.date >= cutoff,
+        )
+    )).scalar_one_or_none()
+    goals: list[MetricaGoalSummary] = []
+    if latest_goal_date:
+        goal_rows = (await db.execute(
+            select(DailyMetric)
+            .where(
+                DailyMetric.site_id == site.id,
+                DailyMetric.metric_type == "goal_conversion",
+                DailyMetric.date == latest_goal_date,
+            )
+            .order_by(desc(DailyMetric.visits), desc(DailyMetric.updated_at))
+            .limit(20)
+        )).scalars().all()
+        for metric in goal_rows:
+            extra = metric.extra if isinstance(metric.extra, dict) else {}
+            goals.append(MetricaGoalSummary(
+                goal_id=str(extra.get("goal_id") or metric.dimension_id),
+                name=extra.get("name"),
+                goal_type=extra.get("type"),
+                reaches=int(extra.get("reaches") or 0),
+                target_visits=int(extra.get("target_visits") or metric.visits or 0),
+                conversion_rate=(
+                    float(extra["conversion_rate"])
+                    if extra.get("conversion_rate") is not None else None
+                ),
+            ))
+
+    warnings: list[str] = []
+    code_status = latest_metrica_extra.get("counter_code_status")
+    if code_status and code_status != "CS_OK":
+        warnings.append(
+            f"Статус кода счётчика: {code_status}; проверь, что код "
+            "Метрики реально установлен на страницах сайта."
+        )
+    if days_with_traffic and visits_sum == 0:
+        warnings.append(
+            "Метрика вернула дни сбора, но визитов за период нет; "
+            "поведенческие выводы и конверсии пока нельзя считать надёжными."
+        )
+    warning = " ".join(warnings) if warnings else None
+    status = MetricaStatus(
+        counter_status=latest_metrica_extra.get("counter_status"),
+        counter_activity_status=latest_metrica_extra.get("counter_activity_status"),
+        counter_code_status=latest_metrica_extra.get("counter_code_status"),
+        counter_site=latest_metrica_extra.get("counter_site"),
+        has_recent_visits=visits_sum > 0,
+        warning=warning,
+    )
+
     return AnalyticsResponse(
         site_id=str(site_id),
         days=days,
@@ -2192,6 +2394,10 @@ async def get_analytics(
         ),
         webmaster_latest_date=webmaster_latest,
         metrica_latest_date=metrica_latest,
+        metrica_status=status,
+        metrica_top_pages=top_pages,
+        metrica_sources=sources,
+        metrica_goals=goals,
     )
 
 
@@ -4029,6 +4235,16 @@ WCAG contrast 4.5:1, размер touch-target 44×44 px)**. Если в сни�
    (f) CRO-косметика (CTA-текст, цена в кнопке) → P5
 7. **АНТИ-ГЕНЕРИК**: запрещены пункты «сделать контрастнее», «добавить
    яркости», «улучшить читабельность» без замера. Не пиши их вообще.
+8. **JS/SSR ЧЕСТНОСТЬ**: не пиши «контент только после гидратации»,
+   «Яндекс не видит контент», «FAQ/schema выпадают из индекса» без
+   прямого факта: hydration/JS error в снимке, отдельная проверка
+   исходного HTML или явный SSR/DOM mismatch. Браузерный снимок сам по
+   себе доказывает только rendered DOM. Если в снимке видны H1, цена,
+   программа, FAQ или Schema — не называй их отсутствующими.
+9. **HERO/SELF-CONTAINED ЧЕСТНОСТЬ**: пункт «нет короткого ответа в hero»
+   разрешён только если в первых 800 символах текста нет связки
+   {что это}+{гео/откуда}+{длительность/формат}+{цена}. Если такая
+   связка есть, помести это в «Что уже хорошо», а не в проблемы.
 
 ФОРМАТ ОТВЕТА — строго Markdown. ВАЖНО: уложись в лимиты пунктов
 ниже, иначе ответ обрежется.

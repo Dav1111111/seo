@@ -5,9 +5,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core_audit.brain.snapshot import _review
+from app.core_audit.brain.snapshot import _review, build_snapshot
 from app.core_audit.review.models import PageReview, PageReviewRecommendation
 from app.models.page import Page
+from app.models.page_deep_extract import PageDeepExtract
 from app.models.site import Site
 
 
@@ -143,6 +144,80 @@ async def test_review_snapshot_uses_latest_completed_reviews_per_intent(
     assert facts.top_pending_recommendations[0]["impact_score"] == 0.7
     assert facts.top_pending_recommendations[0]["confidence_score"] == 0.8
     assert facts.top_pending_recommendations[0]["ease_score"] == 0.9
+
+
+async def test_review_snapshot_marks_recs_when_deep_extract_is_newer(
+    db: AsyncSession,
+    test_site: Site,
+) -> None:
+    page = Page(site_id=test_site.id, url="https://x/a", path="/a")
+    db.add(page)
+    await db.flush()
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    review = PageReview(
+        site_id=test_site.id,
+        page_id=page.id,
+        target_intent_code="commercial",
+        composite_hash="commercial-old",
+        status="completed",
+        reviewed_at=base,
+    )
+    db.add(review)
+    await db.flush()
+
+    db.add(
+        PageReviewRecommendation(
+            site_id=test_site.id,
+            review_id=review.id,
+            category="schema",
+            priority="high",
+            user_status="pending",
+            priority_score=10,
+            source_finding_id="schema.product_missing",
+            reasoning_ru="Добавить Product + Offer",
+        )
+    )
+    db.add(
+        PageDeepExtract(
+            site_id=test_site.id,
+            page_id=page.id,
+            url=page.url,
+            status="completed",
+            extracted_at=base + timedelta(days=1),
+            title="Свежий title",
+            h1="Свежий H1",
+            full_text="Тур по Абхазии от 24900 рублей.",
+            performance={"lcp": 3276, "cls": 0},
+            js_errors=[],
+            schema_blocks=[
+                {
+                    "@context": "https://schema.org",
+                    "@type": "Product",
+                    "name": "Багги-экспедиция",
+                    "offers": {
+                        "@type": "Offer",
+                        "price": 24900,
+                        "priceCurrency": "RUB",
+                    },
+                },
+            ],
+        )
+    )
+    await db.flush()
+
+    facts = await _review(db, test_site.id)
+    rec = facts.top_pending_recommendations[0]
+    current = rec["current_snapshot"]
+
+    assert facts.recs_with_fresh_snapshot_after_review == 1
+    assert current["after_review"] is True
+    assert current["title"] == "Свежий title"
+    assert current["h1"] == "Свежий H1"
+    assert current["lcp_ms"] == 3276
+    assert current["js_error_count"] == 0
+    assert "Product" in current["schema_types"]
+    assert current["freshness_warning"] == "latest_browser_snapshot_is_newer_than_review"
 
 
 # ── robots.txt audit signal pulled into BrainSnapshot ────────────────

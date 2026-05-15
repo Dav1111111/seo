@@ -57,6 +57,42 @@ import {
 // fmtDayAge) so a Moscow user at 23:00 doesn't see "today's" data
 // labelled "1 день назад" because of timezone math.
 
+// Yandex Metrica counter status codes. Closed enum from
+// https://yandex.ru/dev/metrika/doc/api2/management/counters/counter.html
+// See backend: backend/app/collectors/metrica.py:fetch_counter_info
+const COUNTER_CODE_STATUS_RU: Record<
+  string,
+  { label: string; tone: "ok" | "warn" | "error" }
+> = {
+  CS_OK: { label: "код установлен и работает", tone: "ok" },
+  CS_ERR_UNKNOWN: {
+    label: "не удаётся проверить код счётчика — проверь установку",
+    tone: "error",
+  },
+  CS_ERR_NOT_INSTALLED: {
+    label: "код Метрики не найден на сайте",
+    tone: "error",
+  },
+  CS_ERR_HTTP_ERROR: {
+    label: "сайт не отвечает на проверку Метрики",
+    tone: "warn",
+  },
+  CS_ERR_INVISIBLE: {
+    label: "код найден, но скрыт от пользователей",
+    tone: "warn",
+  },
+};
+
+function formatCounterStatus(code: string | null | undefined) {
+  if (!code || code === "CS_OK") return null; // suppress when fine
+  return (
+    COUNTER_CODE_STATUS_RU[code] ?? {
+      label: `статус «${code}»`,
+      tone: "warn" as const,
+    }
+  );
+}
+
 function fmtNumber(n: number | null | undefined): string {
   if (n == null) return "—";
   return n.toLocaleString("ru-RU");
@@ -64,7 +100,13 @@ function fmtNumber(n: number | null | undefined): string {
 
 function fmtPct(n: number | null | undefined): string {
   if (n == null) return "—";
-  return `${n.toFixed(1)}%`;
+  return `${(n * 100).toFixed(1)}%`;
+}
+
+function fmtSeconds(n: number | null | undefined): string {
+  if (n == null) return "—";
+  if (n < 60) return `${Math.round(n)} сек`;
+  return `${Math.floor(n / 60)} мин ${Math.round(n % 60)} сек`;
 }
 
 // Recharts wants a specific date format — short dd.mm for axis labels.
@@ -121,12 +163,21 @@ export default function StudioAnalyticsPage() {
   const totals = data?.totals;
   const hasSearch = (totals?.days_with_search_data ?? 0) > 0;
   const hasTraffic = (totals?.days_with_traffic_data ?? 0) > 0;
+  const metricaStatus = data?.metrica_status;
+  const metricaTopPages = data?.metrica_top_pages || [];
+  const metricaSources = data?.metrica_sources || [];
+  const metricaGoals = data?.metrica_goals || [];
 
   // Pre-format series for chart-friendly axis labels. Memoized — a
   // fresh array on every render makes Recharts re-build its SVGs even
   // when the underlying data hasn't changed (e.g. on hover state).
   const formatted = useMemo(
-    () => series.map((p) => ({ ...p, _label: shortDate(p.date) })),
+    () =>
+      series.map((p) => ({
+        ...p,
+        _label: shortDate(p.date),
+        bounce_rate_pct: p.bounce_rate == null ? null : p.bounce_rate * 100,
+      })),
     [series],
   );
 
@@ -192,6 +243,39 @@ export default function StudioAnalyticsPage() {
           </span>
         </div>
       )}
+
+      {/* Counter code status — only when not CS_OK, in plain Russian. */}
+      {data &&
+        (() => {
+          const s = formatCounterStatus(
+            data.metrica_status?.counter_code_status,
+          );
+          if (!s) return null;
+          const colorClass =
+            s.tone === "error"
+              ? "bg-red-50 text-red-900 border-red-200"
+              : s.tone === "warn"
+                ? "bg-amber-50 text-amber-900 border-amber-200"
+                : "bg-green-50 text-green-900 border-green-200";
+          return (
+            <div
+              className={`rounded-md border px-3 py-2 text-sm ${colorClass}`}
+            >
+              Счётчик Метрики: {s.label}
+            </div>
+          );
+        })()}
+
+      {/* Counter active but zero visits in the selected window. */}
+      {data &&
+        metricaStatus?.counter_code_status === "CS_OK" &&
+        !metricaStatus?.has_recent_visits && (
+          <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+            Счётчик Метрики подключён и работает, но визитов за выбранный
+            период не было. Попробуй расширить диапазон вверху или проверь,
+            идут ли вообще переходы из поиска.
+          </div>
+        )}
 
       {isLoading && (
         <div className="space-y-3">
@@ -377,7 +461,7 @@ export default function StudioAnalyticsPage() {
               />
               <Line
                 yAxisId="right"
-                dataKey="bounce_rate"
+                dataKey="bounce_rate_pct"
                 name="Отказы %"
                 stroke="rgb(244,114,182)"
                 strokeWidth={1.5}
@@ -406,10 +490,115 @@ export default function StudioAnalyticsPage() {
                 </Link>
                 .
               </p>
+              {metricaStatus?.warning && (
+                <p className="text-sm text-amber-700">{metricaStatus.warning}</p>
+              )}
             </CardContent>
           </Card>
         )
       )}
+
+      {!isLoading &&
+        data &&
+        (metricaTopPages.length > 0 ||
+          metricaSources.length > 0 ||
+          metricaGoals.length > 0 ||
+          metricaStatus?.warning) && (
+          <ChartSection
+            title="Что Метрика даёт для SEO"
+            subtitle="Посадочные, источники и цели из последнего окна сбора"
+            source="Метрика"
+          >
+            {metricaStatus?.warning && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                {metricaStatus.warning}
+              </div>
+            )}
+            <div className="grid gap-5 lg:grid-cols-3">
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Посадочные страницы</h3>
+                {metricaTopPages.length > 0 ? (
+                  <ul className="space-y-2 text-sm">
+                    {metricaTopPages.slice(0, 8).map((page) => (
+                      <li key={`${page.url}-${page.page_id || "raw"}`} className="space-y-0.5">
+                        {page.page_id ? (
+                          <Link
+                            href={`/studio/pages/${page.page_id}`}
+                            className="block truncate font-medium hover:underline"
+                            title={page.url}
+                          >
+                            {page.url}
+                          </Link>
+                        ) : (
+                          <div className="truncate font-medium" title={page.url}>
+                            {page.url || "Без URL"}
+                          </div>
+                        )}
+                        <div className="text-xs text-muted-foreground">
+                          {fmtNumber(page.visits)} визитов · {fmtNumber(page.pageviews)} просмотров · отказы {fmtPct(page.bounce_rate)} · {fmtSeconds(page.avg_duration_sec)}
+                        </div>
+                        {!page.mapped_to_page && (
+                          <div className="text-[11px] text-amber-700">
+                            не сопоставлено с найденной страницей сайта
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Посадочные пока не собраны.
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Источники</h3>
+                {metricaSources.length > 0 ? (
+                  <ul className="space-y-2 text-sm">
+                    {metricaSources.slice(0, 8).map((source) => (
+                      <li key={source.source} className="flex justify-between gap-3">
+                        <span className="truncate">{source.source}</span>
+                        <span className="text-muted-foreground whitespace-nowrap">
+                          {fmtNumber(source.visits)} / {fmtNumber(source.pageviews)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Источники пока не собраны.
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Цели</h3>
+                {metricaGoals.length > 0 ? (
+                  <ul className="space-y-2 text-sm">
+                    {metricaGoals.slice(0, 8).map((goal) => (
+                      <li key={goal.goal_id} className="space-y-0.5">
+                        <div className="truncate font-medium">
+                          {goal.name || goal.goal_id}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {fmtNumber(goal.reaches)} достижений · {fmtNumber(goal.target_visits)} целевых визитов
+                          {goal.conversion_rate != null
+                            ? ` · конверсия ${goal.conversion_rate.toFixed(2)}%`
+                            : ""}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Цели не настроены или пока не дали данных.
+                  </p>
+                )}
+              </div>
+            </div>
+          </ChartSection>
+        )}
 
       {/* 4. Indexation trend */}
       {!isLoading && totals?.indexed_latest != null && (

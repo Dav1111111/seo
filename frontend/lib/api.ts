@@ -1162,6 +1162,48 @@ export const api = {
       };
       webmaster_latest_date: string | null;
       metrica_latest_date: string | null;
+      metrica_status: {
+        // Closed sets — backend pulls these from Metrica API. If Metrica
+        // ever adds a new code, we still parse it (TypeScript falls back
+        // to the literal-union default in formatCounterStatus), and on
+        // the frontend the mapper has an `??` fallback so it never
+        // crashes.
+        counter_status: "Active" | "Pending" | "Deleted" | string | null;
+        counter_activity_status: "Active" | "Pending" | string | null;
+        counter_code_status:
+          | "CS_OK"
+          | "CS_ERR_UNKNOWN"
+          | "CS_ERR_NOT_INSTALLED"
+          | "CS_ERR_HTTP_ERROR"
+          | "CS_ERR_INVISIBLE"
+          | string
+          | null;
+        counter_site: { site: string } | string | null;
+        has_recent_visits: boolean;
+        warning: string | null;
+      };
+      metrica_top_pages: Array<{
+        page_id: string | null;
+        url: string;
+        visits: number;
+        pageviews: number;
+        bounce_rate: number | null;
+        avg_duration_sec: number | null;
+        mapped_to_page: boolean;
+      }>;
+      metrica_sources: Array<{
+        source: string;
+        visits: number;
+        pageviews: number;
+      }>;
+      metrica_goals: Array<{
+        goal_id: string;
+        name: string | null;
+        goal_type: string | null;
+        reaches: number;
+        target_visits: number;
+        conversion_rate: number | null;
+      }>;
     }>(`/studio/sites/${siteId}/analytics?days=${days}`, { base: "admin" }),
 
   // V2 etap 3 — trigger per-page review on demand (Reviewer pipeline).
