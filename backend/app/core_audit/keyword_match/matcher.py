@@ -446,16 +446,29 @@ def _pick_best_page(
 
 
 def _score_page(page: Page, query_lemmas: set[str]) -> int:
-    """Score = slug_hits*3 + title_hits*2 + h1_hits*1."""
+    """Score = slug_hits*3 + title_hits*2 + h1_hits*1.
+
+    A query lemma counts as «present» if it OR any of its synonyms
+    (from TOURISM_SYNONYMS) appears in the target surface. Without
+    this, e.g. query «джиппинг» never picks a page with «джип-туры»
+    in H1 even though they're the same thing.
+    """
     slug_lemmas = tokenize_phrase(_slug_text(page.path or page.url))
     title_lemmas = tokenize_phrase(page.title)
     h1_lemmas = tokenize_phrase(page.h1)
 
-    slug_hits = len(query_lemmas & slug_lemmas)
-    title_hits = len(query_lemmas & title_lemmas)
-    h1_hits = len(query_lemmas & h1_lemmas)
+    def _hits(surface: set[str]) -> int:
+        n = 0
+        for ql in query_lemmas:
+            if ql in surface:
+                n += 1
+                continue
+            syns = TOURISM_SYNONYMS.get(ql, [])
+            if any(s in surface for s in syns):
+                n += 1
+        return n
 
-    return slug_hits * 3 + title_hits * 2 + h1_hits * 1
+    return _hits(slug_lemmas) * 3 + _hits(title_lemmas) * 2 + _hits(h1_lemmas) * 1
 
 
 def _slug_text(path_or_url: str | None) -> str:

@@ -34,10 +34,12 @@ except ImportError:  # pragma: no cover — only fires in stripped envs
     _MORPH = None
 
 
-# Matches Cyrillic, Latin, digits, hyphens. Excludes punctuation by
-# nature — `[\w\-]+` includes underscores too, which is fine for the
-# rare case of slug-derived tokens like "jip-tour".
-_WORD_RE = re.compile(r"[\w\-]+", re.UNICODE)
+# Split on whitespace AND hyphens AND punctuation. Critical: «багги-туры»
+# must become {«багги», «тур»}, not «{багга-тура}». pymorphy3 lemmatizes
+# whole hyphenated tokens to weird forms (e.g. «багги-туры» → «багга-тура»),
+# so we explicitly break them. Underscores are also split — slug parts
+# need separate lookup.
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 # Russian function words + tourism-domain too-generic terms.
 # "тур"/"туры" go here because a tourism site that's missing the word
