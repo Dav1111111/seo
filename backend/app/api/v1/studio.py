@@ -3215,6 +3215,66 @@ async def get_brain_plan(
     )
 
 
+# ── Unified advice center (2026-05-16) ───────────────────────────────
+
+
+def _advice_feed_to_dict(feed) -> dict:  # type: ignore[no-untyped-def]
+    """Serialise AdviceFeed for the JSON response.
+
+    Kept as a plain function (not a pydantic model) because the
+    AdviceCard contract is frozen in `core_audit/advisor/dto.py` and
+    the frontend reads field names directly — adding a pydantic layer
+    here would just duplicate the contract.
+    """
+    return {
+        "site_id": feed.site_id,
+        "computed_at": feed.computed_at,
+        "counts_by_severity": dict(feed.counts_by_severity),
+        "counts_by_category": dict(feed.counts_by_category),
+        "cards": [
+            {
+                "id": c.id,
+                "severity": c.severity,
+                "category": c.category,
+                "title_ru": c.title_ru,
+                "body_ru": c.body_ru,
+                "action_ru": c.action_ru,
+                "expected_impact_ru": c.expected_impact_ru,
+                "link": c.link,
+                "cta_ru": c.cta_ru,
+                "sort_score": c.sort_score,
+                "source_module": c.source_module,
+            }
+            for c in feed.cards
+        ],
+    }
+
+
+@router.get(
+    "/sites/{site_id}/advice",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_advice_feed(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Unified advice center feed.
+
+    Pulls signals from every module (brain rules, health checks, schema
+    audit, keyword_match, robots audit, funnel coverage, Metrica) and
+    returns one ordered list of `AdviceCard` items. The owner opens
+    /studio home → sees critical/broken first, high SEO impact second,
+    info last — same view regardless of which module produced what.
+
+    Pure read + compose. No LLM, no DB writes.
+    """
+    await _site_or_404(db, site_id)
+    from app.core_audit.advisor import collect_advice
+
+    feed = await collect_advice(db, site_id)
+    return _advice_feed_to_dict(feed)
+
+
 # ── Studio v2 etap 7 (Phase B) · Brain chat ──────────────────────────
 
 

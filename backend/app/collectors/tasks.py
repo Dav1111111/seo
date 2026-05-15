@@ -1205,11 +1205,10 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
 # discovery run. Verified with the actual 429 body:
 #   "search-api.wordstatRequestsPerHour.rate rate quota limit exceed:
 #    allowed 100 requests"
-# So the hard ceiling is 100 calls/hour shared across ALL sites on the
-# same Cloud key. 10 seeds per run leaves headroom for refreshing two
-# sites + the dynamics-based wordstat-refresh task without burning the
-# whole budget on one click.
-WORDSTAT_DISCOVER_MAX_SEEDS = 10
+# The hard ceiling is 100 calls/hour shared across ALL sites on the same
+# Cloud key. 30 seeds gives enough breadth for direct + adjacent tourism
+# discovery while keeping one manual run around 20 minutes at 40s cadence.
+WORDSTAT_DISCOVER_MAX_SEEDS = 30
 # How many phrases to keep per seed. /topRequests returns up to ~200 in
 # practice; we keep the top N to keep the queries table manageable.
 WORDSTAT_DISCOVER_TOP_N_PER_SEED = 30
@@ -1219,26 +1218,466 @@ WORDSTAT_DISCOVER_TOP_N_PER_SEED = 30
 # ~7 minutes — that's the API talking, not us.
 WORDSTAT_TOP_REQUESTS_SLEEP_SEC = 40.0
 
+_TOURISM_ADJACENT_INTENTS = (
+    "экскурсии",
+    "туры",
+    "отдых",
+    "активный отдых",
+    "джип тур",
+    "маршруты",
+)
+_PRODUCT_COMMERCIAL_MODIFIERS = (
+    "цена",
+    "стоимость",
+    "забронировать",
+    "отзывы",
+)
+_RU_FROM_CASE = {
+    "сочи": "сочи",
+    "адлер": "адлера",
+    "абхазия": "абхазии",
+    "крым": "крыма",
+    "гагра": "гагры",
+    "сухум": "сухума",
+}
+_RU_TO_CASE = {
+    "сочи": "сочи",
+    "адлер": "адлер",
+    "абхазия": "абхазию",
+    "крым": "крым",
+    "гагра": "гагру",
+    "сухум": "сухум",
+    "красная поляна": "красную поляну",
+}
 
-@celery_app.task(name="wordstat_discover_site", bind=True, max_retries=1)
+
+def _clean_wordstat_seed(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return " ".join(text.replace("ё", "е").split())
+
+
+def _list_from_config(cfg: dict, key: str, *, limit: int = 20) -> list[str]:
+    raw = cfg.get(key)
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = _clean_wordstat_seed(item)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _geo_from_case(geo: str) -> str:
+    return _RU_FROM_CASE.get(geo, geo)
+
+
+def _geo_to_case(geo: str) -> str:
+    return _RU_TO_CASE.get(geo, geo)
+
+
+def _add_seed(plan: list[dict[str, str]], seen: set[str], seed: str, category: str) -> None:
+    clean = _clean_wordstat_seed(seed)
+    if not clean or clean in seen:
+        return
+    seen.add(clean)
+    plan.append({"seed": clean, "category": category})
+
+
+def _wordstat_geo_terms(cfg: dict) -> set[str]:
+    terms: set[str] = set()
+    for geo in (
+        _list_from_config(cfg, "geo_primary", limit=20)
+        + _list_from_config(cfg, "geo_secondary", limit=20)
+    ):
+        terms.add(geo)
+        terms.add(_geo_from_case(geo))
+        terms.add(_geo_to_case(geo))
+        if geo.endswith("ия"):
+            stem = geo[:-1]
+            terms.add(f"{stem}и")
+            terms.add(f"{stem}ю")
+    return {term for term in terms if term}
+
+
+def classify_wordstat_discovery_phrase(
+    phrase: str,
+    target_config: dict,
+) -> tuple[bool, str, str]:
+    """Deterministic funnel-aware relevance guard for Wordstat discovery.
+
+    `/topRequests` is intentionally broad and happily returns homonyms,
+    pop-culture noise and out-of-region demand for short seeds like
+    «багги». We want a five-way verdict, not the legacy own/spam binary:
+
+      * ``direct_product`` — primary product + your geo (or commercial
+        intent strong enough that the buy-now signal dominates the lack
+        of geo)
+      * ``funnel_warm``    — tourism activity in your geo, or the
+        primary product without explicit geo
+      * ``funnel_top``     — discovery intent in your geo («что
+        посмотреть», «развлечения сочи», «достопримечательности»)
+      * ``out_of_market``  — the product / activity, but the geo is
+        another Russian city. We still record it (returns
+        ``accepted=True``) so the owner can see the demand, but the
+        priority weight is zero downstream.
+      * ``spam``           — empty, URL-shaped, homonym («джинсы багги»,
+        «трансформеры»), automotive part, content (мульт, фильм…),
+        transit timetable.
+
+    ``accepted=False`` is only for spam. Out-of-market accepted but
+    priced-zero in the scorer is the deliberate design — the owner
+    needs to see it, the brain plan must not act on it.
+
+    Returns ``(accepted, relevance, reason_ru)``.
+    """
+    from app.profiles.tourism.funnel_intents import detect_intent_layer
+    from app.profiles.tourism.ru_cities import is_other_russian_geo
+
+    cfg = target_config if isinstance(target_config, dict) else {}
+    text = _clean_wordstat_seed(phrase)
+    if not text:
+        return False, "spam", "URL или пустая фраза, не запрос"
+
+    # URL-shaped / domain-shaped junk that ingestion sometimes leaks.
+    if "://" in text or text.startswith(("www.", "http")):
+        return False, "spam", "URL или пустая фраза, не запрос"
+    if "." in text and " " not in text and any(
+        text.endswith(tld)
+        for tld in (".ru", ".рф", ".com", ".org", ".net", ".su")
+    ):
+        return False, "spam", "URL или пустая фраза, не запрос"
+
+    tokens = text.split()
+
+    # ── Hard homonym / spam categories ──────────────────────────────
+    #
+    # Tackle the brand-killer cases first; everything that follows
+    # assumes we're looking at something at least vaguely tourism-shaped.
+
+    homonym_prefixes = (
+        # Clothing — «джинсы багги», «штаны багги»
+        "джинс", "штан", "брюк", "одежд", "женск", "мужск",
+        "детск",
+        # Pop-culture — «трансформеры багги», «мультфильм багги»
+        "трансформ", "мультфильм", "мульт", "сериал", "фильм",
+        "комикс", "персонаж", "актер", "актёр", "герой",
+        # Software — «баг в программе», «починить баги»
+        "программ", "софт", "приложен",
+        # Toys & gaming
+        "игруш", "лего",
+    )
+    if any(tok.startswith(homonym_prefixes) for tok in tokens):
+        return False, "spam", "омоним не про туристическую услугу"
+
+    # Wikipedia / reference / colouring pages — info but not buyer
+    if any(tok.startswith(("википед", "раскраск")) for tok in tokens):
+        return False, "spam", "омоним не про туристическую услугу"
+
+    # ── Adjacent automotive (parts / repair, NOT vehicle rental) ─────
+    auto_part_prefixes = (
+        "карбюратор", "карбюра",
+        "двигател", "мотор",
+        "карданн", "трансмисс",
+        "запчаст", "запчас",
+        "руль",
+    )
+    if any(tok.startswith(auto_part_prefixes) for tok in tokens):
+        return False, "spam", "автозапчасть, не туристическая услуга"
+    auto_brand_tokens = {
+        "тойота", "тойоту", "тойоте", "тойоты",
+        "лада", "ладу", "ладе", "лады",
+        "ваз", "уаз", "газ",
+        "форд", "мерседес", "ауди", "бмв", "kia", "хендай",
+    }
+    if auto_brand_tokens.intersection(tokens):
+        return False, "spam", "автозапчасть, не туристическая услуга"
+
+    # ── Transit timetables ─────────────────────────────────────────
+    transit_terms = {
+        "автобус", "автобусы", "автобуса", "автобусом", "автобусов",
+        "поезд", "поезда", "поездом",
+        "электричка", "электрички",
+        "ласточка", "ласточки",
+        "вокзал",
+    }
+    has_transit_schedule = bool(transit_terms.intersection(tokens)) or any(
+        tok.startswith("расписан") for tok in tokens
+    )
+
+    # ── Profile-derived flags ──────────────────────────────────────
+    primary = _clean_wordstat_seed(cfg.get("primary_product"))
+    services = [
+        s for s in _list_from_config(cfg, "services", limit=20)
+        if s and s != primary
+    ]
+    geo_terms = _wordstat_geo_terms(cfg)
+    my_geos_norm: set[str] = set()
+    for g in (
+        _list_from_config(cfg, "geo_primary", limit=20)
+        + _list_from_config(cfg, "geo_secondary", limit=20)
+    ):
+        my_geos_norm.add(g)
+    # Include the inflected forms generated by `_wordstat_geo_terms` so
+    # `is_other_russian_geo` correctly ignores «сочи»/«адлера»/etc.
+    my_geos_norm.update(geo_terms)
+
+    has_primary = bool(primary and primary in text)
+    has_my_geo = any(term in text for term in geo_terms) if geo_terms else False
+
+    other_geo_found, other_geo_name = is_other_russian_geo(
+        tokens, my_geos_norm,
+    )
+
+    intent_layer = detect_intent_layer(tokens, text)
+
+    # Transit schedule with no product is just «как доехать» — not what
+    # an owner is hunting for. We even reject it when `intent_layer ==
+    # "tourism"`, because the «маршрут» / «расписание» combo is what
+    # carries the tourism prefix yet the query is clearly about
+    # buses/trains, not excursions.
+    strong_activity = any(
+        tok.startswith((
+            "экскурс", "отдых", "джип", "прокат", "экспедиц",
+            "аренд", "поездк", "поход", "путешеств",
+        ))
+        for tok in tokens
+    )
+    if has_transit_schedule and not has_primary and not strong_activity:
+        return False, "spam", "транспортное расписание, не туристическая услуга"
+
+    # ── 6. Out of market: primary product in another Russian city ───
+    if has_primary and other_geo_found and not has_my_geo:
+        return (
+            True,
+            "out_of_market",
+            f"продукт в чужом регионе ({other_geo_name})",
+        )
+
+    # Same rule for clearly-tourism intent (no primary product but
+    # «экскурсии в москве», «отдых в крыму» when those aren't your geos)
+    # — record it so the owner sees the noise; priority weight = 0.
+    if other_geo_found and intent_layer in ("tourism", "commercial") and not has_my_geo:
+        return (
+            True,
+            "out_of_market",
+            f"туристический запрос в чужом регионе ({other_geo_name})",
+        )
+
+    # ── 7. Direct product (hot, ready-to-buy) ───────────────────────
+    if has_primary and has_my_geo:
+        return True, "direct_product", "продукт + твоё гео"
+
+    # ── 8. Direct product without explicit geo but commercial intent
+    if has_primary and intent_layer == "commercial":
+        return (
+            True,
+            "direct_product",
+            "коммерческий продуктовый запрос (без явной гео)",
+        )
+
+    # ── 9. Funnel top: tourist in your geo browsing what to do ──────
+    if has_my_geo and intent_layer == "discovery":
+        return (
+            True,
+            "funnel_top",
+            "турист в твоём гео ищет чем заняться",
+        )
+
+    # ── 10. Funnel warm: tourist in your geo looking at activities ──
+    if has_my_geo and intent_layer == "tourism":
+        return (
+            True,
+            "funnel_warm",
+            "турист в твоём гео ищет активность/тур",
+        )
+
+    # ── 10b. Funnel warm: commercial-but-no-product («забронировать
+    #         экскурсию», «прокат лодки сочи») — still valuable demand
+    if has_my_geo and intent_layer == "commercial":
+        return (
+            True,
+            "funnel_warm",
+            "коммерческий туристический запрос в твоём гео",
+        )
+
+    # ── 11. Funnel warm: primary product without any geo ────────────
+    if has_primary and intent_layer in ("tourism", "none"):
+        return (
+            True,
+            "funnel_warm",
+            "запрос про продукт без явной географии",
+        )
+
+    # Profile service token (e.g. «экспедиция», «прокат») landing in
+    # your geo with no product — still warm.
+    service_tokens: set[str] = set()
+    for s in services:
+        service_tokens.add(s)
+        if s.startswith("экспедиц"):
+            service_tokens.add("экспедиц")
+        if s.startswith("маршрут"):
+            service_tokens.add("маршрут")
+    has_service = any(s and s in text for s in service_tokens)
+    if has_my_geo and has_service:
+        return (
+            True,
+            "funnel_warm",
+            "услуга из профиля + твоё гео",
+        )
+
+    # ── 12. Fallback: nothing matched, it's spam ────────────────────
+    return False, "spam", "не подошёл ни под одну категорию"
+
+
+def build_wordstat_seed_plan(
+    target_config: dict,
+    *,
+    max_seeds: int = WORDSTAT_DISCOVER_MAX_SEEDS,
+) -> list[dict[str, str]]:
+    """Build a broad but deterministic Wordstat discovery plan.
+
+    Previous logic used only `primary_product` + `geo_primary`, which
+    made a tourism business with profile `{primary: "багги", geos:
+    ["сочи","абхазия"]}` ask Wordstat just 3 seeds. This builder keeps
+    direct product seeds, then adds service, route and adjacent-tourism
+    intent seeds so the system can discover indirect demand like
+    «экскурсии из сочи в абхазию» without an LLM inventing phrases.
+    """
+    cfg = target_config if isinstance(target_config, dict) else {}
+    primary = _clean_wordstat_seed(cfg.get("primary_product"))
+    services = _list_from_config(cfg, "services")
+    secondaries = [
+        s for s in _list_from_config(cfg, "secondary_products")
+        if s != primary
+    ]
+    primary_geos = _list_from_config(cfg, "geo_primary", limit=8)
+    secondary_geos = [
+        geo for geo in _list_from_config(cfg, "geo_secondary", limit=8)
+        if geo not in primary_geos
+    ]
+    geos = primary_geos + secondary_geos
+
+    plan: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    if primary:
+        _add_seed(plan, seen, primary, "direct_product")
+        for geo in primary_geos:
+            _add_seed(plan, seen, f"{primary} {geo}", "direct_product_geo")
+            for mod in _PRODUCT_COMMERCIAL_MODIFIERS[:2]:
+                _add_seed(plan, seen, f"{primary} {mod} {geo}", "commercial_product_geo")
+
+        for service in services:
+            if service == primary:
+                continue
+            _add_seed(plan, seen, f"{service} {primary}", "service_product")
+            for geo in primary_geos[:4]:
+                _add_seed(plan, seen, f"{service} {primary} {geo}", "service_product_geo")
+
+        for secondary in secondaries:
+            _add_seed(plan, seen, f"{secondary} {primary}", "secondary_product")
+            for geo in primary_geos[:3]:
+                _add_seed(plan, seen, f"{secondary} {primary} {geo}", "secondary_product_geo")
+    else:
+        for service in services:
+            _add_seed(plan, seen, service, "service")
+            for geo in primary_geos:
+                _add_seed(plan, seen, f"{service} {geo}", "service_geo")
+
+    # Tourism-specific adjacent intent: this is where we intentionally
+    # look beyond literal "buggy" demand. Classifier/relevance logic
+    # later filters irrelevant broad phrases; discovery must first see
+    # the market.
+    if len(primary_geos) >= 2:
+        for origin in primary_geos:
+            for dest in primary_geos:
+                if origin == dest:
+                    continue
+                # For tourism demand, "из Сочи в Абхазию" is useful;
+                # the reverse "из Абхазии в Сочи" is usually not the
+                # owner's market and wastes scarce Wordstat quota.
+                if origin not in {"сочи", "адлер"} and (
+                    "сочи" in primary_geos or "адлер" in primary_geos
+                ):
+                    continue
+                _add_seed(
+                    plan,
+                    seen,
+                    f"экскурсии из {_geo_from_case(origin)} в {_geo_to_case(dest)}",
+                    "route_adjacent",
+                )
+                _add_seed(
+                    plan,
+                    seen,
+                    f"туры из {_geo_from_case(origin)} в {_geo_to_case(dest)}",
+                    "route_adjacent",
+                )
+
+    for geo in primary_geos:
+        for intent in _TOURISM_ADJACENT_INTENTS:
+            _add_seed(plan, seen, f"{intent} {geo}", "tourism_adjacent_geo")
+
+    # Secondary geos are useful, but they should not consume the first
+    # 30 scarce Wordstat calls before broad primary-market intent
+    # ("экскурсии из Сочи в Абхазию", "активный отдых Сочи") has been
+    # probed. Add them late as quota/limit allows.
+    if primary:
+        for geo in secondary_geos:
+            _add_seed(plan, seen, f"{primary} {geo}", "direct_product_secondary_geo")
+            for mod in _PRODUCT_COMMERCIAL_MODIFIERS[:1]:
+                _add_seed(
+                    plan,
+                    seen,
+                    f"{primary} {mod} {geo}",
+                    "commercial_product_secondary_geo",
+                )
+        for service in services:
+            if service == primary:
+                continue
+            for geo in secondary_geos[:3]:
+                _add_seed(
+                    plan,
+                    seen,
+                    f"{service} {primary} {geo}",
+                    "service_product_secondary_geo",
+                )
+    else:
+        for service in services:
+            for geo in secondary_geos:
+                _add_seed(plan, seen, f"{service} {geo}", "service_secondary_geo")
+
+    for geo in secondary_geos[:4]:
+        for intent in _TOURISM_ADJACENT_INTENTS[:3]:
+            _add_seed(
+                plan,
+                seen,
+                f"{intent} {geo}",
+                "tourism_adjacent_secondary_geo",
+            )
+
+    return plan[:max(0, max_seeds)]
+
+
+@celery_app.task(
+    name="wordstat_discover_site",
+    bind=True,
+    max_retries=1,
+    soft_time_limit=2700,
+    time_limit=3000,
+)
 def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
     """Discover new search phrases people enter around the site's
     actual product, using Wordstat `/topRequests`.
 
-    Anchored discovery — each seed always contains `target_config.primary_product`
-    so we never expand on off-topic words that may have leaked into
-    `services` (e.g. site's profile listed "прокат" alongside "багги":
-    without an anchor we'd pull tons of unrelated rental phrases).
-
-    Seed strategy
-    -------------
-    1. Always: `<primary_product> <geo>` for each geo_primary.
-       That's the high-signal layer.
-    2. If `secondary_products` is non-empty: also
-       `<secondary> <primary_product> <geo>` to capture co-occurrence
-       phrases like "маршруты багги сочи".
-    3. Fallback for legacy profiles WITHOUT primary_product: use
-       `services × geo` — old behaviour, kept for backwards compat.
+    Discovery is intentionally broader than Webmaster: it expands from
+    direct product phrases into service, route and adjacent tourism
+    intents so a site can discover demand before it ranks for it.
 
     Idempotent on (site_id, query_text) via the table's unique constraint.
     Per CONCEPT.md §5: only writes wordstat_volume + updated_at, never
@@ -1247,8 +1686,14 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
     import time
     import anyio
     from datetime import datetime, timezone
+    from sqlalchemy import case
     from sqlalchemy.dialects.postgresql import insert as pg_insert
-    from app.collectors.wordstat import fetch_top_requests
+    from app.collectors.wordstat import (
+        STATUS_EMPTY,
+        STATUS_OK,
+        STATUS_RATE_LIMITED,
+        fetch_top_requests_outcome,
+    )
     from app.core_audit.activity import emit_terminal, log_event
     from app.models.search_query import SearchQuery
 
@@ -1266,19 +1711,9 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 return {"status": "failed", "error": "Site not found"}
 
             cfg = site.target_config or {}
-            primary = (cfg.get("primary_product") or "").strip()
-            secondaries = [
-                s.strip() for s in (cfg.get("secondary_products") or [])
-                if s and s.strip() and s.strip() != primary
-            ]
-            services = [
-                s.strip() for s in (cfg.get("services") or [])
-                if s and s.strip()
-            ]
-            geos = [
-                g.strip() for g in (cfg.get("geo_primary") or [])
-                if g and g.strip()
-            ]
+            primary = _clean_wordstat_seed(cfg.get("primary_product"))
+            services = _list_from_config(cfg, "services")
+            geos = _list_from_config(cfg, "geo_primary")
 
             if not geos:
                 await emit_terminal(
@@ -1300,36 +1735,23 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 )
                 return {"status": "skipped", "reason": "no_anchor"}
 
-            seeds: list[str] = []
-            anchor_mode: str
-            if primary:
-                anchor_mode = "primary_anchored"
-                # Layer 1: primary alone — picks up wide-context phrases
-                # ("багги тур", "багги отзывы", "багги техника").
-                seeds.append(primary)
-                # Layer 2: primary × geo — narrows to local intent
-                # ("багги сочи", "багги абхазия").
-                for geo in geos:
-                    if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
-                        break
-                    seeds.append(f"{primary} {geo}")
-                # NOTE: secondary × primary × geo expansion was tried
-                # and produced near-empty results (Wordstat /topRequests
-                # is shallow — phrases must literally contain the seed,
-                # so a 3-word seed almost never has children). Skip.
-            else:
-                anchor_mode = "services_legacy"
-                for svc in services:
-                    for geo in geos:
-                        if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
-                            break
-                        seeds.append(f"{svc} {geo}")
-                    if len(seeds) >= WORDSTAT_DISCOVER_MAX_SEEDS:
-                        break
+            seed_plan = build_wordstat_seed_plan(
+                cfg,
+                max_seeds=WORDSTAT_DISCOVER_MAX_SEEDS,
+            )
+            seeds = [item["seed"] for item in seed_plan]
+            if not seeds:
+                await emit_terminal(
+                    db, site_id, "wordstat_discover", "skipped",
+                    "Не удалось построить seed-план Wordstat из профиля сайта.",
+                    extra={"reason": "empty_seed_plan"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "empty_seed_plan"}
 
             anchor_descr = (
-                f"привязка к «{primary}»" if primary
-                else f"услуги без привязки ({len(services)} шт.)"
+                f"продукт «{primary}» + услуги + смежный туризм" if primary
+                else f"услуги без основного продукта ({len(services)} шт.)"
             )
             est_sec = int(len(seeds) * WORDSTAT_TOP_REQUESTS_SLEEP_SEC)
             await log_event(
@@ -1340,10 +1762,11 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 f"Оценка: ~{est_sec // 60} мин {est_sec % 60} сек.",
                 extra={
                     "seeds_total": len(seeds),
-                    "anchor_mode": anchor_mode,
+                    "anchor_mode": "semantic_profile",
                     "primary": primary,
                     "geos": len(geos),
                     "est_sec": est_sec,
+                    "seed_plan": seed_plan,
                 },
                 run_id=run_id,
             )
@@ -1351,78 +1774,177 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
             phrases_total = 0
             phrases_unique: set[str] = set()
             failed = 0
+            empty = 0
+            rejected = 0
+            rejected_samples: list[dict] = []
+            rate_limited = False
+            rate_limited_seed: str | None = None
+            seeds_attempted = 0
+            seed_results: list[dict] = []
             now = datetime.now(timezone.utc)
 
             for i, seed in enumerate(seeds):
                 try:
-                    rows = await anyio.to_thread.run_sync(
-                        fetch_top_requests, seed,
+                    outcome = await anyio.to_thread.run_sync(
+                        fetch_top_requests_outcome, seed,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    # fetch_top_requests already swallows urllib errors
-                    # internally — this catches only truly unexpected
+                    # fetch_top_requests_outcome already swallows urllib
+                    # errors internally — this catches only unexpected
                     # crashes (corrupted module state, etc.).
                     logger.warning(
                         "wordstat.discover_crashed seed=%r err=%s",
                         seed, exc,
                     )
-                    rows = None
-
-                # `None` from fetch_top_requests means API failure
-                # (429, HTTP error, network). Empty result is `[]`,
-                # distinct. Count Nones as failed so the terminal
-                # message can be honest about hitting the hourly quota.
-                if rows is None:
                     failed += 1
+                    seeds_attempted += 1
+                    seed_results.append({
+                        "seed": seed,
+                        "status": "exception",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                    continue
+
+                seeds_attempted += 1
+                seed_results.append({
+                    "seed": seed,
+                    "status": outcome.status,
+                    "count": len(outcome.requests),
+                    "http_code": outcome.http_code,
+                    "error": outcome.error,
+                })
+
+                if outcome.status == STATUS_RATE_LIMITED:
+                    failed += 1
+                    rate_limited = True
+                    rate_limited_seed = seed
+                    logger.warning(
+                        "wordstat.discover_rate_limited seed=%r attempted=%s/%s",
+                        seed, seeds_attempted, len(seeds),
+                    )
+                    break
+
+                if outcome.status == STATUS_EMPTY:
+                    empty += 1
+                    rows = []
+                elif outcome.status == STATUS_OK:
+                    rows = outcome.requests
+                else:
+                    failed += 1
+                    rows = []
 
                 if rows:
-                    # Trim to top-N to keep the table reasonable.
+                    # Filter homonyms/noise before trimming. A broad
+                    # seed like "багги" returns "джинсы багги" and
+                    # "трансформеры"; those should never reach the AI
+                    # assistant as business opportunities.
                     rows = sorted(rows, key=lambda r: r.count, reverse=True)
-                    rows = rows[:WORDSTAT_DISCOVER_TOP_N_PER_SEED]
 
+                    accepted_for_seed = 0
                     for r in rows:
+                        accepted, relevance, reason_ru = classify_wordstat_discovery_phrase(
+                            r.phrase,
+                            cfg,
+                        )
+                        if not accepted:
+                            rejected += 1
+                            if len(rejected_samples) < 20:
+                                rejected_samples.append({
+                                    "phrase": r.phrase,
+                                    "count": r.count,
+                                    "reason": reason_ru,
+                                })
+                            continue
+
                         # ON CONFLICT upsert — site_id + query_text is unique.
                         # Only touch wordstat_volume / updated_at; do NOT
                         # overwrite is_branded, cluster, last_seen_at etc.
+                        # Relevance is rules-owned unless the user already
+                        # manually set it.
                         stmt = pg_insert(SearchQuery).values(
                             site_id=site.id,
                             query_text=r.phrase,
                             wordstat_volume=r.count,
                             wordstat_updated_at=now,
                             is_branded=False,
+                            relevance=relevance,
+                            relevance_set_by="rules",
+                            relevance_set_at=now,
+                            relevance_reason_ru=reason_ru,
                         ).on_conflict_do_update(
                             index_elements=["site_id", "query_text"],
                             set_={
                                 "wordstat_volume": r.count,
                                 "wordstat_updated_at": now,
+                                "relevance": case(
+                                    (
+                                        SearchQuery.relevance_set_by == "user",
+                                        SearchQuery.relevance,
+                                    ),
+                                    else_=relevance,
+                                ),
+                                "relevance_set_by": case(
+                                    (
+                                        SearchQuery.relevance_set_by == "user",
+                                        SearchQuery.relevance_set_by,
+                                    ),
+                                    else_="rules",
+                                ),
+                                "relevance_set_at": case(
+                                    (
+                                        SearchQuery.relevance_set_by == "user",
+                                        SearchQuery.relevance_set_at,
+                                    ),
+                                    else_=now,
+                                ),
+                                "relevance_reason_ru": case(
+                                    (
+                                        SearchQuery.relevance_set_by == "user",
+                                        SearchQuery.relevance_reason_ru,
+                                    ),
+                                    else_=reason_ru,
+                                ),
                             },
                         )
                         await db.execute(stmt)
                         phrases_total += 1
                         phrases_unique.add(r.phrase)
+                        accepted_for_seed += 1
+                        if accepted_for_seed >= WORDSTAT_DISCOVER_TOP_N_PER_SEED:
+                            break
 
                 if (i + 1) % 5 == 0:
                     await db.commit()
 
-                await anyio.to_thread.run_sync(
-                    time.sleep, WORDSTAT_TOP_REQUESTS_SLEEP_SEC,
-                )
+                if i < len(seeds) - 1:
+                    await anyio.to_thread.run_sync(
+                        time.sleep, WORDSTAT_TOP_REQUESTS_SLEEP_SEC,
+                    )
 
             await db.commit()
 
             stats = {
                 "seeds_total": len(seeds),
+                "seeds_attempted": seeds_attempted,
+                "seeds_remaining": max(0, len(seeds) - seeds_attempted),
                 "phrases_seen": phrases_total,
                 "phrases_unique": len(phrases_unique),
                 "failed_seeds": failed,
+                "empty_seeds": empty,
+                "rejected_phrases": rejected,
+                "rejected_samples": rejected_samples,
+                "rate_limited": rate_limited,
+                "rate_limited_seed": rate_limited_seed,
+                "seed_plan": seed_plan,
+                "seed_results": seed_results[:50],
             }
             if not phrases_unique:
-                if failed >= len(seeds):
+                if rate_limited:
                     message = (
-                        f"Wordstat вернул 429 на все {len(seeds)} запросов — "
-                        "часовой лимит исчерпан (100 запросов/час, делится "
-                        "со всеми сайтами на этом ключе). Подожди час и "
-                        "попробуй снова."
+                        f"Wordstat упёрся в часовой лимит на seed «{rate_limited_seed}»: "
+                        f"обработано {seeds_attempted} из {len(seeds)}, "
+                        f"осталось {max(0, len(seeds) - seeds_attempted)}. "
+                        "Новые фразы не успели прийти — подожди час и запусти снова."
                     )
                     terminal = "failed"
                 elif failed:
@@ -1435,13 +1957,19 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 else:
                     message = (
                         f"Wordstat не нашёл связанных фраз ни для одного из "
-                        f"{len(seeds)} seed-запросов. Проверь, что в профиле "
-                        "указан реальный primary_product."
+                        f"{len(seeds)} seed-запросов. Это не значит, что спроса "
+                        "нет: проверь профиль и попробуй более широкие услуги/гео."
                     )
                     terminal = "done"
             else:
                 tail = ""
-                if failed:
+                if rate_limited:
+                    tail = (
+                        f" Остановились на лимите Wordstat после {seeds_attempted} "
+                        f"из {len(seeds)} seed-фраз; результат частичный, "
+                        "следующий запуск продолжит разведку с новым лимитом."
+                    )
+                elif failed:
                     tail = (
                         f" {failed} seed-фраз 429-ило (часовой лимит Wordstat "
                         "близок), результат частичный."
@@ -1449,7 +1977,7 @@ def wordstat_discover_site(self, site_id: str, run_id: str | None = None):
                 message = (
                     f"Wordstat-discovery: {len(phrases_unique)} уникальных "
                     f"фраз с объёмами добавлено/обновлено в БД "
-                    f"(seed-фраз обработано: {len(seeds)}).{tail}"
+                    f"(seed-фраз обработано: {seeds_attempted} из {len(seeds)}).{tail}"
                 )
                 terminal = "done"
 

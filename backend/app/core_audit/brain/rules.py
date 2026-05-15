@@ -919,6 +919,183 @@ def _rule_wordstat_partial_coverage(
     )
 
 
+# ── Funnel-coverage rules (Block C of unified advice center) ─────────
+
+
+def _rule_funnel_top_gap(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
+    """Owner has funnel_top demand but no pages targeting it.
+
+    funnel_top = «discovery intent in your geo» — туристы, которые
+    физически приехали и ищут «что делать». Самый большой по объёму
+    канал, который часто игнорируется как «не моё».
+
+    Severity = `high`. We never fire `critical` here — missing a
+    channel is an opportunity, not a defect. Stays silent when there
+    are zero funnel_top queries (no demand to capture) OR the site
+    already has top-20 rankings on at least one of them (`pages_count`
+    > 0 — coverage exists, no need to nag).
+    """
+    f = snap.funnel
+    if f.funnel_top_count <= 0:
+        return None
+    if f.funnel_top_pages_count > 0:
+        # Already ranking on at least one funnel_top query — silent.
+        return None
+    word_q = _ru_plural(
+        f.funnel_top_count, ("запрос", "запроса", "запросов"),
+    )
+    kmo = max(1, f.funnel_top_total_volume_kmo)
+    title = (
+        f"У тебя {f.funnel_top_count} {word_q} верха воронки на "
+        f"~{kmo} тыс/мес — и ни одной страницы под них"
+    )
+    body = (
+        f"Это туристы, которые приехали в твоё гео и ищут «что делать» — "
+        f"они ещё не знают, что есть багги, но физически уже здесь. "
+        f"Самый большой по объёму канал привлечения, который ты сейчас "
+        f"не используешь. По данным Wordstat там {kmo} тыс/мес суммарного "
+        f"спроса."
+    )
+    what_to_do = (
+        "Создай 3-5 страниц-лонгридов под запросы верха воронки "
+        "(«что посмотреть в Сочи», «куда сходить с детьми»), и с этих "
+        "страниц веди трафик на коммерческие — бронь экскурсий."
+    )
+    # Expected: ~50% of demand at top-10 conversion is the upper-bound
+    # textbook estimate. We surface as «тыс посетителей/мес» to keep
+    # units consistent with the demand picture.
+    expected_kmo = round(f.funnel_top_total_volume * 0.5 / 1000.0)
+    return Action(
+        id="funnel:top_gap",
+        severity="high",
+        title=title,
+        body_ru=body,
+        what_to_do_ru=what_to_do,
+        link_to="/studio/queries?layer=funnel_top",
+        link_label="Посмотреть запросы",
+        evidence={
+            "funnel_top_count": f.funnel_top_count,
+            "funnel_top_total_volume": f.funnel_top_total_volume,
+            "funnel_top_total_volume_kmo": f.funnel_top_total_volume_kmo,
+            "funnel_top_pages_count": f.funnel_top_pages_count,
+            "expected_uplift_kmo": expected_kmo,
+        },
+        # Funnel gap is site-wide demand, not a per-URL signal — no
+        # focus match to do, fall back to severity-only ordering.
+        in_focus=False,
+    )
+
+
+def _rule_funnel_warm_underserved(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
+    """funnel_warm demand significantly outstrips direct_product coverage.
+
+    Math: if `funnel_warm_total_volume > 2 × direct_product_total_volume`
+    AND there are at least 10 funnel_warm queries, we have a coverage
+    imbalance worth surfacing — the owner is over-indexed on bottom-
+    funnel and missing the warm middle.
+
+    Severity: `medium`. This is optimisation, not a bug.
+    """
+    f = snap.funnel
+    if f.funnel_warm_count < 10:
+        return None
+    if f.direct_product_total_volume <= 0:
+        # Tiny direct_product → ratio would be infinite. Skip — the
+        # `top_gap` rule already covers «nothing to target» case.
+        return None
+    if f.funnel_warm_total_volume <= 2 * f.direct_product_total_volume:
+        return None
+    word_q = _ru_plural(
+        f.funnel_warm_count, ("запрос", "запроса", "запросов"),
+    )
+    warm_kmo = max(1, round(f.funnel_warm_total_volume / 1000.0))
+    direct_kmo = max(1, round(f.direct_product_total_volume / 1000.0))
+    title = (
+        f"Тёплый спрос больше горячего в {f.funnel_warm_total_volume // max(1, f.direct_product_total_volume)} раз"
+    )
+    body = (
+        f"У тебя {f.funnel_warm_count} {word_q} «тёплого» спроса "
+        f"(люди уже выбирают активность, но без бренда) на ~{warm_kmo} "
+        f"тыс/мес. При этом горячих коммерческих запросов всего на "
+        f"~{direct_kmo} тыс/мес. Это значит, что большая часть людей, "
+        f"которые могли бы стать твоими клиентами, ещё не дошла до "
+        f"«купить» — а у тебя на этом этапе пусто."
+    )
+    what_to_do = (
+        "Открой запросы со слоем «funnel_warm» — посмотри, по какой "
+        "теме чаще всего ищут. Сделай посадочные страницы-гайды под "
+        "топ-3 кластера, с CTA на конкретные экскурсии."
+    )
+    return Action(
+        id="funnel:warm_underserved",
+        severity="medium",
+        title=title,
+        body_ru=body,
+        what_to_do_ru=what_to_do,
+        link_to="/studio/queries?layer=funnel_warm",
+        link_label="Посмотреть тёплые запросы",
+        evidence={
+            "funnel_warm_count": f.funnel_warm_count,
+            "funnel_warm_total_volume": f.funnel_warm_total_volume,
+            "direct_product_count": f.direct_product_count,
+            "direct_product_total_volume": f.direct_product_total_volume,
+        },
+        in_focus=False,
+    )
+
+
+def _rule_out_of_market_summary(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
+    """Honest summary: «N запросов в чужих регионах исключили».
+
+    Pure info card. Severity `low` so it never crowds out actionable
+    advice; the goal is transparency — owner sees that we KNOW about
+    those queries but deliberately ignore them.
+
+    Stays silent when zero out_of_market queries.
+    """
+    f = snap.funnel
+    if f.out_of_market_count <= 0:
+        return None
+    word_q = _ru_plural(
+        f.out_of_market_count, ("запрос", "запроса", "запросов"),
+    )
+    title = (
+        f"Я исключил {f.out_of_market_count} {word_q} из чужих регионов"
+    )
+    body = (
+        f"В Wordstat нашлось {f.out_of_market_count} {word_q}, "
+        f"которые относятся к гео вне твоего рынка (например, тебя "
+        f"показывают по «экскурсии в Москве», а ты только Сочи). "
+        f"Я их пометил как `out_of_market` — они не учитываются в "
+        f"приоритетах, потому что в этих городах ты услугу не "
+        f"оказываешь."
+    )
+    what_to_do = (
+        "Ничего делать не нужно. Если какой-то регион у тебя на самом "
+        "деле есть — открой Запросы, найди запрос и сними галочку "
+        "«out_of_market»."
+    )
+    return Action(
+        id="funnel:out_of_market_summary",
+        severity="low",
+        title=title,
+        body_ru=body,
+        what_to_do_ru=what_to_do,
+        link_to="/studio/queries?layer=out_of_market",
+        link_label="Посмотреть исключённые",
+        evidence={
+            "out_of_market_count": f.out_of_market_count,
+        },
+        in_focus=False,
+    )
+
+
 # ── Diagnostics: flag modules that haven't run yet ───────────────────
 
 
@@ -981,9 +1158,12 @@ _RULES = (
     _rule_ctr_gap,
     _rule_wordstat_partial_coverage,
     _rule_missing_landings,
+    _rule_funnel_top_gap,
+    _rule_funnel_warm_underserved,
     _rule_pages_without_review,
     _rule_pending_recs,
     _rule_followup_due,
+    _rule_out_of_market_summary,
 )
 
 

@@ -274,6 +274,60 @@ export async function getRobotsAudit(
   }
 }
 
+// ── Advice feed (unified) ───────────────────────────────────────────
+// Backend module: backend/app/core_audit/advisor/ — synthesises a
+// single ranked list of «cards» across every module (brain rules,
+// robots audit, schema audit, keyword gaps, technical failures,
+// funnel coverage). Replaces the multi-card Studio dashboard with one
+// stream the owner can scroll top-to-bottom.
+export type AdviceSeverity = "critical" | "high" | "medium" | "low" | "info";
+export type AdviceCategory =
+  | "technical"
+  | "health"
+  | "funnel"
+  | "schema"
+  | "keywords"
+  | "seo_content";
+
+export interface AdviceCard {
+  id: string;
+  severity: AdviceSeverity;
+  category: AdviceCategory;
+  title_ru: string;
+  body_ru: string;
+  action_ru: string;
+  expected_impact_ru: string | null;
+  link: string | null;        // path like "/studio/pages/{id}" or absolute https://…
+  cta_ru: string | null;      // button label, null for info cards
+  sort_score: number;
+  source_module: string;
+}
+
+export interface AdviceFeed {
+  site_id: string;
+  computed_at: string;
+  counts_by_severity: Record<string, number>;
+  counts_by_category: Record<string, number>;
+  cards: AdviceCard[];        // already sorted by sort_score DESC by backend
+}
+
+// Returns null on 404 («never computed for this site yet»). Any other
+// error propagates so the UI can render a real error block.
+export async function getAdviceFeed(
+  siteId: string,
+): Promise<AdviceFeed | null> {
+  try {
+    return await apiFetch<AdviceFeed>(
+      `/studio/sites/${siteId}/advice`,
+      { base: "admin" },
+    );
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/^API 404\b/.test(msg)) return null;
+    throw e;
+  }
+}
+
 // ── Keyword gaps (Wordstat-driven recommendations) ──────────────────
 // Backend: backend/app/core_audit/keyword_match/ + the studio.py
 // endpoints under `/studio/sites/{site_id}/keyword-gaps`. Per-page

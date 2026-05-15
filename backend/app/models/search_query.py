@@ -23,8 +23,12 @@ class SearchQuery(Base, TimestampMixin):
     wordstat_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Studio v2 etap 4 — relevance classification.
-    # Values: own / adjacent / disputed / spam / unclassified.
+    # Legacy values: own / adjacent / disputed / spam / unclassified.
+    # Funnel-aware values (added 2026-05-16):
+    #   direct_product / funnel_warm / funnel_top / out_of_market / spam
     # set_by:  rules / llm / user (user wins forever, never overwritten).
+    # CHECK constraint extended in alembic
+    # b2c3d4e5f6a7_search_queries_funnel_relevance.
     relevance: Mapped[str] = mapped_column(
         String(20), nullable=False, default="unclassified",
     )

@@ -205,3 +205,4 @@ celery_app.autodiscover_tasks([
 # (autodiscover only scans `tasks.py` per package). Just importing the
 # module is enough — `@celery_app.task(name=...)` registers on import.
 import app.collectors.deep_extract_tasks  # noqa: F401, E402
+import app.collectors.backfill_funnel_relevance  # noqa: F401, E402

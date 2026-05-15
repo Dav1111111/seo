@@ -229,6 +229,45 @@ class BehavioralFacts:
 
 
 @dataclass
+class FunnelFacts:
+    """Funnel-aware breakdown of `search_queries.relevance` counts.
+
+    Mirrors the new taxonomy Agent 1 is populating:
+      direct_product / funnel_warm / funnel_top / out_of_market / spam
+
+    Plus a tiny backward-compat tail so the same snapshot can still
+    answer questions about legacy own / adjacent rows during the
+    backfill window.
+    """
+    direct_product_count: int = 0
+    direct_product_total_volume: int = 0
+
+    funnel_warm_count: int = 0
+    funnel_warm_total_volume: int = 0
+
+    funnel_top_count: int = 0
+    funnel_top_total_volume: int = 0
+
+    # Display helper — total funnel_top demand in thousands, rounded.
+    # Rule body uses this directly so the wording stays consistent.
+    funnel_top_total_volume_kmo: int = 0
+
+    # Pages already targeting funnel_top queries — current proxy is
+    # «funnel_top SearchQueries the site already ranks in top-20 on».
+    # 0 means no coverage at all → the brain rule fires.
+    funnel_top_pages_count: int = 0
+
+    out_of_market_count: int = 0
+
+    # Backward-compat: legacy classifier wrote `own` and `adjacent`.
+    # During the backfill window we still want to know those counts
+    # so the `_rule_funnel_warm_underserved` rule can decide whether
+    # to look at legacy adjacent or the new funnel_warm.
+    legacy_own_count: int = 0
+    legacy_adjacent_count: int = 0
+
+
+@dataclass
 class MetricaFacts:
     latest_date: date | None = None
     visits_7d: int = 0
@@ -266,6 +305,12 @@ class BrainSnapshot:
     competitors: CompetitorFacts = field(default_factory=CompetitorFacts)
     behavioral: BehavioralFacts = field(default_factory=BehavioralFacts)
     metrica: MetricaFacts = field(default_factory=MetricaFacts)
+    # Funnel-aware query distribution. Populated by `_funnel(db, site_id)`
+    # which counts SearchQuery rows by the new relevance taxonomy.
+    # Stays at zero on sites where Agent 1's classifier hasn't run yet,
+    # so dependent rules treat «no data» as «silent» rather than as
+    # «no demand exists».
+    funnel: FunnelFacts = field(default_factory=FunnelFacts)
     # robots.txt audit signals — populated from the latest
     # `analysis_events` row with stage="robots_audit". Defaults are
     # «never ran, assume fine»: 0 critical issues, valid_for_yandex=True.
@@ -1701,6 +1746,108 @@ async def _metrica(db: AsyncSession, site_id: UUID) -> MetricaFacts:
     )
 
 
+async def _funnel(db: AsyncSession, site_id: UUID) -> FunnelFacts:
+    """Count SearchQuery rows by the funnel-aware relevance taxonomy.
+
+    Single round-trip via FILTER (WHERE …) clauses — each layer is
+    one aggregated row. We also compute `funnel_top_pages_count`
+    (queries the site already ranks top-20 on) so the
+    `_rule_funnel_top_gap` rule can decide whether to fire.
+
+    No-classifier-ran sites land at all-zero, which the rules layer
+    correctly reads as «silent, nothing to surface yet».
+    """
+    row = (await db.execute(
+        select(
+            func.count(SearchQuery.id).filter(
+                SearchQuery.relevance == "direct_product",
+            ).label("direct_count"),
+            func.coalesce(
+                func.sum(SearchQuery.wordstat_volume).filter(
+                    SearchQuery.relevance == "direct_product",
+                ),
+                0,
+            ).label("direct_volume"),
+            func.count(SearchQuery.id).filter(
+                SearchQuery.relevance == "funnel_warm",
+            ).label("warm_count"),
+            func.coalesce(
+                func.sum(SearchQuery.wordstat_volume).filter(
+                    SearchQuery.relevance == "funnel_warm",
+                ),
+                0,
+            ).label("warm_volume"),
+            func.count(SearchQuery.id).filter(
+                SearchQuery.relevance == "funnel_top",
+            ).label("top_count"),
+            func.coalesce(
+                func.sum(SearchQuery.wordstat_volume).filter(
+                    SearchQuery.relevance == "funnel_top",
+                ),
+                0,
+            ).label("top_volume"),
+            func.count(SearchQuery.id).filter(
+                SearchQuery.relevance == "out_of_market",
+            ).label("oom_count"),
+            func.count(SearchQuery.id).filter(
+                SearchQuery.relevance == "own",
+            ).label("legacy_own_count"),
+            func.count(SearchQuery.id).filter(
+                SearchQuery.relevance == "adjacent",
+            ).label("legacy_adjacent_count"),
+        ).where(SearchQuery.site_id == site_id)
+    )).one()
+
+    direct_count = int(row.direct_count or 0)
+    direct_volume = int(row.direct_volume or 0)
+    warm_count = int(row.warm_count or 0)
+    warm_volume = int(row.warm_volume or 0)
+    top_count = int(row.top_count or 0)
+    top_volume = int(row.top_volume or 0)
+    oom_count = int(row.oom_count or 0)
+    legacy_own = int(row.legacy_own_count or 0)
+    legacy_adj = int(row.legacy_adjacent_count or 0)
+
+    # Pages currently ranking top-20 on funnel_top queries. Proxy: count
+    # of funnel_top SearchQuery ids that have a query_performance daily
+    # metric with avg_position <= 20 in the last 30 days. We don't have
+    # a Page<->SearchQuery FK, so this is the best deterministic answer.
+    funnel_top_pages = 0
+    if top_count > 0:
+        cutoff = date.today() - timedelta(days=30)
+        funnel_top_pages = int((await db.execute(
+            select(func.count(func.distinct(SearchQuery.id)))
+            .select_from(SearchQuery)
+            .join(
+                DailyMetric,
+                (DailyMetric.dimension_id == SearchQuery.id)
+                & (DailyMetric.metric_type == "query_performance")
+                & (DailyMetric.site_id == site_id)
+                & (DailyMetric.date >= cutoff)
+                & (DailyMetric.avg_position.is_not(None))
+                & (DailyMetric.avg_position <= 20),
+            )
+            .where(
+                SearchQuery.site_id == site_id,
+                SearchQuery.relevance == "funnel_top",
+            )
+        )).scalar_one_or_none() or 0)
+
+    return FunnelFacts(
+        direct_product_count=direct_count,
+        direct_product_total_volume=direct_volume,
+        funnel_warm_count=warm_count,
+        funnel_warm_total_volume=warm_volume,
+        funnel_top_count=top_count,
+        funnel_top_total_volume=top_volume,
+        funnel_top_total_volume_kmo=round(top_volume / 1000.0),
+        funnel_top_pages_count=funnel_top_pages,
+        out_of_market_count=oom_count,
+        legacy_own_count=legacy_own,
+        legacy_adjacent_count=legacy_adj,
+    )
+
+
 async def _robots_audit_facts(
     db: AsyncSession, site_id: UUID,
 ) -> tuple[int, bool]:
@@ -1767,6 +1914,7 @@ async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
     )
     behavioral = await _behavioral(db, site_id)
     metrica = await _metrica(db, site_id)
+    funnel = await _funnel(db, site_id)
     robots_critical, robots_valid = await _robots_audit_facts(db, site_id)
 
     return BrainSnapshot(
@@ -1782,6 +1930,7 @@ async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
         competitors=competitors,
         behavioral=behavioral,
         metrica=metrica,
+        funnel=funnel,
         robots_critical_issues=robots_critical,
         robots_valid_for_yandex=robots_valid,
     )
@@ -1798,6 +1947,7 @@ __all__ = [
     "CompetitorFacts",
     "BehavioralFacts",
     "MetricaFacts",
+    "FunnelFacts",
     "REVIEW_RECOMMENDATIONS_CONTEXT_LIMIT",
     "build_snapshot",
 ]

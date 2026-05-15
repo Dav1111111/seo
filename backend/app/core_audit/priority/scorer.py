@@ -50,6 +50,34 @@ from app.core_audit.priority.dto import ScoreBreakdown
 SCORER_VERSION = "1.0.0"
 
 
+# ── Funnel-layer impact weights (added 2026-05-16) ────────────────────
+#
+# Multiplier applied to `impact` based on the funnel layer of the top
+# query feeding this recommendation. Bottom-funnel («direct_product»)
+# gets full weight; «funnel_top» gets half because the conversion gap
+# is much wider; «out_of_market» / «spam» / «disputed» drop to zero
+# so we never prioritise work on queries that aren't our market.
+#
+# Legacy aliases (own / adjacent) preserved so existing recs scored
+# before Agent 1's backfill don't suddenly de-rank.
+FUNNEL_WEIGHTS: dict[str, float] = {
+    "direct_product": 1.0,
+    "own": 1.0,             # legacy alias for direct_product
+    "funnel_warm": 0.7,
+    "adjacent": 0.7,        # legacy alias for funnel_warm
+    "funnel_top": 0.5,
+    "out_of_market": 0.0,
+    "disputed": 0.0,
+    "spam": 0.0,
+    "unclassified": 0.3,    # neutral-low default — better than zeroing
+}
+
+# Used when `top_query_relevance` is None (legacy / unknown). Keeping
+# this at 1.0 (NOT 0.3) so the scorer stays byte-identical to the
+# pre-funnel version on every existing call site.
+_FUNNEL_WEIGHT_DEFAULT = 1.0
+
+
 @dataclass(frozen=True)
 class ScorerContext:
     """All inputs required to score a recommendation.
@@ -93,6 +121,14 @@ class ScorerContext:
     # Cluster-level coverage_score (0..1) for the matched target_cluster —
     # used by the Phase D impact formula. None in legacy mode.
     current_coverage_score: float | None = None
+
+    # Funnel layer of the top query driving this recommendation. One of
+    # `direct_product` / `funnel_warm` / `funnel_top` / `out_of_market` /
+    # `spam` / `disputed` / `unclassified` / legacy `own` / `adjacent`,
+    # or None when no query info is available (the scorer falls back
+    # to a neutral 1.0 multiplier in that case — keeping every existing
+    # caller byte-identical).
+    top_query_relevance: str | None = None
 
 
 def score_recommendation(ctx: ScorerContext) -> ScoreBreakdown | None:
@@ -199,6 +235,13 @@ def _impact(ctx: ScorerContext) -> tuple[float, dict]:
             + 0.10 * cat_weight
         )
         impact = max(min(impact, 1.0), 0.0)
+        # Funnel-layer multiplier — same shape as the legacy path below.
+        # Stays neutral (1.0) when no funnel info passed, so every Phase-D
+        # caller that doesn't yet populate top_query_relevance gets the
+        # exact same number as before.
+        funnel_weight = _funnel_weight_for(ctx.top_query_relevance)
+        if funnel_weight != 1.0:
+            impact = max(min(impact * funnel_weight, 1.0), 0.0)
         return impact, {
             "impressions_norm": round(imp_norm, 4),
             "score_gap_norm": round(gap_norm, 4),
@@ -208,16 +251,39 @@ def _impact(ctx: ScorerContext) -> tuple[float, dict]:
             "target_cluster_relevance": round(rel, 4),
             "cluster_coverage_score": round(cluster_cov, 4),
             "imp_component": round(imp_component, 4),
+            "funnel_weight": round(funnel_weight, 4),
         }
 
     impact = 0.45 * imp_norm + 0.25 * gap_norm + 0.20 * prio_weight + 0.10 * cat_weight
     impact = max(min(impact, 1.0), 0.0)
+
+    # Funnel-layer multiplier (added 2026-05-16). When the caller passes
+    # `top_query_relevance`, we scale impact by the corresponding weight
+    # — out_of_market / spam / disputed go to zero so we never prioritise
+    # work on queries that aren't our market. When None (legacy), the
+    # default 1.0 keeps every existing test byte-identical.
+    funnel_weight = _funnel_weight_for(ctx.top_query_relevance)
+    if funnel_weight != 1.0:
+        impact = max(min(impact * funnel_weight, 1.0), 0.0)
     return impact, {
         "impressions_norm": round(imp_norm, 4),
         "score_gap_norm": round(gap_norm, 4),
         "priority_weight": prio_weight,
         "category_weight": cat_weight,
+        "funnel_weight": round(funnel_weight, 4),
     }
+
+
+def _funnel_weight_for(relevance: str | None) -> float:
+    """Resolve a funnel-aware multiplier from a SearchQuery.relevance.
+
+    None / unknown values fall back to a neutral 1.0 so the scorer
+    stays backward-compatible with every existing call site that
+    doesn't pass funnel info yet.
+    """
+    if relevance is None:
+        return _FUNNEL_WEIGHT_DEFAULT
+    return FUNNEL_WEIGHTS.get(relevance, _FUNNEL_WEIGHT_DEFAULT)
 
 
 def _confidence(ctx: ScorerContext) -> tuple[float, dict]:

@@ -585,3 +585,132 @@ def test_evidence_carries_real_counts_not_prose() -> None:
     assert isinstance(a.evidence["share_pct"], float)
     assert a.evidence["spam"] == 26
     assert a.evidence["disputed"] == 11
+
+
+# ── Funnel-coverage rules (Block C, added 2026-05-16) ────────────────
+
+
+def _funnel_snap(
+    *,
+    direct_count: int = 0,
+    direct_volume: int = 0,
+    warm_count: int = 0,
+    warm_volume: int = 0,
+    top_count: int = 0,
+    top_volume: int = 0,
+    top_pages: int = 0,
+    out_of_market: int = 0,
+) -> BrainSnapshot:
+    """Funnel-only snapshot. Indexation / queries / review stay at zero
+    so the rules tested here are the ONLY ones that can fire."""
+    from app.core_audit.brain.snapshot import FunnelFacts
+
+    snap = _snap(pages_total=0, pages_in_index=0, pages_with_review=0)
+    snap.funnel = FunnelFacts(
+        direct_product_count=direct_count,
+        direct_product_total_volume=direct_volume,
+        funnel_warm_count=warm_count,
+        funnel_warm_total_volume=warm_volume,
+        funnel_top_count=top_count,
+        funnel_top_total_volume=top_volume,
+        funnel_top_total_volume_kmo=round(top_volume / 1000.0) if top_volume else 0,
+        funnel_top_pages_count=top_pages,
+        out_of_market_count=out_of_market,
+    )
+    return snap
+
+
+def test_rule_funnel_top_gap_fires_when_demand_no_pages() -> None:
+    """50 funnel_top queries, 0 pages targeting → high-severity card."""
+    snap = _funnel_snap(top_count=50, top_volume=30_000, top_pages=0)
+    plan = build_plan(snap, max_actions=10)
+    a = _by_id(plan.actions, "funnel:top_gap")
+    assert a is not None
+    assert a.severity == "high"
+    assert a.evidence["funnel_top_count"] == 50
+    assert a.evidence["funnel_top_pages_count"] == 0
+    assert a.link_to == "/studio/queries?layer=funnel_top"
+    # Title must mention the count + volume in human form.
+    assert "50" in a.title
+    assert "тыс" in a.title
+
+
+def test_rule_funnel_top_gap_silent_when_pages_exist() -> None:
+    """If the site already ranks on at least one funnel_top query,
+    the gap rule stays silent — coverage exists, no need to nag."""
+    snap = _funnel_snap(top_count=20, top_volume=10_000, top_pages=5)
+    plan = build_plan(snap, max_actions=10)
+    assert _by_id(plan.actions, "funnel:top_gap") is None
+
+
+def test_rule_funnel_top_gap_silent_when_no_demand() -> None:
+    """Zero funnel_top queries → silent (nothing to capture)."""
+    snap = _funnel_snap(top_count=0, top_volume=0, top_pages=0)
+    plan = build_plan(snap, max_actions=10)
+    assert _by_id(plan.actions, "funnel:top_gap") is None
+
+
+def test_rule_funnel_warm_underserved_fires_on_imbalance() -> None:
+    """warm_volume > 2× direct_volume AND ≥10 warm queries → medium."""
+    snap = _funnel_snap(
+        direct_count=5, direct_volume=2_000,
+        warm_count=30, warm_volume=12_000,    # 6× ratio
+    )
+    plan = build_plan(snap, max_actions=10)
+    a = _by_id(plan.actions, "funnel:warm_underserved")
+    assert a is not None
+    assert a.severity == "medium"
+    assert a.evidence["funnel_warm_count"] == 30
+    assert a.evidence["direct_product_total_volume"] == 2_000
+
+
+def test_rule_funnel_warm_underserved_silent_when_balanced() -> None:
+    """warm ≤ 2× direct → silent."""
+    snap = _funnel_snap(
+        direct_count=5, direct_volume=5_000,
+        warm_count=20, warm_volume=8_000,     # 1.6× ratio
+    )
+    plan = build_plan(snap, max_actions=10)
+    assert _by_id(plan.actions, "funnel:warm_underserved") is None
+
+
+def test_rule_funnel_warm_underserved_silent_below_min_count() -> None:
+    """Fewer than 10 warm queries → silent (signal too small)."""
+    snap = _funnel_snap(
+        direct_count=2, direct_volume=500,
+        warm_count=5, warm_volume=20_000,
+    )
+    plan = build_plan(snap, max_actions=10)
+    assert _by_id(plan.actions, "funnel:warm_underserved") is None
+
+
+def test_rule_funnel_warm_underserved_silent_with_no_direct() -> None:
+    """No direct_product demand → the `top_gap` rule already covers
+    that case; this rule stays silent to avoid double-firing."""
+    snap = _funnel_snap(
+        direct_count=0, direct_volume=0,
+        warm_count=30, warm_volume=20_000,
+    )
+    plan = build_plan(snap, max_actions=10)
+    assert _by_id(plan.actions, "funnel:warm_underserved") is None
+
+
+def test_rule_out_of_market_summary_info_severity_only() -> None:
+    """Summary card is `low` (the lowest brain severity) and links to
+    the filtered query view. Wording must be transparent — owner sees
+    we KNOW about those queries."""
+    snap = _funnel_snap(out_of_market=12)
+    plan = build_plan(snap, max_actions=10)
+    a = _by_id(plan.actions, "funnel:out_of_market_summary")
+    assert a is not None
+    assert a.severity == "low"
+    assert a.evidence["out_of_market_count"] == 12
+    assert a.link_to == "/studio/queries?layer=out_of_market"
+    # Body must explain WHY we excluded — not just a count.
+    assert "регион" in a.body_ru.lower() or "рынок" in a.body_ru.lower()
+
+
+def test_rule_out_of_market_summary_silent_when_zero() -> None:
+    snap = _funnel_snap(out_of_market=0)
+    plan = build_plan(snap, max_actions=10)
+    assert _by_id(plan.actions, "funnel:out_of_market_summary") is None
