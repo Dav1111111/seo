@@ -391,47 +391,33 @@ async def _funnel_layer_pages_with_ranking(
 async def _collect_schema_missing(
     db: AsyncSession, site_id: UUID,
 ) -> list[AdviceCard]:
-    """Aggregate per-type `schema_missing_type` findings across the
-    latest deep_extract per money page.
+    """Aggregate per-type `schema_missing_type` findings across all
+    pages by tallying PageReviewRecommendation rows with
+    `category="schema"` and `source_finding_id` shaped
+    `schema.missing_type.{type}`.
 
-    We look at the most recent `schema_audit_summary` (a JSONB field
-    on PageDeepExtract.meta) per page. To keep this cheap, we read
-    each page's latest deep extract and tally how many pages are
-    missing each schema type.
+    The review pipeline already produces these per-page recommendations
+    via review/checks/schema_checks.py — we re-aggregate them at the
+    site level (how many pages are missing each type) so the advice feed
+    can show one card per type instead of N per-page cards.
 
     The result is one card per type, capped at
     `_SCHEMA_MAX_CARDS_PER_TYPE` (top types by pages_missing).
     """
-    # Pull the latest deep_extract per page (status=completed) and look
-    # at meta -> schema_audit_summary -> per_type_missing list.
-    latest_per_page = (
-        select(
-            PageDeepExtract.page_id.label("page_id"),
-            func.max(PageDeepExtract.extracted_at).label("latest_at"),
-        )
-        .where(
-            PageDeepExtract.site_id == site_id,
-            PageDeepExtract.status == "completed",
-            PageDeepExtract.is_competitor.is_(False),
-            PageDeepExtract.page_id.is_not(None),
-        )
-        .group_by(PageDeepExtract.page_id)
-        .subquery()
-    )
+    from app.core_audit.review.models import PageReviewRecommendation
     rows = (await db.execute(
         select(
-            PageDeepExtract.page_id,
-            PageDeepExtract.meta,
-            PageDeepExtract.url,
-        )
-        .join(
-            latest_per_page,
-            (latest_per_page.c.page_id == PageDeepExtract.page_id)
-            & (latest_per_page.c.latest_at == PageDeepExtract.extracted_at),
+            PageReviewRecommendation.source_finding_id,
+            PageReviewRecommendation.review_id,
+            PageReviewRecommendation.priority,
         )
         .where(
-            PageDeepExtract.site_id == site_id,
-            PageDeepExtract.status == "completed",
+            PageReviewRecommendation.site_id == site_id,
+            PageReviewRecommendation.category == "schema",
+            PageReviewRecommendation.user_status == "pending",
+            PageReviewRecommendation.source_finding_id.like(
+                "schema.missing_type.%"
+            ),
         )
     )).all()
     if not rows:
@@ -439,20 +425,34 @@ async def _collect_schema_missing(
 
     pages_missing: dict[str, int] = {}
     sample_url: dict[str, str] = {}
-    for page_id, meta, url in rows:
-        if not isinstance(meta, dict):
+    for source_finding_id, review_id, priority in rows:
+        # parse "schema.missing_type.faqpage" → "faqpage" → "FAQPage"
+        if not isinstance(source_finding_id, str):
             continue
-        audit = meta.get("schema_audit_summary")
-        if not isinstance(audit, dict):
+        prefix = "schema.missing_type."
+        if not source_finding_id.startswith(prefix):
             continue
-        missing_types = audit.get("missing_types")
-        if not isinstance(missing_types, list):
+        t_lower = source_finding_id[len(prefix):]
+        if not t_lower:
             continue
-        for t in missing_types:
-            if not isinstance(t, str) or not t:
-                continue
-            pages_missing[t] = pages_missing.get(t, 0) + 1
-            sample_url.setdefault(t, url or "")
+        # Map a few known lowercased forms back to canonical TitleCase.
+        canonical = {
+            "touristtrip": "TouristTrip",
+            "offer": "Offer",
+            "product": "Product",
+            "faqpage": "FAQPage",
+            "service": "Service",
+            "aggregateoffer": "AggregateOffer",
+            "breadcrumblist": "BreadcrumbList",
+            "article": "Article",
+            "howto": "HowTo",
+            "organization": "Organization",
+            "localbusiness": "LocalBusiness",
+            "itemlist": "ItemList",
+        }.get(t_lower, t_lower.title())
+        pages_missing[canonical] = pages_missing.get(canonical, 0) + 1
+        # No URL here — link is to /studio/pages (the page workflow)
+        sample_url.setdefault(canonical, "")
 
     if not pages_missing:
         return []

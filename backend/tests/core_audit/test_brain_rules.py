@@ -707,7 +707,9 @@ def test_rule_out_of_market_summary_info_severity_only() -> None:
     assert a.evidence["out_of_market_count"] == 12
     assert a.link_to == "/studio/queries?layer=out_of_market"
     # Body must explain WHY we excluded — not just a count.
-    assert "регион" in a.body_ru.lower() or "рынок" in a.body_ru.lower()
+    # Stems match all Russian inflections (рынок/рынка/рынки, регион/региона/регионов).
+    body_lc = a.body_ru.lower()
+    assert "регион" in body_lc or "рынк" in body_lc
 
 
 def test_rule_out_of_market_summary_silent_when_zero() -> None:
