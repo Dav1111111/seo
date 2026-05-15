@@ -4610,6 +4610,152 @@ def _format_extract_for_llm(extract) -> str:
     return "\n".join(parts)
 
 
+# ── Keyword-gap injection into the deep-extract AI advisor ───────────
+#
+# `_build_keyword_gaps_block` reads the cached `keyword_gaps` event for
+# the site, filters down to the current page, and formats up to 3 gaps
+# as a user-message block. Anti-fabrication: every query, volume, and
+# position is from the pre-computed `KeywordGap` records — the LLM is
+# explicitly told to never invent new ones. See task brief §4.
+
+#: Hard cap on gaps shown in the advisor block. Keeps the user msg
+#: from ballooning on huge pages while still surfacing the highest-
+#: uplift opportunities. Frontend `/studio/queries` shows the full list.
+KEYWORD_ADVISOR_TOP_N = 3
+
+
+async def _build_keyword_gaps_block(
+    db: AsyncSession,
+    site_id: uuid.UUID,
+    page_id: uuid.UUID | None,
+) -> str | None:
+    """Format cached `KeywordGap` records for one page as user-message
+    context for the deep-extract AI advisor.
+
+    Returns:
+        `None` when keyword_match has never run for the site (advisor
+            then runs without any keyword context — old behavior).
+        A short positive note when keyword_match ran but this page has
+            no gaps cached for it («ключевые слова в порядке»).
+        A formatted block with up to `KEYWORD_ADVISOR_TOP_N` gaps when
+            the page has cached gaps.
+
+    The block is hand-crafted text (no template engine) so the contract
+    with the LLM stays readable in code review. The «НЕ выдумывай»
+    sentences are the anti-fabrication guard (CLAUDE.md rule 5).
+    """
+    if page_id is None:
+        return None
+
+    row = (await db.execute(
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == site_id,
+            AnalysisEvent.stage == "keyword_gaps",
+            AnalysisEvent.status.in_(("done", "skipped")),
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(1)
+    )).scalar_one_or_none()
+    if row is None:
+        return None
+    extra = row.extra if isinstance(row.extra, dict) else {}
+    all_gaps = extra.get("gaps") or []
+    if not isinstance(all_gaps, list):
+        return None
+
+    page_id_str = str(page_id)
+    page_gaps = [
+        g for g in all_gaps
+        if isinstance(g, dict) and str(g.get("page_id") or "") == page_id_str
+    ]
+
+    if not page_gaps:
+        # Distinguish «never ran» (None above) from «ran, no gaps for
+        # this page». A short positive note lets the LLM acknowledge
+        # this rather than invent issues.
+        return (
+            "### КЛЮЧЕВЫЕ ЗАПРОСЫ ДЛЯ ЭТОЙ СТРАНИЦЫ\n"
+            "По этой странице ключевые слова в порядке — недостающих "
+            "лемм по релевантным запросам не найдено."
+        )
+
+    # Sort by expected uplift DESC — matches matcher's own ordering but
+    # we re-sort defensively in case the cache row was hand-edited.
+    page_gaps.sort(
+        key=lambda g: int(g.get("expected_clicks_per_month") or 0),
+        reverse=True,
+    )
+    visible = page_gaps[:KEYWORD_ADVISOR_TOP_N]
+    leftover = len(page_gaps) - len(visible)
+
+    lines: list[str] = [
+        "### КЛЮЧЕВЫЕ ЗАПРОСЫ ДЛЯ ЭТОЙ СТРАНИЦЫ",
+        (
+            "Данные ниже — Wordstat-объёмы и позиции в Яндексе из БД, "
+            "посчитанные детерминированно (не LLM)."
+        ),
+        "НЕ выдумывай новые запросы. НЕ выдумывай объёмы и позиции.",
+        "Используй ТОЛЬКО строки ниже.",
+        "",
+    ]
+    for idx, g in enumerate(visible, start=1):
+        query = str(g.get("query") or "—")
+        volume = int(g.get("wordstat_volume") or 0)
+        peak = g.get("wordstat_volume_peak_3mo")
+        is_off = bool(g.get("is_off_season"))
+        position = g.get("current_position")
+        uplift = int(g.get("expected_clicks_per_month") or 0)
+        miss_title = list(g.get("missing_in_title_lemmas") or [])
+        miss_h1 = list(g.get("missing_in_h1_lemmas") or [])
+        current_title = (g.get("page_current_title") or "—").strip() or "—"
+        current_h1 = (g.get("page_current_h1") or "—").strip() or "—"
+
+        lines.append(f"{idx}. Запрос: «{query}»")
+        if peak and peak > volume:
+            lines.append(
+                f"   Wordstat: {volume} поисков/мес "
+                f"(пик {peak} в ближайшие 3 мес)"
+                + ("  · сейчас не сезон" if is_off else "")
+            )
+        else:
+            lines.append(f"   Wordstat: {volume} поисков/мес")
+        if position is not None:
+            lines.append(f"   Сейчас в выдаче: позиция {position}")
+        else:
+            lines.append("   Сейчас в выдаче: не ранжируется")
+        lines.append(
+            f"   Ожидаемый рост: +{uplift} кликов/мес если выйти в топ-5"
+        )
+        if miss_title:
+            lines.append(
+                "   В title нет лемм: "
+                + ", ".join(f"«{t}»" for t in miss_title)
+            )
+        if miss_h1:
+            lines.append(
+                "   В H1 нет лемм: "
+                + ", ".join(f"«{t}»" for t in miss_h1)
+            )
+        lines.append(f"   Сейчас title: «{current_title}»")
+        lines.append(f"   Сейчас H1: «{current_h1}»")
+        lines.append("")
+        lines.append(
+            "   Задача: предложи переписанный title (до 60 символов) и "
+            "H1, в которые естественно входят недостающие леммы. "
+            "НЕ стаффинг — читаемый текст. Сохрани бренд (если есть). "
+            "Не выдумывай факты про страницу."
+        )
+        lines.append("")
+
+    if leftover > 0:
+        lines.append(
+            f"(есть ещё {leftover} меньших по объёму — см. /studio/queries)"
+        )
+
+    return "\n".join(lines).rstrip()
+
+
 @router.post(
     "/sites/{site_id}/deep-extracts/{extract_id}/analyze",
     response_model=DeepExtractAnalyzeOut,
@@ -4672,6 +4818,18 @@ async def analyze_deep_extract(
         + (business_ctx + "\n\n" if business_ctx else "")
         + extract_block
     )
+
+    # Inject deterministic keyword-gap context (CLAUDE.md rule 5: every
+    # fact comes from the pre-computed `KeywordGap` cache, NOT from the
+    # LLM looking at the page text). We add this to the USER message,
+    # never to `_DEEP_ANALYZE_SYSTEM` (the system prompt is locked).
+    # When no gaps cached for this page, `_build_keyword_gaps_block`
+    # returns None and the advisor works exactly as before.
+    keyword_block = await _build_keyword_gaps_block(
+        db, site_id=site_id, page_id=row.page_id,
+    )
+    if keyword_block:
+        user_msg = user_msg + "\n\n" + keyword_block
 
     import anyio
     # Vercel proxy free-tier hard-caps function execution at ~60s, so we use
@@ -5043,6 +5201,525 @@ async def get_robots_audit(
 
     payload = row.extra if isinstance(row.extra, dict) else {}
     return {**payload, "cached_at": row.ts.isoformat() if row.ts else None}
+
+
+# ── Keyword-gap endpoints ────────────────────────────────────────────
+#
+# Four endpoints feed the Studio /keyword-gaps view + the apply-fix
+# workflow. The data is produced by `core_audit/keyword_match/` and
+# cached by the `keyword_match_for_site` Celery task as a single
+# `analysis_events` row with `stage="keyword_gaps"`. These endpoints
+# READ that row only — they never recompute.
+#
+# Anti-fabrication (CLAUDE.md rule 5): all queries / volumes / positions
+# come from the cached row. The PATCH endpoint that creates a
+# `PageReviewRecommendation` similarly cites the cached numbers; the
+# LLM never generates them.
+
+
+class KeywordGapTop(BaseModel):
+    """Compact gap surface for the site-level dashboard card."""
+    query: str
+    wordstat_volume: int
+    current_position: float | None
+    expected_clicks_uplift: int
+    missing_tokens: list[str]
+    is_off_season: bool
+
+
+class KeywordGapTopPage(BaseModel):
+    page_id: str
+    page_url: str
+    page_title: str | None
+    gaps_count: int
+    page_potential_clicks: int
+    top_gap: KeywordGapTop
+
+
+class KeywordGapsSummaryOut(BaseModel):
+    """Site-level summary returned by GET /keyword-gaps."""
+    computed_at: str | None
+    total_gaps: int
+    total_potential_clicks_per_month: int
+    pages_with_gaps: int
+    top_pages: list[KeywordGapTopPage]
+
+
+class KeywordGapForPage(BaseModel):
+    """Single-page gap returned by GET /pages/{page_id}/keyword-gaps."""
+    query: str
+    query_id: str
+    wordstat_volume: int
+    wordstat_volume_peak_3mo: int | None
+    is_off_season: bool
+    current_position: float | None
+    expected_clicks_uplift: int
+    missing_in_title_lemmas: list[str]
+    missing_in_h1_lemmas: list[str]
+    missing_in_h2_lemmas: list[str]
+    missing_in_first_para_lemmas: list[str]
+    has_synonym_in_title: bool
+
+
+class PageKeywordGapsOut(BaseModel):
+    page_id: str
+    page_url: str | None
+    computed_at: str | None
+    gaps: list[KeywordGapForPage]
+
+
+async def _latest_keyword_gaps_event(
+    db: AsyncSession, site_id: uuid.UUID,
+) -> AnalysisEvent | None:
+    """Most recent terminal `keyword_gaps` event for this site.
+
+    Picks the latest `done` or `skipped` row — both carry a payload
+    with `gaps: []` so consumers don't need a separate branch. `failed`
+    rows are excluded because their `extra` may be empty.
+    """
+    return (await db.execute(
+        select(AnalysisEvent)
+        .where(
+            AnalysisEvent.site_id == site_id,
+            AnalysisEvent.stage == "keyword_gaps",
+            AnalysisEvent.status.in_(("done", "skipped")),
+        )
+        .order_by(desc(AnalysisEvent.ts))
+        .limit(1)
+    )).scalar_one_or_none()
+
+
+@router.get(
+    "/sites/{site_id}/keyword-gaps",
+    response_model=KeywordGapsSummaryOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_site_keyword_gaps(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> KeywordGapsSummaryOut:
+    """Site-level summary + top-page list of keyword gaps.
+
+    Returns 404 when keyword_match has never run for this site —
+    frontend uses that to render the «запустите keyword_match сейчас»
+    CTA.
+    """
+    await _site_or_404(db, site_id)
+
+    row = await _latest_keyword_gaps_event(db, site_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="keyword_match has never been run for this site",
+        )
+    extra = row.extra if isinstance(row.extra, dict) else {}
+    all_gaps = extra.get("gaps") or []
+    if not isinstance(all_gaps, list):
+        all_gaps = []
+
+    # Group gaps by page, sum potential clicks, pick each page's top gap.
+    by_page: dict[str, list[dict]] = {}
+    for g in all_gaps:
+        if not isinstance(g, dict):
+            continue
+        pid = str(g.get("page_id") or "")
+        if not pid:
+            continue
+        by_page.setdefault(pid, []).append(g)
+
+    top_pages: list[KeywordGapTopPage] = []
+    for pid, gaps in by_page.items():
+        # gaps within a page sorted DESC by expected uplift
+        gaps_sorted = sorted(
+            gaps,
+            key=lambda g: int(g.get("expected_clicks_per_month") or 0),
+            reverse=True,
+        )
+        top = gaps_sorted[0]
+        miss_title = list(top.get("missing_in_title_lemmas") or [])
+        miss_h1 = list(top.get("missing_in_h1_lemmas") or [])
+        # «missing tokens» surface mixes title+H1 misses (deduped,
+        # title order preserved) — the dashboard card needs a single
+        # short list, not two columns.
+        seen: set[str] = set()
+        missing_tokens: list[str] = []
+        for t in miss_title + miss_h1:
+            if t not in seen:
+                seen.add(t)
+                missing_tokens.append(t)
+
+        page_potential = sum(
+            int(g.get("expected_clicks_per_month") or 0) for g in gaps_sorted
+        )
+        top_pages.append(KeywordGapTopPage(
+            page_id=pid,
+            page_url=str(top.get("page_url") or ""),
+            page_title=top.get("page_current_title"),
+            gaps_count=len(gaps_sorted),
+            page_potential_clicks=page_potential,
+            top_gap=KeywordGapTop(
+                query=str(top.get("query") or ""),
+                wordstat_volume=int(top.get("wordstat_volume") or 0),
+                current_position=top.get("current_position"),
+                expected_clicks_uplift=int(
+                    top.get("expected_clicks_per_month") or 0,
+                ),
+                missing_tokens=missing_tokens,
+                is_off_season=bool(top.get("is_off_season")),
+            ),
+        ))
+
+    # Order pages by their summed uplift DESC — the dashboard then lists
+    # «biggest wins first».
+    top_pages.sort(key=lambda p: p.page_potential_clicks, reverse=True)
+
+    return KeywordGapsSummaryOut(
+        computed_at=extra.get("computed_at"),
+        total_gaps=int(extra.get("total_gaps") or 0),
+        total_potential_clicks_per_month=int(
+            extra.get("total_potential_clicks_per_month") or 0,
+        ),
+        pages_with_gaps=int(extra.get("pages_with_gaps") or 0),
+        top_pages=top_pages,
+    )
+
+
+@router.get(
+    "/pages/{page_id}/keyword-gaps",
+    response_model=PageKeywordGapsOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_page_keyword_gaps(
+    page_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> PageKeywordGapsOut:
+    """Keyword gaps for ONE page.
+
+    Behavior matrix:
+      - keyword_match never ran for site → 404
+      - ran, this page has no gaps → 200 with `gaps: []` (valid state
+        «эта страница в порядке»)
+      - ran, this page has gaps → 200 with full list
+    """
+    page = await db.get(Page, page_id)
+    if page is None:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    row = await _latest_keyword_gaps_event(db, page.site_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="keyword_match has never been run for this site",
+        )
+    extra = row.extra if isinstance(row.extra, dict) else {}
+    all_gaps = extra.get("gaps") or []
+    if not isinstance(all_gaps, list):
+        all_gaps = []
+
+    page_id_str = str(page_id)
+    page_gaps_raw = [
+        g for g in all_gaps
+        if isinstance(g, dict) and str(g.get("page_id") or "") == page_id_str
+    ]
+    page_gaps_raw.sort(
+        key=lambda g: int(g.get("expected_clicks_per_month") or 0),
+        reverse=True,
+    )
+
+    gaps_out = [
+        KeywordGapForPage(
+            query=str(g.get("query") or ""),
+            query_id=str(g.get("query_id") or ""),
+            wordstat_volume=int(g.get("wordstat_volume") or 0),
+            wordstat_volume_peak_3mo=g.get("wordstat_volume_peak_3mo"),
+            is_off_season=bool(g.get("is_off_season")),
+            current_position=g.get("current_position"),
+            expected_clicks_uplift=int(
+                g.get("expected_clicks_per_month") or 0,
+            ),
+            missing_in_title_lemmas=list(g.get("missing_in_title_lemmas") or []),
+            missing_in_h1_lemmas=list(g.get("missing_in_h1_lemmas") or []),
+            missing_in_h2_lemmas=list(g.get("missing_in_h2_lemmas") or []),
+            missing_in_first_para_lemmas=list(
+                g.get("missing_in_first_para_lemmas") or [],
+            ),
+            has_synonym_in_title=bool(g.get("has_synonym_in_title")),
+        )
+        for g in page_gaps_raw
+    ]
+
+    return PageKeywordGapsOut(
+        page_id=page_id_str,
+        page_url=page.url,
+        computed_at=extra.get("computed_at"),
+        gaps=gaps_out,
+    )
+
+
+class KeywordGapsRefreshOut(BaseModel):
+    status: str
+    task_id: str | None = None
+    run_id: str | None = None
+    deduped: bool = False
+
+
+@router.post(
+    "/sites/{site_id}/keyword-gaps/refresh",
+    response_model=KeywordGapsRefreshOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def refresh_keyword_gaps(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> KeywordGapsRefreshOut:
+    """Manual «recompute keyword gaps» button.
+
+    Fires the Celery task asynchronously and returns immediately so
+    the UI can poll the activity feed for `stage="keyword_gaps"`
+    terminals.
+    """
+    await _site_or_404(db, site_id)
+
+    run_id = str(uuid.uuid4())
+    from app.collectors.tasks import keyword_match_for_site
+
+    task = keyword_match_for_site.apply_async(
+        args=[str(site_id)], kwargs={"run_id": run_id},
+    )
+    return KeywordGapsRefreshOut(
+        status="queued",
+        task_id=str(task.id) if task and task.id else None,
+        run_id=run_id,
+    )
+
+
+class KeywordPlacementApplyBody(BaseModel):
+    page_id: uuid.UUID
+    query_id: uuid.UUID
+    new_title: str | None = Field(default=None, max_length=200)
+    new_h1: str | None = Field(default=None, max_length=200)
+
+
+class KeywordPlacementApplyOut(BaseModel):
+    recommendation_id: str
+    priority: str
+    priority_score: int
+
+
+_KEYWORD_PLACEMENT_PRIORITY_HIGH_THRESHOLD = 10
+
+
+async def _get_or_create_stub_review_for_page(
+    db: AsyncSession, page: Page,
+) -> PageReview:
+    """Return the latest completed review for `page`, or build a stub.
+
+    Mirrors the harmful_fix pattern (`_get_or_create_review`): pages
+    that have never gone through the full review pipeline still need a
+    parent row so a recommendation has somewhere to attach. The stub
+    is marked `completed` so it shows up in the page's rec list
+    immediately.
+    """
+    import hashlib
+
+    existing = (await db.execute(
+        select(PageReview)
+        .where(PageReview.page_id == page.id)
+        .where(PageReview.status == "completed")
+        .order_by(desc(PageReview.reviewed_at))
+        .limit(1)
+    )).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    seed = "|".join([
+        str(page.id),
+        page.title or "",
+        page.h1 or "",
+        "keyword_placement_v1",
+    ])
+    composite_hash = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    stub = PageReview(
+        page_id=page.id,
+        site_id=page.site_id,
+        coverage_decision_id=None,
+        target_intent_code="keyword_placement",
+        composite_hash=composite_hash,
+        reviewer_model="keyword_placement_v1",
+        reviewer_version="1.0.0",
+        status="completed",
+        cost_usd=0.0,
+        input_tokens=0,
+        output_tokens=0,
+        page_level_summary={"source": "keyword_placement"},
+    )
+    db.add(stub)
+    await db.flush()
+    return stub
+
+
+@router.post(
+    "/recommendations/keyword-placement/apply",
+    response_model=KeywordPlacementApplyOut,
+    dependencies=[Depends(_require_admin)],
+)
+async def apply_keyword_placement(
+    body: KeywordPlacementApplyBody,
+    db: AsyncSession = Depends(get_db),
+) -> KeywordPlacementApplyOut:
+    """Materialize a keyword-placement fix as a `PageReviewRecommendation`.
+
+    Reads the cached `keyword_gaps` row to find the (page_id, query_id)
+    gap, then creates a recommendation that the owner can apply through
+    the existing /studio/pages workflow. Outcome tracking (14-day delta)
+    then picks it up automatically.
+
+    Idempotent: `source_finding_id = "keyword_placement.{query_id}"` —
+    a second call for the same pair updates the existing row's
+    before/after/reasoning instead of duplicating.
+    """
+    if not body.new_title and not body.new_h1:
+        raise HTTPException(
+            status_code=400,
+            detail="either new_title or new_h1 must be provided",
+        )
+
+    page = await db.get(Page, body.page_id)
+    if page is None:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    # Read the cached gap to source uplift / volume / position
+    # numbers — never derive these from the page text or the LLM.
+    row = await _latest_keyword_gaps_event(db, page.site_id)
+    if row is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "keyword_match has not been run for this site yet — "
+                "press «Пересчитать ключевые дыры» first"
+            ),
+        )
+    extra = row.extra if isinstance(row.extra, dict) else {}
+    all_gaps = extra.get("gaps") or []
+    page_id_str = str(body.page_id)
+    query_id_str = str(body.query_id)
+    gap = next(
+        (
+            g for g in all_gaps
+            if isinstance(g, dict)
+            and str(g.get("page_id") or "") == page_id_str
+            and str(g.get("query_id") or "") == query_id_str
+        ),
+        None,
+    )
+    if gap is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no cached keyword gap for this (page, query) pair",
+        )
+
+    uplift = int(gap.get("expected_clicks_per_month") or 0)
+    volume = int(gap.get("wordstat_volume") or 0)
+    position = gap.get("current_position")
+    query_text = str(gap.get("query") or "")
+
+    priority = (
+        "high"
+        if uplift >= _KEYWORD_PLACEMENT_PRIORITY_HIGH_THRESHOLD
+        else "medium"
+    )
+
+    # Determine before/after pair. If owner provided both new_title and
+    # new_h1 we prefer title (the more impactful surface) for the
+    # single before/after slot; the H1 edit can come as a follow-up rec.
+    if body.new_title:
+        before_text = (gap.get("page_current_title") or page.title) or ""
+        after_text = body.new_title.strip()
+        category_used = "title"
+    else:
+        before_text = (gap.get("page_current_h1") or page.h1) or ""
+        after_text = (body.new_h1 or "").strip()
+        category_used = "h1_structure"
+
+    pos_str = (
+        f"позиция {position}"
+        if position is not None
+        else "ещё не ранжируется"
+    )
+    reasoning_ru = (
+        f"Добавлены ключевые слова для запроса «{query_text}» "
+        f"(Wordstat: {volume}/мес, {pos_str}). "
+        f"Прогноз: +{uplift} кликов/мес при выходе в топ-5. "
+        "Источник — детерминированный keyword_match (леммы из БД, "
+        "без LLM-фантазий)."
+    )
+
+    # `source_finding_id` makes the rec dedup-able across reruns.
+    # PageReviewRecommendation.source_finding_id is String(120) — the
+    # «keyword_placement.<uuid>» format is 56 chars, safe.
+    source_finding_id = f"keyword_placement.{query_id_str}"
+
+    review = await _get_or_create_stub_review_for_page(db, page)
+
+    existing = (await db.execute(
+        select(PageReviewRecommendation)
+        .where(
+            PageReviewRecommendation.review_id == review.id,
+            PageReviewRecommendation.source_finding_id == source_finding_id,
+            PageReviewRecommendation.user_status == "pending",
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+
+    if existing is not None:
+        # Upsert: refresh the editable fields so the owner sees the
+        # latest LLM/manual title proposal without a duplicate row.
+        existing.before_text = before_text
+        existing.after_text = after_text
+        existing.reasoning_ru = reasoning_ru
+        existing.category = category_used
+        existing.priority = priority
+        existing.priority_score = float(uplift)
+        existing.estimated_impact = {
+            "source": "keyword_placement",
+            "query": query_text,
+            "query_id": query_id_str,
+            "wordstat_volume": volume,
+            "current_position": position,
+            "expected_clicks_per_month": uplift,
+        }
+        await db.commit()
+        rec_id = existing.id
+    else:
+        rec = PageReviewRecommendation(
+            review_id=review.id,
+            site_id=page.site_id,
+            category=category_used,
+            priority=priority,
+            before_text=before_text,
+            after_text=after_text,
+            reasoning_ru=reasoning_ru,
+            source_finding_id=source_finding_id,
+            priority_score=float(uplift),
+            estimated_impact={
+                "source": "keyword_placement",
+                "query": query_text,
+                "query_id": query_id_str,
+                "wordstat_volume": volume,
+                "current_position": position,
+                "expected_clicks_per_month": uplift,
+            },
+        )
+        db.add(rec)
+        await db.commit()
+        await db.refresh(rec)
+        rec_id = rec.id
+
+    return KeywordPlacementApplyOut(
+        recommendation_id=str(rec_id),
+        priority=priority,
+        priority_score=uplift,
+    )
 
 
 __all__ = ["router"]

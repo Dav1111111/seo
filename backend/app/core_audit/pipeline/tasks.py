@@ -357,6 +357,67 @@ def queue_intent_review_chain(site_id: str, run_id: str | None) -> bool:
         return False
 
 
+# ── keyword_match stage helpers ──────────────────────────────────────
+#
+# `keyword_match` runs AFTER `wordstat_refresh_site` (it consumes
+# `SearchQuery.wordstat_volume`) and BEFORE downstream consumers
+# (brain / priority). It's a deterministic compute + cache pass, no
+# LLM, so failure here is informational — we don't cascade-skip the
+# rest of the pipeline.
+#
+# Pipeline cascade invariant (CLAUDE.md rule 1): every code path
+# emits a `keyword_gaps:<terminal>` event so the wrapper closes
+# cleanly when this stage is in the `queued` list.
+
+
+def queue_keyword_match(site_id: str, run_id: str | None) -> bool:
+    """Fire the keyword_match Celery task. Returns False on dispatch
+    failure so the caller can emit a `failed` terminal."""
+    from app.collectors.tasks import keyword_match_for_site
+
+    try:
+        keyword_match_for_site.apply_async(
+            args=[site_id],
+            kwargs={"run_id": run_id},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "pipeline.keyword_match_dispatch_failed site=%s err=%s",
+            site_id, exc,
+        )
+        return False
+
+
+async def _mark_keyword_match_dispatch_failed(
+    db, site_id: str, run_id: str | None,
+) -> None:
+    await emit_terminal(
+        db, site_id, "keyword_gaps", "failed",
+        "Не удалось запустить сравнение запросов с леммами страниц.",
+        run_id=run_id,
+    )
+
+
+async def skip_keyword_match_after_wordstat_failure(
+    db, site_id: str, run_id: str | None,
+) -> None:
+    """Emit a `keyword_gaps:skipped` terminal when the upstream Wordstat
+    refresh failed/skipped, so a pipeline that pre-declared
+    `keyword_gaps` in its `queued` list can still close cleanly.
+
+    Callers should invoke this from the Wordstat task's failure paths
+    iff `keyword_gaps` is part of the active pipeline run. (Standalone
+    Wordstat refreshes with no pipeline don't need to call it — the
+    activity reconciler only cares about declared queued stages.)
+    """
+    await emit_terminal(
+        db, site_id, "keyword_gaps", "skipped",
+        "Пропускаем — Wordstat не обновился, нечего с чем сравнивать.",
+        run_id=run_id,
+    )
+
+
 @celery_app.task(name="pipeline_intent_then_review", bind=True, max_retries=0)
 def pipeline_intent_then_review_task(
     self,
@@ -662,5 +723,7 @@ __all__ = [
     "pipeline_intent_then_review_task",
     "pipeline_after_primary_task",
     "queue_intent_review_chain",
+    "queue_keyword_match",
+    "skip_keyword_match_after_wordstat_failure",
     "robots_audit_task",
 ]

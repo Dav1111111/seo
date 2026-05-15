@@ -564,6 +564,187 @@ def collect_site_metrica(site_id: str, run_id: str | None = None):
     return _run_async(_run())
 
 
+# ── Keyword-gap matcher (Wordstat × page lemmas) ─────────────────────
+#
+# Stage name in `analysis_events` is `"keyword_gaps"` (plural) — that's
+# also the JSONB cache key the studio /keyword-gaps endpoints read back.
+# The task name is singular `keyword_match_for_site` to match the
+# folder it lives next to (`core_audit/keyword_match/`).
+#
+# Idempotency: the stage is cached via the latest analysis_events row.
+# Reading code (studio endpoints, brain card) always picks the most
+# recent terminal row, so re-running the task just appends a fresher
+# row — no UPDATE-in-place is needed and we avoid race conditions on
+# concurrent triggers. (Pattern mirrors `robots_audit` and `metrica`.)
+
+@celery_app.task(name="keyword_match_for_site", bind=True, max_retries=1)
+def keyword_match_for_site(self, site_id: str, run_id: str | None = None):
+    """Recompute keyword gaps for a site and cache them as a single
+    `analysis_events` row with `stage="keyword_gaps"`.
+
+    Pipeline cascade invariant (CLAUDE.md rule 1): every code path
+    emits a started + terminal event so the wrapper closes cleanly.
+
+    Skip semantics:
+      * `failed`  — site not found or compute_keyword_gaps raised.
+      * `skipped` — site has zero SearchQuery rows with `wordstat_volume`
+        (Wordstat has never been collected — running the matcher would
+        just return []). UI tells the owner to refresh Wordstat first.
+      * `done` with empty gaps — Wordstat has data but every query
+        already ranks well / lemmas already match. «Всё в порядке».
+      * `done` with N gaps — the typical case.
+
+    The terminal `extra` JSON is the source of truth for the GET
+    endpoints — they don't recompute, they read this row.
+    """
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.core_audit.keyword_match import (
+        compute_keyword_gaps, summarize_gaps,
+    )
+    from app.models.search_query import SearchQuery
+    from datetime import datetime, timezone
+
+    def _gap_to_dict(g) -> dict:
+        """Serialize KeywordGap to a JSONB-safe dict.
+
+        UUIDs → strings (asyncpg can't store raw UUIDs in JSONB);
+        everything else is already primitive.
+        """
+        return {
+            "site_id": str(g.site_id),
+            "page_id": str(g.page_id),
+            "page_url": g.page_url,
+            "page_current_title": g.page_current_title,
+            "page_current_h1": g.page_current_h1,
+            "query": g.query,
+            "query_id": str(g.query_id),
+            "wordstat_volume": g.wordstat_volume,
+            "wordstat_volume_peak_3mo": g.wordstat_volume_peak_3mo,
+            "is_off_season": g.is_off_season,
+            "current_position": g.current_position,
+            "expected_clicks_per_month": g.expected_clicks_per_month,
+            "missing_in_title_lemmas": list(g.missing_in_title_lemmas or []),
+            "missing_in_h1_lemmas": list(g.missing_in_h1_lemmas or []),
+            "missing_in_h2_lemmas": list(g.missing_in_h2_lemmas or []),
+            "missing_in_first_para_lemmas": list(
+                g.missing_in_first_para_lemmas or []
+            ),
+            "has_synonym_in_title": g.has_synonym_in_title,
+            "decision_tree_action": g.decision_tree_action,
+        }
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if site is None:
+                await emit_terminal(
+                    db, site_id, "keyword_gaps", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "keyword_gaps",
+                    "error": "Site not found",
+                }
+
+            await log_event(
+                db, site_id, "keyword_gaps", "started",
+                "Сравниваю запросы Wordstat с леммами страниц…",
+                run_id=run_id,
+            )
+
+            # Gate: if no SearchQuery rows carry a Wordstat volume yet,
+            # the matcher returns []. Distinguish «не считали» from
+            # «считали, дыр нет» so the UI shows the right CTA.
+            from sqlalchemy import func as _sa_func
+            queries_with_volume = (await db.execute(
+                select(_sa_func.count(SearchQuery.id))
+                .where(
+                    SearchQuery.site_id == site.id,
+                    SearchQuery.wordstat_volume.is_not(None),
+                )
+            )).scalar_one() or 0
+
+            if queries_with_volume == 0:
+                await emit_terminal(
+                    db, site_id, "keyword_gaps", "skipped",
+                    "Нет запросов с объёмом Wordstat — соберите его "
+                    "сначала (кнопка «Обновить объёмы Wordstat»).",
+                    extra={
+                        "reason": "no_wordstat_volume",
+                        "computed_at": datetime.now(timezone.utc).isoformat(),
+                        "total_gaps": 0,
+                        "total_potential_clicks_per_month": 0,
+                        "pages_with_gaps": 0,
+                        "gaps": [],
+                    },
+                    run_id=run_id,
+                )
+                return {
+                    "status": "skipped",
+                    "stage": "keyword_gaps",
+                    "reason": "no_wordstat_volume",
+                }
+
+            try:
+                gaps = await compute_keyword_gaps(db, site.id)
+                summary = summarize_gaps(gaps, site.id)
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                await emit_terminal(
+                    db, site_id, "keyword_gaps", "failed",
+                    f"Сравнение упало: {str(exc)[:200]}",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "keyword_gaps",
+                    "error": str(exc),
+                }
+
+            payload = {
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "total_gaps": int(summary.total_gaps),
+                "total_potential_clicks_per_month": int(
+                    summary.total_potential_clicks_per_month,
+                ),
+                "pages_with_gaps": int(summary.pages_with_gaps),
+                "gaps": [_gap_to_dict(g) for g in gaps],
+            }
+
+            if not gaps:
+                message = (
+                    "Дыр по ключевым словам не найдено — все запросы "
+                    "с объёмом либо в топ-5, либо уже покрыты леммами."
+                )
+            else:
+                message = (
+                    f"Нашёл {payload['total_gaps']} дыр на "
+                    f"{payload['pages_with_gaps']} страницах · "
+                    f"потенциал +{payload['total_potential_clicks_per_month']} "
+                    "кликов/мес."
+                )
+
+            await emit_terminal(
+                db, site_id, "keyword_gaps", "done", message,
+                extra=payload, run_id=run_id,
+            )
+            return {
+                "status": "done",
+                "stage": "keyword_gaps",
+                "total_gaps": payload["total_gaps"],
+                "pages_with_gaps": payload["pages_with_gaps"],
+            }
+
+    return _run_async(_run())
+
+
 @celery_app.task(name="indexnow_ping_site", bind=True, max_retries=1)
 def indexnow_ping_site(self, site_id: str, run_id: str | None = None):
     """Submit the site's known URLs to Yandex via IndexNow.
@@ -979,7 +1160,45 @@ def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
             )
             return {"status": terminal, **stats}
 
-    return _run_async(_run())
+    result = _run_async(_run())
+
+    # Chain keyword_match after a successful Wordstat refresh — the
+    # matcher reads SearchQuery.wordstat_volume that we just wrote.
+    # Pipeline cascade invariant (CLAUDE.md rule 1): if Wordstat
+    # failed/skipped and `keyword_gaps` was pre-declared in the run's
+    # queued list, the upstream pipeline reconciler needs a
+    # `keyword_gaps:<terminal>` event. We dispatch the keyword_match
+    # task in both success and skip-with-data paths; on hard failure
+    # we emit a `keyword_gaps:skipped` so the wrapper closes cleanly.
+    try:
+        status = (result or {}).get("status") if isinstance(result, dict) else None
+        if status == "done":
+            # Fire-and-forget; the task emits its own terminal.
+            from app.core_audit.pipeline.tasks import queue_keyword_match
+            queue_keyword_match(site_id, run_id)
+        elif status in ("failed", "skipped"):
+            # Only mark the downstream stage as skipped when this run
+            # was part of a pipeline (run_id is the only signal we
+            # have at this layer — standalone refreshes pass None).
+            if run_id:
+                from app.core_audit.pipeline.tasks import (
+                    skip_keyword_match_after_wordstat_failure,
+                )
+
+                async def _mark_kw_skipped() -> None:
+                    async with task_session() as db:
+                        await skip_keyword_match_after_wordstat_failure(
+                            db, site_id, run_id,
+                        )
+
+                _run_async(_mark_kw_skipped())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "wordstat.keyword_match_chain_dispatch_failed site=%s err=%s",
+            site_id, exc,
+        )
+
+    return result
 
 
 # Cap on how many seed phrases we'll send to /topRequests in a single

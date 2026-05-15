@@ -274,6 +274,132 @@ export async function getRobotsAudit(
   }
 }
 
+// ── Keyword gaps (Wordstat-driven recommendations) ──────────────────
+// Backend: backend/app/core_audit/keyword_match/ + the studio.py
+// endpoints under `/studio/sites/{site_id}/keyword-gaps`. Per-page
+// detail at `/studio/pages/{page_id}/keyword-gaps`. Apply pipeline
+// creates a `PageReviewRecommendation` the owner sees on /studio/pages.
+
+export type KeywordGapTopGap = {
+  query: string;
+  wordstat_volume: number;
+  current_position: number | null;
+  expected_clicks_uplift: number;
+  missing_tokens: string[];
+  is_off_season: boolean;
+};
+
+export type KeywordGapsTopPage = {
+  page_id: string;
+  page_url: string;
+  page_title: string | null;
+  gaps_count: number;
+  page_potential_clicks: number;
+  top_gap: KeywordGapTopGap;
+};
+
+export type KeywordGapsSummary = {
+  computed_at: string;
+  total_gaps: number;
+  total_potential_clicks_per_month: number;
+  pages_with_gaps: number;
+  top_pages: KeywordGapsTopPage[];
+};
+
+export type KeywordGapDetail = {
+  query: string;
+  query_id: string;
+  wordstat_volume: number;
+  wordstat_volume_peak_3mo: number | null;
+  is_off_season: boolean;
+  current_position: number | null;
+  expected_clicks_uplift: number;
+  missing_in_title_lemmas: string[];
+  missing_in_h1_lemmas: string[];
+  missing_in_h2_lemmas: string[];
+  missing_in_first_para_lemmas: string[];
+  has_synonym_in_title: boolean;
+};
+
+export type PageKeywordGaps = {
+  page_id: string;
+  page_url: string;
+  computed_at: string;
+  gaps: KeywordGapDetail[];
+};
+
+export type KeywordGapsRefreshResult = {
+  status: "queued";
+  task_id: string;
+  run_id: string;
+};
+
+export type KeywordPlacementApplyResult = {
+  recommendation_id: string;
+  priority: "high" | "medium";
+  priority_score: number;
+};
+
+// Site-level summary. Returns null when the analysis has never run
+// (backend 404). Other errors propagate so callers can surface them.
+export async function getKeywordGapsSummary(
+  siteId: string,
+): Promise<KeywordGapsSummary | null> {
+  try {
+    return await apiFetch<KeywordGapsSummary>(
+      `/studio/sites/${siteId}/keyword-gaps`,
+      { base: "admin" },
+    );
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/^API 404\b/.test(msg)) return null;
+    throw e;
+  }
+}
+
+// Per-page detail. `null` means «site analysis never ran» (404).
+// An empty `gaps: []` is a valid 200 response (no work to do) — the
+// UI distinguishes the two.
+export async function getPageKeywordGaps(
+  pageId: string,
+): Promise<PageKeywordGaps | null> {
+  try {
+    return await apiFetch<PageKeywordGaps>(
+      `/studio/pages/${pageId}/keyword-gaps`,
+      { base: "admin" },
+    );
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/^API 404\b/.test(msg)) return null;
+    throw e;
+  }
+}
+
+export async function refreshKeywordGaps(
+  siteId: string,
+): Promise<KeywordGapsRefreshResult> {
+  return apiFetch<KeywordGapsRefreshResult>(
+    `/studio/sites/${siteId}/keyword-gaps/refresh`,
+    { method: "POST", base: "admin" },
+  );
+}
+
+export async function applyKeywordPlacement(args: {
+  page_id: string;
+  query_id: string;
+  new_title?: string;
+  new_h1?: string;
+}): Promise<KeywordPlacementApplyResult> {
+  return apiFetch<KeywordPlacementApplyResult>(
+    `/studio/recommendations/keyword-placement/apply`,
+    {
+      method: "POST",
+      base: "admin",
+      body: JSON.stringify(args),
+    },
+  );
+}
+
 export const api = {
   // Health
   health: () => apiFetch<{ status: string; db: string; redis: string }>("/health"),

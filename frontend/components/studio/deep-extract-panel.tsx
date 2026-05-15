@@ -17,6 +17,7 @@ import {
   type SchemaAudit,
   type SchemaAuditIssue,
 } from "@/lib/api";
+import { KeywordGapsForPage } from "@/components/studio/keyword-gaps-for-page";
 
 /**
  * Deep Extract panel — Playwright-rendered snapshot for a URL.
@@ -153,7 +154,13 @@ export function DeepExtractPanel(props: Props) {
         </p>
       )}
 
-      {extract && <DeepExtractView extract={extract} siteId={props.siteId} />}
+      {extract && (
+        <DeepExtractView
+          extract={extract}
+          siteId={props.siteId}
+          pageId={props.mode === "own" ? props.pageId : null}
+        />
+      )}
     </div>
   );
 }
@@ -161,9 +168,12 @@ export function DeepExtractPanel(props: Props) {
 function DeepExtractView({
   extract,
   siteId,
+  pageId,
 }: {
   extract: DeepExtractRow;
   siteId: string;
+  // null for competitor extracts — keyword-gaps section skips render.
+  pageId: string | null;
 }) {
   const failed = extract.status !== "completed";
   const [analyzing, setAnalyzing] = useState(false);
@@ -556,6 +566,13 @@ function DeepExtractView({
               )
             )}
           </div>
+
+          {/* keyword_match — per-page gaps with «Применить» buttons.
+              Sits below the AI advisor: the LLM's suggested title is
+              already in `ai_summary_md` above, the owner copies it
+              into the inputs here. Competitor extracts pass pageId
+              null and the section auto-hides. */}
+          <KeywordGapsForPage pageId={pageId} />
         </>
       )}
     </div>
