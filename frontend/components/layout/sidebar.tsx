@@ -15,6 +15,7 @@ import {
   BarChart3,
   History,
   Activity,
+  ListChecks,
   Settings,
   TrendingUp,
   PanelLeftClose,
@@ -76,6 +77,7 @@ const NAV: NavGroup[] = [
   {
     title: "Подключения",
     items: [
+      { href: "/studio/activity",    label: "Активность", icon: ListChecks },
       { href: "/studio/connections", label: "Коннекторы", icon: Activity },
       { href: "/settings",           label: "Настройки",  icon: Settings },
     ],
