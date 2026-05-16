@@ -1001,7 +1001,19 @@ export const api = {
         last_position: number | null;
         last_impressions_14d: number | null;
         last_seen_at: string | null;
-        relevance: "own" | "adjacent" | "disputed" | "spam" | "unclassified";
+        // Legacy taxonomy + funnel taxonomy (post-backfill). Widened
+        // so the UI's RelevanceKey union (which includes funnel values)
+        // can be assigned back into this row type without casts.
+        relevance:
+          | "own"
+          | "adjacent"
+          | "disputed"
+          | "spam"
+          | "unclassified"
+          | "direct_product"
+          | "funnel_warm"
+          | "funnel_top"
+          | "out_of_market";
         relevance_set_by: "rules" | "llm" | "user" | null;
         relevance_set_at: string | null;
         relevance_reason_ru: string | null;
@@ -1011,11 +1023,18 @@ export const api = {
       }>;
       coverage: QueriesCoverage;
       relevance_counts: {
+        // Legacy taxonomy — still emitted by backend during rollout.
         own: number;
         adjacent: number;
         disputed: number;
         spam: number;
         unclassified: number;
+        // Funnel taxonomy — written by the rewritten classifier
+        // (commit 13481f2). Optional so old responses still type-check.
+        direct_product?: number;
+        funnel_warm?: number;
+        funnel_top?: number;
+        out_of_market?: number;
       };
     }>(
       `/studio/sites/${siteId}/queries?sort=${sort}&limit=${limit}`,
@@ -1036,7 +1055,16 @@ export const api = {
   studioOverrideRelevance: (
     siteId: string,
     queryId: string,
-    relevance: "own" | "adjacent" | "disputed" | "spam",
+    relevance:
+      | "own"
+      | "adjacent"
+      | "disputed"
+      | "spam"
+      | "unclassified"
+      | "direct_product"
+      | "funnel_warm"
+      | "funnel_top"
+      | "out_of_market",
   ) =>
     apiFetch<{
       query_id: string;

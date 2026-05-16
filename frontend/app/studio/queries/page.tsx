@@ -138,16 +138,23 @@ function isUrlLikeQuery(text: string): boolean {
 // ── Relevance (Studio v2 etap 4) ────────────────────────────────────
 
 type RelevanceKey =
+  // Legacy taxonomy — still emitted while older rows haven't been backfilled.
   | "own"
   | "adjacent"
   | "disputed"
   | "spam"
-  | "unclassified";
+  | "unclassified"
+  // Funnel taxonomy — produced by the rewritten classifier (commit 13481f2).
+  | "direct_product"
+  | "funnel_warm"
+  | "funnel_top"
+  | "out_of_market";
 
 const RELEVANCE_META: Record<
   RelevanceKey,
   { label: string; short: string; className: string; dotColor: string }
 > = {
+  // — Legacy
   own: {
     label: "наш запрос",
     short: "наш",
@@ -178,7 +185,48 @@ const RELEVANCE_META: Record<
     className: "bg-muted text-muted-foreground border border-dashed",
     dotColor: "bg-muted-foreground/40",
   },
+  // — Funnel taxonomy
+  direct_product: {
+    label: "горячий — готов покупать",
+    short: "горячий",
+    className: "bg-emerald-50 text-emerald-800 border-emerald-300",
+    dotColor: "bg-emerald-500",
+  },
+  funnel_warm: {
+    label: "тёплый — выбирает активность",
+    short: "тёплый",
+    className: "bg-blue-50 text-blue-800 border-blue-300",
+    dotColor: "bg-blue-500",
+  },
+  funnel_top: {
+    label: "верх воронки — турист ищет что делать",
+    short: "верх воронки",
+    className: "bg-violet-50 text-violet-800 border-violet-300",
+    dotColor: "bg-violet-500",
+  },
+  out_of_market: {
+    label: "чужой регион — не твой рынок",
+    short: "чужой регион",
+    className: "bg-slate-50 text-slate-700 border-slate-300 opacity-70",
+    dotColor: "bg-slate-400",
+  },
 };
+
+// Safety net: backend may emit a future-unknown value during rollout or
+// migrations. Hitting `RELEVANCE_META[unknown]` returned undefined and
+// any `.label` access crashed the whole queries page. Use this helper
+// instead of direct indexing.
+const RELEVANCE_FALLBACK: typeof RELEVANCE_META[RelevanceKey] = {
+  label: "—",
+  short: "—",
+  className: "bg-muted text-muted-foreground border border-dashed",
+  dotColor: "bg-muted-foreground/40",
+};
+function relevanceMeta(key: string | null | undefined) {
+  if (!key) return RELEVANCE_FALLBACK;
+  return (RELEVANCE_META as Record<string, typeof RELEVANCE_FALLBACK>)[key]
+    ?? RELEVANCE_FALLBACK;
+}
 
 const SET_BY_LABEL: Record<string, string> = {
   rules: "правило",
@@ -195,7 +243,7 @@ function RelevanceBadge({
   setBy: string | null;
   reason: string | null;
 }) {
-  const meta = RELEVANCE_META[relevance];
+  const meta = relevanceMeta(relevance);
   const titleParts: string[] = [meta.label];
   if (setBy) titleParts.push(`источник: ${SET_BY_LABEL[setBy] ?? setBy}`);
   if (reason) titleParts.push(`«${reason}»`);
@@ -392,7 +440,7 @@ export default function StudioQueriesPage() {
 
   async function onOverrideRelevance(
     queryId: string,
-    nextRelevance: "own" | "adjacent" | "disputed" | "spam",
+    nextRelevance: RelevanceKey,
   ) {
     if (!siteId || overrideBusy[queryId]) return;
     setOverrideBusy((b) => ({ ...b, [queryId]: true }));
@@ -444,8 +492,8 @@ export default function StudioQueriesPage() {
     if (!siteId || wsDiscoverPending) return;
     setWsDiscoverPending(true);
     setBanner(null);
-    // Pre-check: Wordstat-discovery iterates «service × geo» pairs from
-    // the site profile. Without services/geo_primary the backend job
+    // Pre-check: Wordstat-discovery builds a seed-plan from product,
+    // services and geo. Without services/geo_primary the backend job
     // immediately no-ops — fail fast in the UI instead of silently
     // burning a run_id.
     try {
@@ -475,7 +523,7 @@ export default function StudioQueriesPage() {
       } else {
         setBanner({
           kind: "ok",
-          text: `Запущен поиск через Wordstat · run_id ${res.run_id.slice(0, 8)}…. Каждая пара "услуга × регион" из профиля даёт ~30 фраз; результаты появятся в таблице по мере поступления.`,
+          text: `Запущен поиск через Wordstat · run_id ${res.run_id.slice(0, 8)}…. Сервис строит seed-план из продукта, услуг, регионов и смежных туристических интентов; результаты появятся в таблице по мере поступления.`,
         });
       }
     } catch (e: unknown) {
@@ -815,10 +863,28 @@ export default function StudioQueriesPage() {
         <div className="flex items-center gap-1.5 text-sm flex-wrap">
           <span className="text-muted-foreground mr-1">Показывать:</span>
           {(
-            ["own", "adjacent", "disputed", "unclassified", "spam"] as RelevanceKey[]
+            [
+              // Show all the values the backend can emit — both legacy
+              // and the new funnel taxonomy. Counts read from the same
+              // `relevance_counts` dict keyed by relevance string.
+              "direct_product",
+              "funnel_warm",
+              "funnel_top",
+              "out_of_market",
+              "own",
+              "adjacent",
+              "disputed",
+              "unclassified",
+              "spam",
+            ] as RelevanceKey[]
           ).map((key) => {
             const count = data.relevance_counts[key] ?? 0;
-            const meta = RELEVANCE_META[key];
+            // Skip chips for legacy values when there are zero rows —
+            // post-backfill «own»/«adjacent» go to 0 and a row of empty
+            // chips is just noise. Always show the new taxonomy.
+            const isLegacy = ["own", "adjacent", "disputed", "unclassified"].includes(key);
+            if (isLegacy && count === 0) return null;
+            const meta = relevanceMeta(key);
             const isHidden = hidden.has(key);
             return (
               <button
@@ -1081,7 +1147,7 @@ export default function StudioQueriesPage() {
 
 type QueryRowShape = {
   query_id: string;
-  relevance: "own" | "adjacent" | "disputed" | "spam" | "unclassified";
+  relevance: RelevanceKey;
   relevance_set_by: "rules" | "llm" | "user" | null;
   relevance_reason_ru: string | null;
 };
@@ -1093,7 +1159,7 @@ function RelevanceCell({
 }: {
   row: QueryRowShape;
   busy: boolean;
-  onOverride: (next: "own" | "adjacent" | "disputed" | "spam") => void;
+  onOverride: (next: RelevanceKey) => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -1136,13 +1202,16 @@ function RelevanceCell({
             </div>
             {(
               [
-                ["own", "наш"],
-                ["adjacent", "смежный"],
+                // New funnel taxonomy — the future. Show first.
+                ["direct_product", "горячий"],
+                ["funnel_warm", "тёплый"],
+                ["funnel_top", "верх воронки"],
+                ["out_of_market", "чужой регион"],
                 ["disputed", "спорный"],
                 ["spam", "мусор"],
-              ] as Array<["own" | "adjacent" | "disputed" | "spam", string]>
+              ] as Array<[RelevanceKey, string]>
             ).map(([val, label]) => {
-              const meta = RELEVANCE_META[val];
+              const meta = relevanceMeta(val);
               const isCurrent = row.relevance === val;
               return (
                 <button
