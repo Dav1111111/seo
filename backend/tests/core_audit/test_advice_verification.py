@@ -114,7 +114,13 @@ def test_page_id_from_link_parses_studio_link():
 def test_celery_tasks_registered():
     """Both tasks (per-card verify + daily sweep) must be importable
     via their registered Celery name — beat would silently no-op if
-    the name didn't match the @task decorator argument."""
+    the name didn't match the @task decorator argument.
+
+    Force-import `app.collectors.tasks` because celery_app's
+    autodiscover runs lazily at worker boot; in a test process it
+    hasn't fired yet.
+    """
+    import app.collectors.tasks  # noqa: F401 — registers @celery_app.task
     from app.workers.celery_app import celery_app
     registered = set(celery_app.tasks.keys())
     assert "verify_advice_card_application" in registered
