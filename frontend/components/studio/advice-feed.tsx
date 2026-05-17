@@ -27,11 +27,15 @@
 
 import { useState, useMemo } from "react";
 import useSWR from "swr";
-import { RefreshCw, Loader2, AlertCircle } from "lucide-react";
+import { RefreshCw, Loader2, AlertCircle, EyeOff } from "lucide-react";
 
 import {
   getAdviceFeed,
+  patchAdviceCardState,
+  reVerifyAdviceCard,
+  type AdviceCard,
   type AdviceFeed,
+  type AdviceCardWorkflowStatus,
   type AdviceSeverity,
 } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
@@ -77,6 +81,42 @@ function matchesFilter(severity: AdviceSeverity, filter: FilterKey): boolean {
   return severityToBucket(severity) === filter;
 }
 
+// Used by SWR's `refreshInterval` to decide whether to keep polling.
+// We poll only while at least one card is mid-verification — the
+// instant every verification has resolved we drop back to 0 and stop
+// hammering the backend.
+function hasPendingVerification(feed: AdviceFeed | null | undefined): boolean {
+  if (!feed) return false;
+  for (const card of feed.cards) {
+    if (card.state.verification_status === "pending") return true;
+  }
+  return false;
+}
+
+// Optimistic-update helper: returns a *new* AdviceFeed with the named
+// card's `verification_status` flipped to "pending". Used when the
+// owner clicks «Применил» or «Проверить снова» so the spinner pill
+// appears instantly. SWR's 5s refresh reconciles to the real status.
+function applyOptimisticVerification(
+  feed: AdviceFeed,
+  cardId: string,
+): AdviceFeed {
+  return {
+    ...feed,
+    cards: feed.cards.map((card) =>
+      card.id === cardId
+        ? {
+            ...card,
+            state: {
+              ...card.state,
+              verification_status: "pending",
+            },
+          }
+        : card,
+    ),
+  };
+}
+
 // ── Component ───────────────────────────────────────────────────────
 
 export function AdviceFeed({ siteId }: { siteId: string }) {
@@ -84,10 +124,32 @@ export function AdviceFeed({ siteId }: { siteId: string }) {
   const { data, error, isLoading, mutate, isValidating } = useSWR<AdviceFeed | null>(
     swrKey,
     () => getAdviceFeed(siteId),
-    { refreshInterval: 0 },
+    {
+      // Poll every 5s while any card is mid-verification — once the
+      // Celery verify task finishes (5-60s typically) the resolved
+      // status appears without owner action. Goes silent (0) the
+      // moment no card is pending. SWR accepts a function form here,
+      // which lets us re-evaluate on every cycle without re-mounting.
+      refreshInterval: (latest) => hasPendingVerification(latest) ? 5000 : 0,
+    },
+  );
+  const archiveKey = siteId ? studioKey("advice", siteId, "archive") : null;
+  const {
+    data: archiveData,
+    mutate: mutateArchive,
+    isValidating: isArchiveValidating,
+  } = useSWR<AdviceFeed | null>(
+    archiveKey,
+    () => getAdviceFeed(siteId, { includeHidden: true }),
+    {
+      refreshInterval: (latest) => hasPendingVerification(latest) ? 5000 : 0,
+    },
   );
 
   const [filter, setFilter] = useState<FilterKey>("all");
+  const [busyCardId, setBusyCardId] = useState<string | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [showArchive, setShowArchive] = useState(false);
 
   // Per-bucket counts — used for both chip badges and the summary line.
   // Recomputed only when `data` changes.
@@ -112,6 +174,15 @@ export function AdviceFeed({ siteId }: { siteId: string }) {
     if (filter === "all") return data.cards;
     return data.cards.filter((c) => matchesFilter(c.severity, filter));
   }, [data, filter]);
+
+  const archiveCards = useMemo(() => {
+    if (!archiveData) return [];
+    return archiveData.cards.filter((c) =>
+      c.state.status === "applied"
+      || c.state.status === "dismissed"
+      || c.state.status === "snoozed"
+    );
+  }, [archiveData]);
 
   // ── Loading ───────────────────────────────────────────────────────
   if (isLoading) return <AdviceSkeleton />;
@@ -150,7 +221,11 @@ export function AdviceFeed({ siteId }: { siteId: string }) {
   }
 
   // ── Empty: never computed (backend 404) OR computed but no cards ──
-  if (!data || data.cards.length === 0) {
+  if (data && data.cards.length === 0 && !archiveData && isArchiveValidating) {
+    return <AdviceSkeleton />;
+  }
+
+  if (!data || (data.cards.length === 0 && archiveData && archiveCards.length === 0)) {
     return (
       <AdviceEmptyState
         siteId={siteId}
@@ -159,6 +234,59 @@ export function AdviceFeed({ siteId }: { siteId: string }) {
         }}
       />
     );
+  }
+
+  async function handleCardStateChange(
+    card: AdviceCard,
+    status: AdviceCardWorkflowStatus,
+  ) {
+    setBusyCardId(card.id);
+    setMutationError(null);
+    // When the owner marks a card «Применил», backend kicks off the
+    // async verify task immediately. Show «Проверяю…» the same tick —
+    // SWR will pick up the resolved status on the next 5s refresh.
+    const previous = data;
+    if (status === "applied" && data) {
+      mutate(applyOptimisticVerification(data, card.id), { revalidate: false });
+    }
+    try {
+      await patchAdviceCardState(siteId, card.id, {
+        status,
+        snooze_days: status === "snoozed" ? 7 : null,
+      });
+      await mutate();
+      await mutateArchive();
+    } catch (e: unknown) {
+      // Roll back the optimistic patch on failure so the pill doesn't
+      // get stuck pretending we triggered verification we didn't.
+      if (status === "applied" && previous) {
+        mutate(previous, { revalidate: false });
+      }
+      setMutationError(getErrorMessage(e));
+    } finally {
+      setBusyCardId(null);
+    }
+  }
+
+  async function handleReVerify(card: AdviceCard) {
+    setBusyCardId(card.id);
+    setMutationError(null);
+    const previous = data;
+    // Optimistic flip to «pending» so the spinner appears the instant
+    // the owner clicks — even before the backend has acknowledged the
+    // queued task. SWR refresh (5s while pending) will reconcile.
+    if (data) {
+      mutate(applyOptimisticVerification(data, card.id), { revalidate: false });
+    }
+    try {
+      await reVerifyAdviceCard(siteId, card.id);
+      await mutate();
+    } catch (e: unknown) {
+      if (previous) mutate(previous, { revalidate: false });
+      setMutationError(getErrorMessage(e));
+    } finally {
+      setBusyCardId(null);
+    }
   }
 
   // ── Default render ────────────────────────────────────────────────
@@ -177,7 +305,39 @@ export function AdviceFeed({ siteId }: { siteId: string }) {
         counts={bucketCounts}
       />
 
-      {filteredCards.length === 0 ? (
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <Button
+          type="button"
+          variant={showArchive ? "secondary" : "outline"}
+          size="sm"
+          onClick={() => setShowArchive((v) => !v)}
+          disabled={isArchiveValidating && !archiveData}
+        >
+          {isArchiveValidating && !archiveData ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+          ) : (
+            <EyeOff className="h-3.5 w-3.5" aria-hidden />
+          )}
+          Скрытые и отложенные ({archiveCards.length})
+        </Button>
+      </div>
+
+      {mutationError && (
+        <Card className="border-red-300 bg-red-50/50 dark:bg-red-950/30 dark:border-red-900/50">
+          <CardContent className="pt-2 text-sm text-red-900 dark:text-red-200">
+            Не удалось сохранить статус: {mutationError}
+          </CardContent>
+        </Card>
+      )}
+
+      {showArchive ? (
+        <ArchivedAdviceList
+          cards={archiveCards}
+          busyCardId={busyCardId}
+          onStateChange={handleCardStateChange}
+          onReVerify={handleReVerify}
+        />
+      ) : filteredCards.length === 0 ? (
         <Card className="border-dashed">
           <CardContent className="pt-2 text-sm text-muted-foreground">
             В этой категории сейчас ничего нет.
@@ -186,16 +346,64 @@ export function AdviceFeed({ siteId }: { siteId: string }) {
       ) : (
         <div className="space-y-2">
           {filteredCards.map((card) => (
-            <AdviceCardRow key={card.id} card={card} />
+            <AdviceCardRow
+              key={card.id}
+              card={card}
+              busy={busyCardId === card.id}
+              onStateChange={handleCardStateChange}
+              onReVerify={handleReVerify}
+            />
           ))}
         </div>
       )}
 
       <FeedFooter
         computedAt={data.computed_at}
-        onRefresh={() => mutate()}
-        refreshing={isValidating}
+        onRefresh={async () => {
+          await mutate();
+          await mutateArchive();
+        }}
+        refreshing={isValidating || isArchiveValidating}
       />
+    </div>
+  );
+}
+
+function ArchivedAdviceList({
+  cards,
+  busyCardId,
+  onStateChange,
+  onReVerify,
+}: {
+  cards: AdviceCard[];
+  busyCardId: string | null;
+  onStateChange: (
+    card: AdviceCard,
+    status: AdviceCardWorkflowStatus,
+  ) => Promise<void> | void;
+  onReVerify: (card: AdviceCard) => Promise<void> | void;
+}) {
+  if (cards.length === 0) {
+    return (
+      <Card className="border-dashed">
+        <CardContent className="pt-2 text-sm text-muted-foreground">
+          Скрытых и отложенных советов сейчас нет.
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {cards.map((card) => (
+        <AdviceCardRow
+          key={card.id}
+          card={card}
+          busy={busyCardId === card.id}
+          workflowMode="archive"
+          onStateChange={onStateChange}
+          onReVerify={onReVerify}
+        />
+      ))}
     </div>
   );
 }

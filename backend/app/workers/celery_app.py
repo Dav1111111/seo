@@ -111,6 +111,15 @@ celery_app.conf.beat_schedule = {
         "task": "wordstat_refresh_all",
         "schedule": crontab(hour=6, minute=0, day_of_week=2),
     },
+    # Wordstat semantic discovery — weekly (Wednesday 06:00 UTC /
+    # 09:00 MSK). Refresh updates known phrases; discovery finds new
+    # direct, warm and top-funnel demand from the business profile.
+    # Kept on a separate day to avoid burning the shared Wordstat quota
+    # at the same time as the volume refresh.
+    "wordstat-discover-weekly": {
+        "task": "wordstat_discover_all",
+        "schedule": crontab(hour=6, minute=0, day_of_week=3),
+    },
     # Query relevance classification — daily 04:40 UTC (07:40 MSK).
     # Runs after collect_webmaster (04:00) so any newly observed queries
     # get classified the same morning instead of waiting for a manual
@@ -170,6 +179,13 @@ celery_app.conf.beat_schedule = {
     "outcomes-followup-daily": {
         "task": "outcomes_followup_daily",
         "schedule": crontab(hour=8, minute=0),
+    },
+    # Advice re-verify — daily (09:00 UTC / 12:00 MSK). Sweeps cards
+    # stuck in `not_yet_visible` within 14 days of «Применил» — owner
+    # may have re-deployed late. Cheap: no-op when nothing's stale.
+    "verify-unverified-daily": {
+        "task": "verify_unverified_daily",
+        "schedule": crontab(hour=9, minute=0),
     },
     # Queue depth watchdog — runs every 2 minutes, writes an alert event
     # to every active site if Redis queue > STUCK_THRESHOLD. Makes worker

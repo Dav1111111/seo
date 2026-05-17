@@ -957,6 +957,31 @@ def wordstat_refresh_all(self):
     return {"queued": queued}
 
 
+@celery_app.task(name="wordstat_discover_all", bind=True, max_retries=0)
+def wordstat_discover_all(self):
+    """Weekly semantic demand discovery for all active sites.
+
+    `wordstat_refresh_all` only updates phrases we already know. This
+    task keeps expanding the market map from each site's profile so the
+    assistant can discover indirect demand like «развлечения сочи» /
+    «джиппинг абхазия» without the owner clicking a button every week.
+
+    The Wordstat key is shared and limited, so fan-out is intentionally
+    serialized with a large countdown between sites.
+    """
+    logger.info("Starting weekly Wordstat discovery for all sites")
+    sites = _run_async(_get_active_sites())
+    queued = []
+    for i, site in enumerate(sites):
+        if site.get("id"):
+            wordstat_discover_site.apply_async(
+                args=[str(site["id"])],
+                countdown=i * 3600,  # one site per hour: 30 seeds at ~40s each
+            )
+            queued.append(site["domain"])
+    return {"queued": queued, "count": len(queued)}
+
+
 @celery_app.task(name="wordstat_refresh_site", bind=True, max_retries=1)
 def wordstat_refresh_site(self, site_id: str, run_id: str | None = None):
     """Refresh `wordstat_volume` + `wordstat_trend` for every SearchQuery
@@ -3162,5 +3187,152 @@ def missing_landings_scan_task(self, site_id: str, run_id: str | None = None):
                 run_id=run_id,
             )
             return {"status": terminal, "items": n_items, "cost_usd": cost}
+
+    return _run_async(_run())
+
+
+
+# ── Advice card auto-verification (post-«Применил») ─────────────────
+#
+# Stage in `analysis_events` is `"advice_verify"`. Pipeline cascade
+# invariant: every started event gets a terminal (done/failed/skipped).
+# Field contract on `advice_card_states`:
+#   verification_status / verified_at / verification_evidence
+# matches the frozen `VerificationResult` from
+# `core_audit.advisor.verification.dispatcher`.
+
+@celery_app.task(name="verify_advice_card_application", bind=True, max_retries=1)
+def verify_advice_card_application(
+    self, site_id: str, card_id: str, run_id: str | None = None,
+):
+    """Run deterministic technical re-check for one applied advice card.
+
+    Re-runs the same Python check that produced the card, writes back
+    `verification_status / verified_at / verification_evidence`, emits an
+    activity event. Idempotent — replays overwrite the prior verdict
+    with the freshest one.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    from sqlalchemy import select as _select
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.core_audit.advisor import collect_advice
+    from app.core_audit.advisor.verification import verify_card
+    from app.models.advice_card_state import AdviceCardState
+
+    async def _run():
+        async with task_session() as db:
+            site_uuid = UUID(site_id)
+
+            await log_event(
+                db, site_uuid, "advice_verify", "started",
+                f"Проверяю, применилась ли правка для совета «{card_id}»…",
+                extra={"card_id": card_id}, run_id=run_id,
+            )
+
+            # Pull the card definition from a fresh aggregator pass so
+            # we have its current category/link/source_module — the
+            # state row alone doesn't carry that.
+            feed = await collect_advice(db, site_uuid)
+            card = next((c for c in feed.cards if c.id == card_id), None)
+            if card is None:
+                await emit_terminal(
+                    db, site_uuid, "advice_verify", "skipped",
+                    "Карточка совета больше не отдаётся системой — "
+                    "проверять нечего.",
+                    extra={"card_id": card_id, "reason": "card_disappeared"},
+                    run_id=run_id,
+                )
+                return {"status": "skipped", "reason": "card_disappeared"}
+
+            try:
+                result = await verify_card(
+                    db, site_uuid, card_id,
+                    card_category=card.category,
+                    card_link=card.link,
+                    card_source_module=card.source_module,
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive; dispatcher already wraps
+                await emit_terminal(
+                    db, site_uuid, "advice_verify", "failed",
+                    f"Проверка сломалась: {str(exc)[:160]}",
+                    extra={"card_id": card_id, "error": str(exc)[:300]},
+                    run_id=run_id,
+                )
+                raise
+
+            # Write verdict to state row (upsert if owner hasn't touched
+            # it yet — happens for cards verified by sweep before any
+            # explicit Применил).
+            state = (await db.execute(
+                _select(AdviceCardState).where(
+                    AdviceCardState.site_id == site_uuid,
+                    AdviceCardState.card_id == card_id,
+                )
+            )).scalar_one_or_none()
+            if state is None:
+                state = AdviceCardState(
+                    site_id=site_uuid, card_id=card_id,
+                    source_module=card.source_module,
+                )
+                db.add(state)
+
+            state.verification_status = result.status
+            state.verified_at = _dt.now(_tz.utc)
+            state.verification_evidence = dict(result.evidence) if result.evidence else None
+
+            terminal = (
+                "done" if result.status in ("verified", "user_attested")
+                else "failed" if result.status == "failed"
+                else "skipped"  # not_yet_visible — re-runs from beat
+            )
+            await emit_terminal(
+                db, site_uuid, "advice_verify", terminal,
+                result.message_ru,
+                extra={
+                    "card_id": card_id,
+                    "verification_status": result.status,
+                    "evidence": result.evidence,
+                },
+                run_id=run_id,
+            )
+
+            return {
+                "status": terminal,
+                "card_id": card_id,
+                "verification_status": result.status,
+            }
+
+    return _run_async(_run())
+
+
+@celery_app.task(name="verify_unverified_daily", bind=True, max_retries=0)
+def verify_unverified_daily(self):
+    """Beat-only sweep: re-runs verify on every card stuck in
+    `not_yet_visible` whose `applied_at` is within the last 14 days.
+    Owner may have re-deployed late; this picks up the change without
+    requiring a manual «Перепроверить» click.
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from sqlalchemy import select as _select
+    from app.models.advice_card_state import AdviceCardState
+
+    async def _run():
+        async with task_session() as db:
+            cutoff = _dt.now(_tz.utc) - _td(days=14)
+            rows = (await db.execute(
+                _select(
+                    AdviceCardState.site_id, AdviceCardState.card_id,
+                ).where(
+                    AdviceCardState.verification_status == "not_yet_visible",
+                    AdviceCardState.applied_at >= cutoff,
+                )
+                .limit(200)
+            )).all()
+        # Re-queue outside the session — verify writes its own session.
+        for site_uuid, card_id in rows:
+            verify_advice_card_application.apply_async(
+                args=[str(site_uuid), card_id],
+            )
+        return {"requeued": len(rows)}
 
     return _run_async(_run())

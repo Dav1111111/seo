@@ -20,6 +20,7 @@ header `_require_admin` already used by `app/api/v1/admin_ops.py`.
 from __future__ import annotations
 
 import logging
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -28,18 +29,25 @@ logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import case, desc, select
+from sqlalchemy import case, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import require_admin
 from app.config import settings
+from app.core_audit.activity import log_event
+from app.core_audit.outcomes.baseline import baseline_metrics
 from app.database import get_db
+from app.models.advice_card_state import AdviceCardState
 from app.models.analysis_event import AnalysisEvent
 from app.models.daily_metric import DailyMetric
 from app.models.search_query import SearchQuery
 from app.models.outcome_snapshot import OutcomeSnapshot
 from app.models.page import Page
 from app.models.site import Site
+from app.core_audit.query_coverage import (
+    coverage_for_query as _coverage_for_query,
+    query_strategy_for_row as _query_strategy_for_row,
+)
 from app.core_audit.review.models import PageReview, PageReviewRecommendation
 from sqlalchemy import func as sa_func
 
@@ -66,7 +74,10 @@ def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
 WORDSTAT_STALE_AFTER_DAYS = 30
 
 
-def _wordstat_status(updated_at: datetime | None, has_volume: bool) -> str:
+def _wordstat_status(
+    updated_at: datetime | None,
+    wordstat_volume: int | None,
+) -> str:
     """Three-state freshness label so the UI can pick its own copy.
 
     See CONCEPT.md §5: empty cards must explain WHY they're empty —
@@ -74,10 +85,15 @@ def _wordstat_status(updated_at: datetime | None, has_volume: bool) -> str:
     """
     if updated_at is None:
         return "never_fetched"
+    if wordstat_volume is None:
+        # `wordstat_refresh_site` stamps updated_at but leaves volume
+        # NULL for URL-shaped / garbage phrases. That is a data-quality
+        # issue, not «no demand».
+        return "invalid_phrase"
     age = datetime.now(timezone.utc) - updated_at
     if age > timedelta(days=WORDSTAT_STALE_AFTER_DAYS):
         return "stale_30d+"
-    if not has_volume:
+    if wordstat_volume == 0:
         # We tried recently but Wordstat had no data for this phrase
         return "fetch_returned_empty"
     return "fresh"
@@ -163,6 +179,59 @@ def _text_in_focus(text: str | None, tokens: list[str]) -> bool:
 
 # ── PR-S2 · Queries module ────────────────────────────────────────────
 
+QUERY_RELEVANCE_VALUES: tuple[str, ...] = (
+    # Legacy taxonomy — still present on old rows.
+    "own",
+    "adjacent",
+    "disputed",
+    "spam",
+    "unclassified",
+    # Funnel taxonomy — current classifier output.
+    "direct_product",
+    "funnel_warm",
+    "funnel_top",
+    "out_of_market",
+)
+QUERY_RELEVANCE_SET = set(QUERY_RELEVANCE_VALUES)
+
+
+def _empty_query_coverage() -> dict[str, int]:
+    return {
+        "total": 0,
+        # Backwards-compat key kept stable for existing UI:
+        # `with_volume` = number of phrases with real demand
+        # (volume > 0). Same meaning as `with_demand` below.
+        "with_volume": 0,
+        "without_volume": 0,
+        "stale": 0,
+        # Tri-state Wordstat counters (audit-2026-05-15) — keep
+        # in sync with brain.QueriesFacts. UI / chat use these
+        # to honestly distinguish «не успели собраться» from
+        # «нет спроса».
+        "with_volume_known": 0,
+        "with_demand": 0,
+        "no_demand": 0,
+        "never_fetched": 0,
+        "invalid": 0,
+    }
+
+
+def _empty_relevance_counts() -> dict[str, int]:
+    return {k: 0 for k in QUERY_RELEVANCE_VALUES}
+
+
+def _normalise_query_layer(layer: str | None) -> str | None:
+    """URL/API guard for /studio/queries?layer=...
+
+    Invalid layer values are ignored instead of turning the page into a
+    422. The owner may paste links by hand, and a stale link should fall
+    back to the full table rather than look broken.
+    """
+    value = (layer or "").strip()
+    if not value:
+        return None
+    return value if value in QUERY_RELEVANCE_SET else None
+
 class QueryRow(BaseModel):
     """One row of the Studio /queries table.
 
@@ -186,10 +255,27 @@ class QueryRow(BaseModel):
     last_impressions_14d: int | None
     last_seen_at: datetime | None
     # Studio v2 etap 4 — relevance fields
-    relevance: str                    # own / adjacent / disputed / spam / unclassified
+    relevance: str                    # legacy + funnel values; see QUERY_RELEVANCE_VALUES
     relevance_set_by: str | None      # rules / llm / user
     relevance_set_at: datetime | None
     relevance_reason_ru: str | None
+    # Deterministic next action for the owner. This is not an LLM
+    # recommendation; it is derived from relevance + known demand /
+    # visibility so the query table can become a work queue.
+    strategy_code: str
+    strategy_label_ru: str
+    strategy_reason_ru: str
+    strategy_action_ru: str
+    # Query Coverage v2 — deterministic mapping from query to the best
+    # current page. Values are intentionally advisory, not ranking facts.
+    coverage_status: str
+    coverage_score: int
+    coverage_reason_ru: str
+    coverage_action_ru: str
+    best_page_id: uuid.UUID | None
+    best_page_url: str | None
+    best_page_title: str | None
+    best_page_match_source: list[str] = Field(default_factory=list)
     # Strategic-focus tag (2026-05-13): True iff this query's text
     # substring-matches any focus token. False when no focus is set
     # (i.e. site hasn't opted in) so the UI doesn't show pills.
@@ -216,6 +302,7 @@ async def list_queries(
     site_id: uuid.UUID,
     limit: int = Query(default=200, ge=1, le=1000),
     sort: str = Query(default="volume", pattern="^(volume|recent|alpha|position)$"),
+    layer: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> QueriesResponse:
     """List a site's queries with Wordstat volume + last known position.
@@ -228,6 +315,21 @@ async def list_queries(
     """
     site = await _site_or_404(db, site_id)
     focus_tokens = _focus_tokens_for_site(site)
+    selected_layer = _normalise_query_layer(layer)
+
+    # Relevance distribution — counted on the FULL site, not just the
+    # selected layer / paginated `items` slice, so the UI strip is
+    # honest and `/studio/queries?layer=funnel_top` still shows how
+    # many warm/direct/out-of-market rows exist.
+    relevance_counts = _empty_relevance_counts()
+    full_count_rows = (await db.execute(
+        select(SearchQuery.relevance, sa_func.count())
+        .where(SearchQuery.site_id == site_id)
+        .group_by(SearchQuery.relevance)
+    )).all()
+    for rel, n in full_count_rows:
+        if rel in relevance_counts:
+            relevance_counts[rel] = int(n)
 
     # Load ALL queries — coverage counters MUST count the full site, not
     # the sliced top-N. Same goes for the `position` sort: position
@@ -236,6 +338,8 @@ async def list_queries(
     # site has more rows than the limit. Worst case ≈ 2000 SearchQuery
     # rows per site — tiny payload, scan is cheap.
     base = select(SearchQuery).where(SearchQuery.site_id == site_id)
+    if selected_layer:
+        base = base.where(SearchQuery.relevance == selected_layer)
     if sort == "volume":
         base = base.order_by(SearchQuery.wordstat_volume.desc().nulls_last())
     elif sort == "recent":
@@ -251,26 +355,8 @@ async def list_queries(
             site_id=site_id,
             total=0,
             items=[],
-            coverage={
-                "total": 0,
-                # Backwards-compat key kept stable for existing UI:
-                # `with_volume` = number of phrases with real demand
-                # (volume > 0). Same meaning as `with_demand` below.
-                "with_volume": 0,
-                "without_volume": 0,
-                "stale": 0,
-                # Tri-state Wordstat counters (audit-2026-05-15) — keep
-                # in sync with brain.QueriesFacts. UI / chat use these
-                # to honestly distinguish «не успели собраться» from
-                # «нет спроса».
-                "with_volume_known": 0,
-                "with_demand": 0,
-                "never_fetched": 0,
-            },
-            relevance_counts={
-                "own": 0, "adjacent": 0, "disputed": 0, "spam": 0,
-                "unclassified": 0,
-            },
+            coverage=_empty_query_coverage(),
+            relevance_counts=relevance_counts,
         )
 
     # One round-trip to grab the latest position per query, scoped to
@@ -311,26 +397,32 @@ async def list_queries(
                 impressions_14d_by_qid.get(m.dimension_id, 0) + (m.impressions or 0)
             )
 
+    page_rows = (await db.execute(
+        select(
+            Page.id,
+            Page.url,
+            Page.path,
+            Page.title,
+            Page.h1,
+            Page.meta_description,
+        )
+        .where(
+            Page.site_id == site_id,
+            or_(Page.http_status.is_(None), Page.http_status.between(200, 299)),
+        )
+        .limit(5000)
+    )).all()
+    pages_for_coverage: list[dict[str, Any]] = [
+        dict(row._mapping) for row in page_rows
+    ]
+
     items: list[QueryRow] = []
-    coverage = {
-        "total": 0,
-        # Existing key — kept identical to «with_demand» so the UI
-        # and existing tests don't break.
-        "with_volume": 0,
-        "without_volume": 0,
-        "stale": 0,
-        # Tri-state counters (audit-2026-05-15) — mirrored from
-        # brain.QueriesFacts so /studio/queries + brain.snapshot
-        # cannot drift apart.
-        "with_volume_known": 0,
-        "with_demand": 0,
-        "never_fetched": 0,
-    }
+    coverage = _empty_query_coverage()
 
     for q in rows:
         coverage["total"] += 1
         has_volume = q.wordstat_volume is not None and q.wordstat_volume > 0
-        status = _wordstat_status(q.wordstat_updated_at, has_volume)
+        status = _wordstat_status(q.wordstat_updated_at, q.wordstat_volume)
         demand_status = _wordstat_demand_status(
             q.wordstat_volume, q.wordstat_updated_at,
         )
@@ -345,11 +437,29 @@ async def list_queries(
             coverage["with_volume_known"] += 1
             if q.wordstat_volume > 0:
                 coverage["with_demand"] += 1
+            elif q.wordstat_volume == 0:
+                coverage["no_demand"] += 1
+        if status == "invalid_phrase":
+            coverage["invalid"] += 1
         if q.wordstat_updated_at is None:
             coverage["never_fetched"] += 1
 
         m = latest_metric_by_qid.get(q.id)
         last_position = float(m.avg_position) if m and m.avg_position is not None else None
+        relevance = q.relevance or "unclassified"
+        strategy = _query_strategy_for_row(
+            query_text=q.query_text,
+            relevance=relevance,
+            wordstat_volume=q.wordstat_volume,
+            last_position=last_position,
+        )
+        query_coverage = _coverage_for_query(
+            query_text=q.query_text,
+            relevance=relevance,
+            strategy_code=strategy["strategy_code"],
+            last_position=last_position,
+            pages=pages_for_coverage,
+        )
 
         # `wordstat_trend` is JSONB. SQLAlchemy hydrates as Python
         # types, but the column allows a free-form dict — coerce to
@@ -377,10 +487,12 @@ async def list_queries(
                 last_position=last_position,
                 last_impressions_14d=impressions_14d_by_qid.get(q.id),
                 last_seen_at=q.last_seen_at,
-                relevance=q.relevance or "unclassified",
+                relevance=relevance,
                 relevance_set_by=q.relevance_set_by,
                 relevance_set_at=q.relevance_set_at,
                 relevance_reason_ru=q.relevance_reason_ru,
+                **strategy,
+                **query_coverage,
                 in_focus=_text_in_focus(q.query_text, focus_tokens),
             )
         )
@@ -389,20 +501,6 @@ async def list_queries(
         # Python-side sort: lower position = better. Queries without a
         # known position go to the bottom.
         items.sort(key=lambda r: (r.last_position is None, r.last_position or 0))
-
-    # Relevance distribution — counted on the FULL site, not just the
-    # paginated `items` slice, so the UI strip is honest.
-    relevance_counts = {k: 0 for k in (
-        "own", "adjacent", "disputed", "spam", "unclassified",
-    )}
-    full_count_rows = (await db.execute(
-        select(SearchQuery.relevance, sa_func.count())
-        .where(SearchQuery.site_id == site_id)
-        .group_by(SearchQuery.relevance)
-    )).all()
-    for rel, n in full_count_rows:
-        if rel in relevance_counts:
-            relevance_counts[rel] = int(n)
 
     # Slice AFTER coverage math + sort so the UI strip is honest while
     # the table still respects the limit.
@@ -3218,7 +3316,148 @@ async def get_brain_plan(
 # ── Unified advice center (2026-05-16) ───────────────────────────────
 
 
-def _advice_feed_to_dict(feed) -> dict:  # type: ignore[no-untyped-def]
+ADVICE_CARD_STATUSES = {
+    "pending", "in_progress", "applied", "dismissed", "snoozed",
+}
+ADVICE_SNOOZE_DEFAULT_DAYS = 7
+ADVICE_SNOOZE_MAX_DAYS = 90
+
+
+class AdviceCardStateBody(BaseModel):
+    status: Literal["pending", "in_progress", "applied", "dismissed", "snoozed"]
+    snooze_days: int | None = Field(
+        default=ADVICE_SNOOZE_DEFAULT_DAYS,
+        ge=1,
+        le=ADVICE_SNOOZE_MAX_DAYS,
+    )
+    page_url: str | None = Field(default=None, max_length=2048)
+    note_ru: str | None = Field(default=None, max_length=1000)
+
+
+def _aware_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _advice_outcome_recommendation_id(card_id: str) -> str:
+    """OutcomeSnapshot.recommendation_id is 64 chars; advice ids can grow."""
+    if len(card_id) <= 64:
+        return card_id
+    digest = hashlib.sha1(card_id.encode("utf-8")).hexdigest()  # noqa: S324
+    return f"advice:{digest}"
+
+
+async def _advice_outcome_snapshot(
+    db: AsyncSession,
+    site_id: uuid.UUID,
+    card_id: str,
+) -> OutcomeSnapshot | None:
+    return (await db.execute(
+        select(OutcomeSnapshot).where(
+            OutcomeSnapshot.site_id == site_id,
+            (
+                OutcomeSnapshot.recommendation_id
+                == _advice_outcome_recommendation_id(card_id)
+            ),
+            OutcomeSnapshot.source == "advice",
+        )
+    )).scalar_one_or_none()
+
+
+async def _page_url_from_advice_link(
+    db: AsyncSession,
+    site_id: uuid.UUID,
+    link: str | None,
+) -> str | None:
+    if not link:
+        return None
+    if link.startswith(("http://", "https://")):
+        return link
+    marker = "/studio/pages/"
+    if not link.startswith(marker):
+        return None
+    raw_page_id = link.removeprefix(marker).split("?", 1)[0].strip("/")
+    try:
+        page_id = uuid.UUID(raw_page_id)
+    except ValueError:
+        return None
+    row = (await db.execute(
+        select(Page.url).where(Page.site_id == site_id, Page.id == page_id)
+    )).first()
+    return str(row[0]) if row and row[0] else None
+
+
+def _state_payload(
+    state: AdviceCardState | None,
+    *,
+    now: datetime,
+) -> dict[str, str | None]:
+    if state is None:
+        return {
+            "status": "pending",
+            "applied_at": None,
+            "dismissed_at": None,
+            "snoozed_until": None,
+            "updated_at": None,
+            "verification_status": None,
+            "verified_at": None,
+            "verification_evidence": None,
+        }
+
+    snoozed_until = _aware_utc(state.snoozed_until)
+    visible_status = state.status
+    if state.status == "snoozed" and snoozed_until is not None and snoozed_until <= now:
+        visible_status = "pending"
+
+    verified_at = _aware_utc(state.verified_at)
+    return {
+        "status": visible_status,
+        "applied_at": (
+            _aware_utc(state.applied_at).isoformat()
+            if _aware_utc(state.applied_at) else None
+        ),
+        "dismissed_at": (
+            _aware_utc(state.dismissed_at).isoformat()
+            if _aware_utc(state.dismissed_at) else None
+        ),
+        "snoozed_until": snoozed_until.isoformat() if snoozed_until else None,
+        "updated_at": (
+            _aware_utc(state.updated_at).isoformat()
+            if _aware_utc(state.updated_at) else None
+        ),
+        # Technical re-verification after «Применил». Splits «applied =
+        # clicked» from «fact has actually changed on the page». See
+        # core_audit/advisor/verification/dispatcher.py for the status
+        # values. Frontend (VerificationPill) renders 5 branches:
+        # null/pending/verified/not_yet_visible/user_attested/failed.
+        "verification_status": state.verification_status,
+        "verified_at": verified_at.isoformat() if verified_at else None,
+        "verification_evidence": state.verification_evidence,
+    }
+
+
+def _advice_card_is_hidden(state: AdviceCardState | None, now: datetime) -> bool:
+    if state is None:
+        return False
+    if state.status in {"applied", "dismissed"}:
+        return True
+    snoozed_until = _aware_utc(state.snoozed_until)
+    return (
+        state.status == "snoozed"
+        and snoozed_until is not None
+        and snoozed_until > now
+    )
+
+
+def _advice_feed_to_dict(
+    feed,
+    states_by_card_id: dict[str, AdviceCardState] | None = None,
+    *,
+    include_hidden: bool = False,
+) -> dict:  # type: ignore[no-untyped-def]
     """Serialise AdviceFeed for the JSON response.
 
     Kept as a plain function (not a pydantic model) because the
@@ -3226,11 +3465,24 @@ def _advice_feed_to_dict(feed) -> dict:  # type: ignore[no-untyped-def]
     the frontend reads field names directly — adding a pydantic layer
     here would just duplicate the contract.
     """
+    states_by_card_id = states_by_card_id or {}
+    now = datetime.now(timezone.utc)
+    visible_cards = list(feed.cards) if include_hidden else [
+        c for c in feed.cards
+        if not _advice_card_is_hidden(states_by_card_id.get(c.id), now)
+    ]
+
+    counts_by_severity: dict[str, int] = {}
+    counts_by_category: dict[str, int] = {}
+    for c in visible_cards:
+        counts_by_severity[c.severity] = counts_by_severity.get(c.severity, 0) + 1
+        counts_by_category[c.category] = counts_by_category.get(c.category, 0) + 1
+
     return {
         "site_id": feed.site_id,
         "computed_at": feed.computed_at,
-        "counts_by_severity": dict(feed.counts_by_severity),
-        "counts_by_category": dict(feed.counts_by_category),
+        "counts_by_severity": counts_by_severity,
+        "counts_by_category": counts_by_category,
         "cards": [
             {
                 "id": c.id,
@@ -3244,10 +3496,32 @@ def _advice_feed_to_dict(feed) -> dict:  # type: ignore[no-untyped-def]
                 "cta_ru": c.cta_ru,
                 "sort_score": c.sort_score,
                 "source_module": c.source_module,
+                "why_ru": c.why_ru,
+                "source_ru": c.source_ru,
+                "target_ru": c.target_ru,
+                "evidence_ru": list(c.evidence_ru or ()),
+                "verification_ru": c.verification_ru,
+                "state": _state_payload(states_by_card_id.get(c.id), now=now),
             }
-            for c in feed.cards
+            for c in visible_cards
         ],
     }
+
+
+async def _advice_states_for_feed(
+    db: AsyncSession,
+    site_id: uuid.UUID,
+    card_ids: list[str],
+) -> dict[str, AdviceCardState]:
+    if not card_ids:
+        return {}
+    rows = (await db.execute(
+        select(AdviceCardState).where(
+            AdviceCardState.site_id == site_id,
+            AdviceCardState.card_id.in_(card_ids),
+        )
+    )).scalars().all()
+    return {row.card_id: row for row in rows}
 
 
 @router.get(
@@ -3256,6 +3530,7 @@ def _advice_feed_to_dict(feed) -> dict:  # type: ignore[no-untyped-def]
 )
 async def get_advice_feed(
     site_id: uuid.UUID,
+    include_hidden: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Unified advice center feed.
@@ -3272,7 +3547,498 @@ async def get_advice_feed(
     from app.core_audit.advisor import collect_advice
 
     feed = await collect_advice(db, site_id)
-    return _advice_feed_to_dict(feed)
+    states = await _advice_states_for_feed(
+        db, site_id, [card.id for card in feed.cards],
+    )
+    return _advice_feed_to_dict(feed, states, include_hidden=include_hidden)
+
+
+@router.patch(
+    "/sites/{site_id}/advice/{card_id}/state",
+    dependencies=[Depends(_require_admin)],
+)
+async def patch_advice_card_state(
+    site_id: uuid.UUID,
+    card_id: str,
+    body: AdviceCardStateBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Set owner workflow state for one computed advice card.
+
+    `applied` also creates an OutcomeSnapshot baseline, idempotently,
+    so /studio/outcomes can measure the effect after 14 days.
+    """
+    await _site_or_404(db, site_id)
+
+    from app.core_audit.advisor import collect_advice
+
+    feed = await collect_advice(db, site_id)
+    card_by_id = {card.id: card for card in feed.cards}
+    card = card_by_id.get(card_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="advice card not found")
+
+    state = (await db.execute(
+        select(AdviceCardState).where(
+            AdviceCardState.site_id == site_id,
+            AdviceCardState.card_id == card_id,
+        )
+    )).scalar_one_or_none()
+    previous_status = state.status if state is not None else "pending"
+    if state is None:
+        state = AdviceCardState(site_id=site_id, card_id=card_id)
+        db.add(state)
+
+    now = datetime.now(timezone.utc)
+    page_url = body.page_url or await _page_url_from_advice_link(
+        db, site_id, card.link,
+    )
+
+    state.status = body.status
+    state.source_module = card.source_module
+    state.page_url = page_url
+    state.note_ru = body.note_ru
+    state.updated_at = now
+
+    if body.status == "pending":
+        state.applied_at = None
+        state.dismissed_at = None
+        state.snoozed_until = None
+    elif body.status == "applied":
+        state.applied_at = now
+        state.dismissed_at = None
+        state.snoozed_until = None
+    elif body.status == "in_progress":
+        state.applied_at = None
+        state.dismissed_at = None
+        state.snoozed_until = None
+    elif body.status == "dismissed":
+        state.dismissed_at = now
+        state.applied_at = None
+        state.snoozed_until = None
+    elif body.status == "snoozed":
+        days = body.snooze_days or ADVICE_SNOOZE_DEFAULT_DAYS
+        state.snoozed_until = now + timedelta(days=days)
+        state.applied_at = None
+        state.dismissed_at = None
+
+    outcome_snapshot_id: str | None = None
+    cancelled_outcome_snapshot_id: str | None = None
+    if body.status == "applied":
+        existing = await _advice_outcome_snapshot(db, site_id, card_id)
+        if existing is not None:
+            outcome_snapshot_id = str(existing.id)
+        else:
+            baseline = await baseline_metrics(db, site_id)
+            snap = OutcomeSnapshot(
+                site_id=site_id,
+                recommendation_id=_advice_outcome_recommendation_id(card_id),
+                source="advice",
+                page_url=page_url,
+                applied_at=now,
+                baseline_metrics=baseline,
+                note_ru=body.note_ru or card.title_ru[:1000],
+            )
+            db.add(snap)
+            await db.flush()
+            outcome_snapshot_id = str(snap.id)
+    elif previous_status == "applied":
+        existing = await _advice_outcome_snapshot(db, site_id, card_id)
+        if existing is not None and existing.followup_at is None:
+            cancelled_outcome_snapshot_id = str(existing.id)
+            await db.delete(existing)
+
+    # On Applied: stamp verification_status="pending" so the UI shows
+    # «проверяю…» spinner right away. Actual fact-check runs in a Celery
+    # task AFTER commit (so the worker reads the persisted row).
+    # The dispatcher itself decides verified/not_yet_visible/user_attested/
+    # failed — we don't pre-filter by category here.
+    should_trigger_verify = False
+    if body.status == "applied":
+        state.verification_status = "pending"
+        state.verified_at = None
+        state.verification_evidence = None
+        should_trigger_verify = True
+    elif body.status in {"pending", "in_progress", "dismissed", "snoozed"}:
+        # Returning the card to any non-applied state invalidates the
+        # last technical verdict — it was tied to that Applied click.
+        state.verification_status = None
+        state.verified_at = None
+        state.verification_evidence = None
+
+    await db.commit()
+    await db.refresh(state)
+
+    if should_trigger_verify:
+        # Fire-and-forget. apply_async after commit so the worker sees
+        # state.verification_status == "pending" when it loads the row.
+        from app.collectors.tasks import verify_advice_card_application
+        verify_advice_card_application.apply_async(
+            args=[str(site_id), card_id],
+        )
+
+    if body.status == "applied":
+        await log_event(
+            db,
+            site_id,
+            "outcome",
+            "progress",
+            "Владелец отметил совет из главной как «применил» · измерим результат через 14 дней.",
+            extra={
+                "advice_card_id": card_id,
+                "outcome_snapshot_id": outcome_snapshot_id,
+                "source_module": card.source_module,
+            },
+        )
+
+    return {
+        "site_id": str(site_id),
+        "card_id": card_id,
+        "state": _state_payload(state, now=datetime.now(timezone.utc)),
+        "outcome_snapshot_id": outcome_snapshot_id,
+        "cancelled_outcome_snapshot_id": cancelled_outcome_snapshot_id,
+    }
+
+
+@router.post(
+    "/sites/{site_id}/advice/{card_id}/re-verify",
+    dependencies=[Depends(_require_admin)],
+)
+async def re_verify_advice_card(
+    site_id: uuid.UUID,
+    card_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Manual re-trigger of technical verification for a card.
+
+    Useful when the first auto-check came back `not_yet_visible` (page
+    cache, deploy lag, owner re-deployed) and the owner wants to retry
+    without waiting for the daily sweep.
+
+    Marks the state as `pending`, fires the Celery task, returns the
+    task/run id so the UI can poll the activity feed if desired.
+    """
+    await _site_or_404(db, site_id)
+
+    state = (await db.execute(
+        select(AdviceCardState).where(
+            AdviceCardState.site_id == site_id,
+            AdviceCardState.card_id == card_id,
+        )
+    )).scalar_one_or_none()
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail="advice card has no recorded state (was it ever Applied?)",
+        )
+
+    state.verification_status = "pending"
+    state.verified_at = None
+    state.verification_evidence = None
+    state.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    from app.collectors.tasks import verify_advice_card_application
+    run_id = str(uuid.uuid4())
+    async_result = verify_advice_card_application.apply_async(
+        args=[str(site_id), card_id, run_id],
+    )
+    return {
+        "status": "queued",
+        "task_id": async_result.id,
+        "run_id": run_id,
+    }
+
+
+# ── Studio growth plan: advice workflow + outcome loop ───────────────
+
+
+def _growth_plan_advice_item(
+    card,
+    state: AdviceCardState | None,
+    *,
+    now: datetime,
+    stage: str,
+) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    return {
+        "kind": "advice",
+        "stage": stage,
+        "id": card.id,
+        "title_ru": card.title_ru,
+        "body_ru": card.body_ru,
+        "action_ru": card.action_ru,
+        "severity": card.severity,
+        "category": card.category,
+        "source_module": card.source_module,
+        "source_ru": card.source_ru,
+        "target_ru": card.target_ru,
+        "evidence_ru": list(card.evidence_ru or ()),
+        "verification_ru": card.verification_ru,
+        "expected_impact_ru": card.expected_impact_ru,
+        "link": card.link,
+        "cta_ru": card.cta_ru,
+        "state": _state_payload(state, now=now),
+        "outcome": None,
+    }
+
+
+def _growth_plan_outcome_item(
+    outcome: OutcomeSnapshot,
+    card_by_recommendation_id: dict[str, Any],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    applied_at = _aware_utc(outcome.applied_at) or now
+    days_since = max(0, (now - applied_at).days)
+    days_until = max(0, 14 - days_since)
+    stage = "measured" if outcome.followup_at is not None else "awaiting_followup"
+    card = card_by_recommendation_id.get(outcome.recommendation_id)
+    title = (
+        card.title_ru
+        if card is not None
+        else (outcome.note_ru or f"Применённая правка {outcome.recommendation_id}")
+    )
+    body = (
+        card.body_ru
+        if card is not None
+        else (
+            "Правка уже отмечена как применённая. Система хранит baseline "
+            "и ждёт автоматического замера результата."
+        )
+    )
+    action = (
+        card.action_ru
+        if card is not None
+        else "Дождись follow-up замера или открой «До / После» для деталей."
+    )
+    return {
+        "kind": "outcome",
+        "stage": stage,
+        "id": str(outcome.id),
+        "title_ru": title,
+        "body_ru": body,
+        "action_ru": action,
+        "severity": card.severity if card is not None else "info",
+        "category": card.category if card is not None else "seo_content",
+        "source_module": (
+            card.source_module if card is not None else f"outcomes.{outcome.source}"
+        ),
+        "source_ru": (
+            card.source_ru if card is not None else "OutcomeSnapshot"
+        ),
+        "target_ru": (
+            card.target_ru
+            if card is not None
+            else (outcome.page_url or outcome.recommendation_id)
+        ),
+        "evidence_ru": (
+            list(card.evidence_ru or ())
+            if card is not None
+            else []
+        ),
+        "verification_ru": (
+            card.verification_ru
+            if card is not None
+            else "Через 14 дней система сравнит baseline и follow-up метрики."
+        ),
+        "expected_impact_ru": card.expected_impact_ru if card is not None else None,
+        "link": card.link if card is not None else "/studio/outcomes",
+        "cta_ru": card.cta_ru if card is not None else "Открыть До / После",
+        "state": None,
+        "outcome": {
+            "snapshot_id": str(outcome.id),
+            "recommendation_id": outcome.recommendation_id,
+            "source": outcome.source,
+            "page_url": outcome.page_url,
+            "applied_at": applied_at.isoformat(),
+            "followup_at": (
+                _aware_utc(outcome.followup_at).isoformat()
+                if _aware_utc(outcome.followup_at) else None
+            ),
+            "days_since_applied": days_since,
+            "days_until_followup": days_until,
+            "baseline_metrics": outcome.baseline_metrics,
+            "followup_metrics": outcome.followup_metrics,
+            "delta": outcome.delta,
+            "note_ru": outcome.note_ru,
+        },
+    }
+
+
+async def _build_growth_plan_payload(
+    db: AsyncSession,
+    site_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Join computed advice cards with workflow state + outcomes."""
+    from app.core_audit.advisor import collect_advice
+
+    feed = await collect_advice(db, site_id)
+    states = await _advice_states_for_feed(
+        db, site_id, [card.id for card in feed.cards],
+    )
+    outcomes = (await db.execute(
+        select(OutcomeSnapshot)
+        .where(OutcomeSnapshot.site_id == site_id)
+        .order_by(desc(OutcomeSnapshot.applied_at)),
+    )).scalars().all()
+
+    now = datetime.now(timezone.utc)
+    card_by_rec_id = {
+        _advice_outcome_recommendation_id(card.id): card
+        for card in feed.cards
+    }
+    outcome_rec_ids = {row.recommendation_id for row in outcomes}
+
+    columns: dict[str, list[dict[str, Any]]] = {
+        "found": [],
+        "in_progress": [],
+        "snoozed": [],
+        "awaiting_followup": [],
+        "measured": [],
+        "dismissed": [],
+    }
+
+    for card in feed.cards:
+        state = states.get(card.id)
+        payload = _state_payload(state, now=now)
+        status = payload["status"] or "pending"
+        recommendation_id = _advice_outcome_recommendation_id(card.id)
+
+        if recommendation_id in outcome_rec_ids:
+            # Applied cards are represented by their OutcomeSnapshot so
+            # the board stays tied to the 14-day measurement loop.
+            continue
+        if status == "in_progress":
+            columns["in_progress"].append(
+                _growth_plan_advice_item(card, state, now=now, stage="in_progress")
+            )
+        elif status == "snoozed":
+            columns["snoozed"].append(
+                _growth_plan_advice_item(card, state, now=now, stage="snoozed")
+            )
+        elif status == "dismissed":
+            columns["dismissed"].append(
+                _growth_plan_advice_item(card, state, now=now, stage="dismissed")
+            )
+        elif status == "applied":
+            columns["awaiting_followup"].append(
+                _growth_plan_advice_item(
+                    card, state, now=now, stage="awaiting_followup",
+                )
+            )
+        else:
+            columns["found"].append(
+                _growth_plan_advice_item(card, state, now=now, stage="found")
+            )
+
+    for outcome in outcomes:
+        item = _growth_plan_outcome_item(
+            outcome, card_by_rec_id, now=now,
+        )
+        columns[item["stage"]].append(item)
+
+    stats = {key: len(value) for key, value in columns.items()}
+    stats["total_open"] = (
+        stats["found"]
+        + stats["in_progress"]
+        + stats["snoozed"]
+        + stats["awaiting_followup"]
+    )
+
+    return {
+        "site_id": str(site_id),
+        "computed_at": now.isoformat(),
+        "stats": stats,
+        "columns": columns,
+    }
+
+
+def _growth_plan_context_for_chat(payload: dict[str, Any]) -> str:
+    """Compact factual block for /studio/chat.
+
+    Keep it small: counts + top few live items. The full board remains
+    available at /studio/plan; the LLM only needs enough to answer
+    workflow questions truthfully.
+    """
+    stats = payload.get("stats") if isinstance(payload, dict) else {}
+    columns = payload.get("columns") if isinstance(payload, dict) else {}
+    if not isinstance(stats, dict) or not isinstance(columns, dict):
+        return ""
+
+    lines = [
+        "РАБОЧИЙ ПЛАН РОСТА (/studio/plan):",
+        f"  найдено: {int(stats.get('found') or 0)}",
+        f"  в работе: {int(stats.get('in_progress') or 0)}",
+        f"  отложено: {int(stats.get('snoozed') or 0)}",
+        f"  ждут проверки результата: {int(stats.get('awaiting_followup') or 0)}",
+        f"  проверено: {int(stats.get('measured') or 0)}",
+        f"  скрыто: {int(stats.get('dismissed') or 0)}",
+        f"  открытых задач всего: {int(stats.get('total_open') or 0)}",
+        "  правило: если владелец спрашивает «что делать сегодня» — "
+        "сначала смотри «в работе», потом самые сильные из «найдено».",
+    ]
+
+    def add_items(stage: str, title: str, limit: int) -> None:
+        items = columns.get(stage)
+        if not isinstance(items, list) or not items:
+            return
+        lines.append(f"  {title}:")
+        for idx, item in enumerate(items[:limit], start=1):
+            if not isinstance(item, dict):
+                continue
+            line = (
+                f"    {idx}. [{item.get('severity')}/{item.get('category')}] "
+                f"{item.get('title_ru', '')}"
+            )
+            if item.get("target_ru"):
+                line += f" | где: {item.get('target_ru')}"
+            if item.get("link"):
+                line += f" | открыть: {item.get('link')}"
+            evidence = item.get("evidence_ru")
+            if isinstance(evidence, list) and evidence:
+                line += f" | факт: {str(evidence[0])[:180]}"
+            outcome = item.get("outcome")
+            if isinstance(outcome, dict):
+                if outcome.get("days_until_followup") is not None:
+                    line += (
+                        f" | до замера: "
+                        f"{outcome.get('days_until_followup')} дн."
+                    )
+                delta = outcome.get("delta")
+                if isinstance(delta, dict) and delta:
+                    bits = [
+                        f"{k}={v}"
+                        for k, v in list(delta.items())[:4]
+                        if v is not None
+                    ]
+                    if bits:
+                        line += f" | дельта: {', '.join(bits)}"
+            lines.append(line)
+
+    add_items("in_progress", "задачи в работе", 5)
+    add_items("found", "самые важные найденные задачи", 5)
+    add_items("awaiting_followup", "применено и ждёт проверки", 5)
+    add_items("measured", "уже проверено", 5)
+
+    return "\n".join(lines)
+
+
+@router.get(
+    "/sites/{site_id}/growth-plan",
+    dependencies=[Depends(_require_admin)],
+)
+async def get_growth_plan(
+    site_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Operational SEO work board.
+
+    This endpoint joins computed advice cards with persisted workflow
+    state and outcome snapshots. The result is a deterministic work
+    plan: found → in progress → awaiting measurement → measured.
+    """
+    await _site_or_404(db, site_id)
+    return await _build_growth_plan_payload(db, site_id)
 
 
 # ── Studio v2 etap 7 (Phase B) · Brain chat ──────────────────────────
@@ -3541,6 +4307,16 @@ async def brain_free_chat(
 
     snap = await build_snapshot(db, site)
     plan = build_plan(snap, max_actions=10, target_config=site.target_config or {})
+    growth_plan_context = ""
+    try:
+        growth_plan_context = _growth_plan_context_for_chat(
+            await _build_growth_plan_payload(db, site_id),
+        )
+    except Exception:
+        logger.exception(
+            "brain_free_chat.growth_plan_context_failed site_id=%s",
+            site_id,
+        )
 
     # Long-term memory across this owner's previous conversations on
     # this site. Lets the assistant ground its tone in "things you
@@ -3582,6 +4358,7 @@ async def brain_free_chat(
                     mode="battle_plan",
                     long_term_memory=long_term_memory,
                     battle_plan_seed=seed,
+                    growth_plan_context=growth_plan_context,
                 ),
             )
     else:
@@ -3596,6 +4373,7 @@ async def brain_free_chat(
                 new_message=msg,
                 mode=body.mode,
                 long_term_memory=long_term_memory,
+                growth_plan_context=growth_plan_context,
             ),
         )
 

@@ -281,6 +281,12 @@ export async function getRobotsAudit(
 // funnel coverage). Replaces the multi-card Studio dashboard with one
 // stream the owner can scroll top-to-bottom.
 export type AdviceSeverity = "critical" | "high" | "medium" | "low" | "info";
+export type AdviceCardWorkflowStatus =
+  | "pending"
+  | "in_progress"
+  | "applied"
+  | "dismissed"
+  | "snoozed";
 export type AdviceCategory =
   | "technical"
   | "health"
@@ -288,6 +294,47 @@ export type AdviceCategory =
   | "schema"
   | "keywords"
   | "seo_content";
+
+// Status of the immediate technical re-verification that runs after
+// «Применил». Distinct from the 14-day SEO outcome (which lives on
+// outcome_snapshot). `null` when the card has never been applied.
+//
+//   pending           — Celery task queued, not finished yet (5-60s)
+//   verified          — Crawler/check confirmed the change is live
+//   not_yet_visible   — Re-crawl ran but the change isn't on page yet
+//                       (CDN cache, deployment lag, owner edited the
+//                       wrong page)
+//   user_attested     — No automated check exists for this advice type,
+//                       trusting the owner's word
+//   failed            — Verification job errored — owner can re-trigger
+export type AdviceCardVerificationStatus =
+  | "pending"
+  | "verified"
+  | "not_yet_visible"
+  | "user_attested"
+  | "failed";
+
+// Extracted to a named interface so the verification-pill component
+// and other callers can reuse the shape without reaching into
+// `AdviceCard["state"]`. Backend contract: backend/app/models/
+// advice_card_state.py.
+export interface AdviceCardState {
+  status: AdviceCardWorkflowStatus;
+  applied_at: string | null;
+  dismissed_at: string | null;
+  snoozed_until: string | null;
+  updated_at: string | null;
+  // Technical re-verification of the card's fact on the page —
+  // separate from the 14-day SEO outcome. Null when the card has
+  // never been applied. Set to "pending" the moment we PATCH
+  // status="applied"; resolves async to one of the 4 terminals.
+  verification_status?: AdviceCardVerificationStatus | null;
+  verified_at?: string | null;
+  // Free-form JSON the backend attaches to explain the verdict
+  // («factually X on page, expected Y»). Shape is per-check-type so
+  // the UI treats it as opaque and renders best-effort.
+  verification_evidence?: Record<string, unknown> | null;
+}
 
 export interface AdviceCard {
   id: string;
@@ -301,6 +348,12 @@ export interface AdviceCard {
   cta_ru: string | null;      // button label, null for info cards
   sort_score: number;
   source_module: string;
+  why_ru: string | null;
+  source_ru: string | null;
+  target_ru: string | null;
+  evidence_ru: string[];
+  verification_ru: string | null;
+  state: AdviceCardState;
 }
 
 export interface AdviceFeed {
@@ -311,14 +364,65 @@ export interface AdviceFeed {
   cards: AdviceCard[];        // already sorted by sort_score DESC by backend
 }
 
+export type GrowthPlanStage =
+  | "found"
+  | "in_progress"
+  | "snoozed"
+  | "awaiting_followup"
+  | "measured"
+  | "dismissed";
+
+export interface GrowthPlanItem {
+  kind: "advice" | "outcome";
+  stage: GrowthPlanStage;
+  id: string;
+  title_ru: string;
+  body_ru: string;
+  action_ru: string;
+  severity: AdviceSeverity;
+  category: AdviceCategory;
+  source_module: string;
+  source_ru: string | null;
+  target_ru: string | null;
+  evidence_ru: string[];
+  verification_ru: string | null;
+  expected_impact_ru: string | null;
+  link: string | null;
+  cta_ru: string | null;
+  state: AdviceCard["state"] | null;
+  outcome: {
+    snapshot_id: string;
+    recommendation_id: string;
+    source: "priority" | "opportunity" | "advice" | string;
+    page_url: string | null;
+    applied_at: string;
+    followup_at: string | null;
+    days_since_applied: number;
+    days_until_followup: number;
+    baseline_metrics: Record<string, unknown> | null;
+    followup_metrics: Record<string, unknown> | null;
+    delta: Record<string, unknown> | null;
+    note_ru: string | null;
+  } | null;
+}
+
+export interface GrowthPlanResponse {
+  site_id: string;
+  computed_at: string;
+  stats: Record<GrowthPlanStage | "total_open", number>;
+  columns: Record<GrowthPlanStage, GrowthPlanItem[]>;
+}
+
 // Returns null on 404 («never computed for this site yet»). Any other
 // error propagates so the UI can render a real error block.
 export async function getAdviceFeed(
   siteId: string,
+  options?: { includeHidden?: boolean },
 ): Promise<AdviceFeed | null> {
   try {
+    const query = options?.includeHidden ? "?include_hidden=true" : "";
     return await apiFetch<AdviceFeed>(
-      `/studio/sites/${siteId}/advice`,
+      `/studio/sites/${siteId}/advice${query}`,
       { base: "admin" },
     );
   } catch (e: unknown) {
@@ -326,6 +430,62 @@ export async function getAdviceFeed(
     if (/^API 404\b/.test(msg)) return null;
     throw e;
   }
+}
+
+export async function patchAdviceCardState(
+  siteId: string,
+  cardId: string,
+  body: {
+    status: AdviceCardWorkflowStatus;
+    snooze_days?: number | null;
+    page_url?: string | null;
+    note_ru?: string | null;
+  },
+): Promise<{
+  site_id: string;
+  card_id: string;
+  state: AdviceCard["state"];
+  outcome_snapshot_id: string | null;
+  cancelled_outcome_snapshot_id: string | null;
+}> {
+  return apiFetch<{
+    site_id: string;
+    card_id: string;
+    state: AdviceCard["state"];
+    outcome_snapshot_id: string | null;
+    cancelled_outcome_snapshot_id: string | null;
+  }>(
+    `/studio/sites/${siteId}/advice/${encodeURIComponent(cardId)}/state`,
+    {
+      method: "PATCH",
+      base: "admin",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+// Manually re-trigger the technical verification check (when the
+// owner says «check again» after fixing the page or waiting for CDN
+// to flush). Returns the queued Celery task ids — UI does not need
+// them, just SWR-refetches the feed until verification_status leaves
+// "pending".
+export async function reVerifyAdviceCard(
+  siteId: string,
+  cardId: string,
+): Promise<{ status: "queued"; task_id: string; run_id: string }> {
+  return apiFetch<{ status: "queued"; task_id: string; run_id: string }>(
+    `/studio/sites/${siteId}/advice/${encodeURIComponent(cardId)}/re-verify`,
+    { method: "POST", base: "admin" },
+  );
+}
+
+export async function getGrowthPlan(
+  siteId: string,
+): Promise<GrowthPlanResponse> {
+  return apiFetch<GrowthPlanResponse>(
+    `/studio/sites/${siteId}/growth-plan`,
+    { base: "admin" },
+  );
 }
 
 // ── Keyword gaps (Wordstat-driven recommendations) ──────────────────
@@ -985,8 +1145,14 @@ export const api = {
     siteId: string,
     sort: "volume" | "recent" | "alpha" | "position" = "volume",
     limit = 1000,
-  ) =>
-    apiFetch<{
+    layer?: string | null,
+  ) => {
+    const params = new URLSearchParams({
+      sort,
+      limit: String(limit),
+    });
+    if (layer) params.set("layer", layer);
+    return apiFetch<{
       site_id: string;
       total: number;
       items: Array<{
@@ -1017,6 +1183,18 @@ export const api = {
         relevance_set_by: "rules" | "llm" | "user" | null;
         relevance_set_at: string | null;
         relevance_reason_ru: string | null;
+        strategy_code: string;
+        strategy_label_ru: string;
+        strategy_reason_ru: string;
+        strategy_action_ru: string;
+        coverage_status: string;
+        coverage_score: number;
+        coverage_reason_ru: string;
+        coverage_action_ru: string;
+        best_page_id: string | null;
+        best_page_url: string | null;
+        best_page_title: string | null;
+        best_page_match_source: string[];
         // 2026-05-13: strategic_focus tag. True iff query_text matches
         // any focus token; false when no focus is set.
         in_focus: boolean;
@@ -1037,9 +1215,10 @@ export const api = {
         out_of_market?: number;
       };
     }>(
-      `/studio/sites/${siteId}/queries?sort=${sort}&limit=${limit}`,
+      `/studio/sites/${siteId}/queries?${params.toString()}`,
       { base: "admin" },
-    ),
+    );
+  },
 
   studioClassifyQueries: (siteId: string) =>
     apiFetch<{
@@ -1361,7 +1540,7 @@ export const api = {
       items: Array<{
         snapshot_id: string;
         recommendation_id: string;
-        source: "priority" | "opportunity";
+        source: "priority" | "opportunity" | "advice";
         page_url: string | null;
         applied_at: string;
         followup_at: string | null;
