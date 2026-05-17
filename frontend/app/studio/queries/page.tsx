@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { api } from "@/lib/api";
 import { studioKey } from "@/lib/studio-keys";
@@ -38,8 +39,10 @@ import {
   HelpCircle,
   AlertTriangle,
   ChevronRight,
+  ChevronDown,
 } from "lucide-react";
 import { cn, getErrorMessage } from "@/lib/utils";
+import { SerpSnapshotPanel } from "@/components/studio/serp-snapshot-panel";
 
 /**
  * Studio · Запросы (PR-S2)
@@ -125,6 +128,56 @@ function StatusBadge({ status }: { status: StatusKey }) {
   );
 }
 
+const COVERAGE_META: Record<
+  string,
+  { label: string; className: string }
+> = {
+  covered: {
+    label: "страница есть",
+    className: "bg-emerald-50 text-emerald-800 border-emerald-300",
+  },
+  weak: {
+    label: "слабое покрытие",
+    className: "bg-amber-50 text-amber-800 border-amber-300",
+  },
+  missing: {
+    label: "нет страницы",
+    className: "bg-rose-50 text-rose-800 border-rose-300",
+  },
+  ignored: {
+    label: "не работаем",
+    className: "bg-muted text-muted-foreground border",
+  },
+  unknown: {
+    label: "неизвестно",
+    className: "bg-slate-50 text-slate-700 border-slate-300",
+  },
+};
+
+function CoverageBadge({
+  status,
+  score,
+}: {
+  status: string;
+  score: number;
+}) {
+  const meta = COVERAGE_META[status] ?? COVERAGE_META.unknown;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium whitespace-nowrap",
+        meta.className,
+      )}
+      title={`Покрытие запроса: ${score}/100`}
+    >
+      {meta.label}
+      {status !== "ignored" && status !== "unknown" && (
+        <span className="ml-1 tabular-nums opacity-70">{score}</span>
+      )}
+    </span>
+  );
+}
+
 /** True for rows whose `query_text` is actually a URL (e.g. an upstream
  *  data-quality issue where a sitemap entry leaked into the query
  *  pipeline). We render these with a «системная запись» badge so the
@@ -149,6 +202,18 @@ type RelevanceKey =
   | "funnel_warm"
   | "funnel_top"
   | "out_of_market";
+
+const RELEVANCE_KEYS: RelevanceKey[] = [
+  "own",
+  "adjacent",
+  "disputed",
+  "spam",
+  "unclassified",
+  "direct_product",
+  "funnel_warm",
+  "funnel_top",
+  "out_of_market",
+];
 
 const RELEVANCE_META: Record<
   RelevanceKey,
@@ -226,6 +291,13 @@ function relevanceMeta(key: string | null | undefined) {
   if (!key) return RELEVANCE_FALLBACK;
   return (RELEVANCE_META as Record<string, typeof RELEVANCE_FALLBACK>)[key]
     ?? RELEVANCE_FALLBACK;
+}
+
+function normaliseRelevanceKey(value: string | null): RelevanceKey | null {
+  if (!value) return null;
+  return (RELEVANCE_KEYS as string[]).includes(value)
+    ? (value as RelevanceKey)
+    : null;
 }
 
 const SET_BY_LABEL: Record<string, string> = {
@@ -319,6 +391,10 @@ function formatPosition(p: number | null | undefined): string {
 export default function StudioQueriesPage() {
   const { currentSite, loading: siteLoading } = useSite();
   const siteId = currentSite?.id || "";
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const layerFromUrl = normaliseRelevanceKey(searchParams.get("layer"));
   // `sort === null` ⇒ no explicit user sort yet → default to focus-first
   // (items where `in_focus=true` float to the top, then volume order).
   // User clicking a sort chip sets a concrete mode and we honour it.
@@ -347,6 +423,9 @@ export default function StudioQueriesPage() {
     | "never_fetched"
     | "invalid";
   const [coverageFilter, setCoverageFilter] = useState<CoverageFilter>("all");
+  // SERP-snapshot disclosure — only one row expanded at a time so the
+  // page doesn't fire N parallel SWR loops (the table can hit 100+ rows).
+  const [expandedQueryId, setExpandedQueryId] = useState<string | null>(null);
   const [banner, setBanner] = useState<{
     kind: "ok" | "deduped" | "err";
     text: string;
@@ -354,9 +433,23 @@ export default function StudioQueriesPage() {
   const setSafeTimeout = useTimeoutSetter();
 
   const { data, error, isLoading, mutate } = useSWR(
-    siteId ? studioKey("queries", siteId, effectiveSort) : null,
-    () => api.studioListQueries(siteId, effectiveSort, 1000),
+    siteId
+      ? studioKey("queries", siteId, effectiveSort, layerFromUrl ?? "all")
+      : null,
+    () => api.studioListQueries(
+      siteId,
+      effectiveSort,
+      1000,
+      layerFromUrl ?? undefined,
+    ),
   );
+
+  function clearLayerFilter() {
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete("layer");
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname);
+  }
 
   // Strategic focus — drives the «Сейчас в фокусе» banner + the
   // default focus-first ordering. Hidden entirely when no focus.
@@ -731,6 +824,26 @@ export default function StudioQueriesPage() {
         </div>
       )}
 
+      {layerFromUrl && (
+        <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900 flex items-center gap-3">
+          <div className="flex-1">
+            Открыт слой:{" "}
+            <strong>{relevanceMeta(layerFromUrl).label}</strong>. Таблица
+            показывает только этот класс, а чипы ниже оставлены как карта
+            всего спроса.
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={clearLayerFilter}
+            className="h-7 bg-white/70"
+          >
+            Показать все
+          </Button>
+        </div>
+      )}
+
       {/* Wordstat coverage banner — explains the tri-state breakdown
           so «—» in the volume column stops looking like an error.
           Hidden when there's no data yet. */}
@@ -743,7 +856,8 @@ export default function StudioQueriesPage() {
             подтверждённым спросом из <strong>{buckets.total}</strong>.
             {buckets.never_fetched > 0 && (
               <> Ещё <strong>{buckets.never_fetched}</strong> ждут сбора
-              Wordstat (запускается раз в неделю по вторникам).</>
+              Wordstat (объёмы обновляются по вторникам, новая разведка
+              запускается по средам).</>
             )}
             {buckets.no_demand > 0 && (
               <> Wordstat вернул «нет спроса» для{" "}
@@ -977,8 +1091,11 @@ export default function StudioQueriesPage() {
         </Card>
       ) : (
         (() => {
+          const effectiveHidden = layerFromUrl
+            ? new Set<RelevanceKey>()
+            : hidden;
           let visible = (data?.items || []).filter(
-            (row) => !hidden.has(row.relevance as RelevanceKey),
+            (row) => !effectiveHidden.has(row.relevance as RelevanceKey),
           );
           // Coverage chip filter (orthogonal to relevance hidden-set).
           if (coverageFilter !== "all") {
@@ -1026,6 +1143,9 @@ export default function StudioQueriesPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    {/* Chevron column — small fixed width so the
+                        disclosure toggle doesn't push other columns. */}
+                    <TableHead className="w-8" aria-label="Открыть выдачу" />
                     <TableHead className="min-w-[260px]">Запрос</TableHead>
                     <TableHead>Класс</TableHead>
                     <TableHead className="text-right">Объём</TableHead>
@@ -1037,9 +1157,12 @@ export default function StudioQueriesPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {visible.map((row) => (
+                  {visible.map((row) => {
+                    const isExpanded = expandedQueryId === row.query_id;
+                    return (
+                    <Fragment key={row.query_id}>
                     <TableRow
-                      key={row.query_id}
+                      aria-expanded={isExpanded}
                       className={cn(
                         // Mute out-of-focus rows only when a focus is
                         // actually active — otherwise everything looks
@@ -1047,6 +1170,39 @@ export default function StudioQueriesPage() {
                         focus && !row.in_focus && "opacity-60",
                       )}
                     >
+                      {/* Chevron — separate button, click does NOT
+                          bubble to row-level handlers (relevance
+                          popover etc.). One row at a time. */}
+                      <TableCell className="w-8 p-1 text-center align-middle">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedQueryId((cur) =>
+                              cur === row.query_id ? null : row.query_id,
+                            );
+                          }}
+                          aria-expanded={isExpanded}
+                          aria-controls={`serp-panel-${row.query_id}`}
+                          aria-label={
+                            isExpanded
+                              ? "Скрыть выдачу Яндекса"
+                              : "Показать выдачу Яндекса"
+                          }
+                          title={
+                            isExpanded
+                              ? "Скрыть выдачу"
+                              : "Показать снимок выдачи Яндекса"
+                          }
+                          className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                        >
+                          {isExpanded ? (
+                            <ChevronDown className="h-4 w-4" />
+                          ) : (
+                            <ChevronRight className="h-4 w-4" />
+                          )}
+                        </button>
+                      </TableCell>
                       <TableCell className="font-medium">
                         <div className="flex items-center gap-2 flex-wrap">
                           {isUrlLikeQuery(row.query_text) ? (
@@ -1083,6 +1239,36 @@ export default function StudioQueriesPage() {
                             </Badge>
                           )}
                         </div>
+                        <div
+                          className="mt-1 text-[11px] leading-snug text-muted-foreground max-w-[420px]"
+                          title={`${row.strategy_reason_ru}. ${row.strategy_action_ru}`}
+                        >
+                          <span className="font-medium text-foreground/70">
+                            {row.strategy_label_ru}
+                          </span>
+                          {" · "}
+                          {row.strategy_action_ru}
+                        </div>
+                        <div
+                          className="mt-1 flex items-center gap-1.5 flex-wrap text-[11px] leading-snug text-muted-foreground max-w-[420px]"
+                          title={`${row.coverage_reason_ru}. ${row.coverage_action_ru}`}
+                        >
+                          <CoverageBadge
+                            status={row.coverage_status}
+                            score={row.coverage_score}
+                          />
+                          {row.best_page_id && row.best_page_url ? (
+                            <Link
+                              href={`/studio/pages/${row.best_page_id}`}
+                              className="underline-offset-2 hover:underline truncate max-w-[300px]"
+                              title={row.best_page_url}
+                            >
+                              {row.best_page_title || row.best_page_url}
+                            </Link>
+                          ) : (
+                            <span>{row.coverage_action_ru}</span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell>
                         <RelevanceCell
@@ -1117,7 +1303,25 @@ export default function StudioQueriesPage() {
                         {row.cluster ?? "—"}
                       </TableCell>
                     </TableRow>
-                  ))}
+                    {isExpanded && (
+                      <TableRow
+                        id={`serp-panel-${row.query_id}`}
+                        className="bg-muted/20 hover:bg-muted/20"
+                      >
+                        {/* colSpan = 9 (chevron + 8 original columns).
+                            Single cell holds the panel so the layout
+                            isn't constrained to the table's columns. */}
+                        <TableCell colSpan={9} className="p-3">
+                          <SerpSnapshotPanel
+                            siteId={siteId}
+                            queryId={row.query_id}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </Fragment>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </Card>

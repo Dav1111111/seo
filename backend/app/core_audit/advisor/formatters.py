@@ -20,6 +20,70 @@ from app.core_audit.advisor.dto import (
 )
 
 
+def _evidence_lines(*items: str | None) -> tuple[str, ...]:
+    """Return compact owner-facing evidence lines.
+
+    Keep this as plain strings so the API contract stays simple and the
+    frontend can render a stable bullet list without knowing source-
+    specific schemas.
+    """
+    out: list[str] = []
+    for item in items:
+        text = (item or "").strip()
+        if text:
+            out.append(text)
+    return tuple(out)
+
+
+def _short(value: Any, limit: int = 160) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit - 1].rstrip()}…"
+
+
+def _brain_evidence_lines(evidence: dict[str, Any]) -> tuple[str, ...]:
+    """Owner-friendly receipt for generic brain-rule evidence.
+
+    Brain actions already have carefully worded title/body/action. This
+    block is not the main explanation; it is the small factual receipt
+    that proves which counters triggered the rule.
+    """
+    if not evidence:
+        return ()
+    labels: dict[str, str] = {
+        "pages_total": "Страниц проверено",
+        "in_index": "В индексе",
+        "not_indexed": "Не в индексе",
+        "excluded": "Исключено",
+        "unknown": "Статус неизвестен",
+        "funnel_top_count": "Запросов верха воронки",
+        "funnel_top_total_volume": "Суммарный Wordstat-спрос",
+        "funnel_top_pages_count": "Страниц под верх воронки",
+        "funnel_warm_count": "Тёплых запросов",
+        "direct_product_count": "Прямых продуктовых запросов",
+        "pending_recommendations": "Открытых рекомендаций",
+        "high_priority": "Высокий приоритет",
+        "spam": "Спам-запросов",
+        "disputed": "Спорных запросов",
+        "total": "Всего запросов",
+        "oldest_pending_days": "Самая старая рекомендация, дней",
+        "pending_followup": "Ожидают проверки результата",
+        "applied_total": "Применено правок",
+    }
+    lines: list[str] = []
+    for key, value in evidence.items():
+        if value is None:
+            continue
+        if key in {"source_finding_id", "signal"}:
+            continue
+        label = labels.get(key, key.replace("_", " "))
+        lines.append(f"{label}: {_short(value, 120)}")
+        if len(lines) >= 5:
+            break
+    return tuple(lines)
+
+
 # ── 1. Health / pipeline failures ─────────────────────────────────────
 
 
@@ -87,6 +151,17 @@ def format_health_failure(
         cta_ru="Открыть активность",
         sort_score=compute_sort_score(severity, "technical"),
         source_module="advisor.health",
+        why_ru="Стадия полного анализа падала за последние 24 часа.",
+        source_ru="Журнал analysis_events",
+        target_ru=f"Стадия: {label}",
+        evidence_ru=_evidence_lines(
+            f"Падений за 24 часа: {count}",
+            f"Последняя ошибка: {_short(last_message, 180)}" if last_message else None,
+        ),
+        verification_ru=(
+            "После исправления перезапусти полный анализ: эта карточка "
+            "исчезнет, когда стадия перестанет падать в свежем прогоне."
+        ),
     )
 
 
@@ -137,6 +212,17 @@ def format_robots_critical(
         cta_ru="К проверке robots.txt",
         sort_score=compute_sort_score("critical", "technical"),
         source_module="advisor.robots",
+        why_ru="robots.txt содержит критичные правила или не читается как ожидается.",
+        source_ru="Последний аудит robots.txt",
+        target_ru="robots.txt для YandexBot",
+        evidence_ru=_evidence_lines(
+            f"Критических проблем: {critical_issues}",
+            f"Файл валиден для Яндекса: {'да' if valid_for_yandex else 'нет'}",
+        ),
+        verification_ru=(
+            "После правки снова запусти аудит индексации: критических "
+            "проблем должно стать 0."
+        ),
     )
 
 
@@ -186,6 +272,21 @@ def format_schema_missing(
         cta_ru="Посмотреть страницы",
         sort_score=compute_sort_score(severity, "schema"),
         source_module="advisor.schema",
+        why_ru=(
+            f"На деньгах/посадочных страницах не найден тип Schema.org "
+            f"{schema_type}."
+        ),
+        source_ru="Page review / schema audit",
+        target_ru=f"{pages_missing} страниц без {schema_type}",
+        evidence_ru=_evidence_lines(
+            f"Отсутствующий тип: {schema_type}",
+            f"Страниц с проблемой: {pages_missing}",
+            f"Пример URL: {sample_url}" if sample_url else None,
+        ),
+        verification_ru=(
+            "После публикации запусти глубокий разбор страницы: тип "
+            f"{schema_type} должен появиться в блоке Schema.org."
+        ),
     )
 
 
@@ -256,6 +357,27 @@ def format_keyword_gaps(
             expected_clicks_uplift=float(total_potential_clicks),
         ),
         source_module="advisor.keyword_match",
+        why_ru="Запросы из Wordstat слабо представлены в title / H1 / H2 страниц.",
+        source_ru="Keyword gaps: Wordstat + текст страниц",
+        target_ru=f"{pages_with_gaps} страниц с keyword-gap",
+        evidence_ru=_evidence_lines(
+            f"Всего дыр: {total_gaps}",
+            f"Страниц затронуто: {pages_with_gaps}",
+            (
+                f"Расчётный потенциал: +{total_potential_clicks} кликов/мес "
+                "при целевом сценарии"
+                if total_potential_clicks > 0 else None
+            ),
+            (
+                f"Пример: «{top_examples[0].get('query')}» → "
+                f"{top_examples[0].get('page_url')}"
+                if top_examples else None
+            ),
+        ),
+        verification_ru=(
+            "После правки title/H1/H2 отметь совет как применённый: "
+            "через 14 дней система сравнит Webmaster-показы/позиции с baseline."
+        ),
     )
 
 
@@ -279,6 +401,10 @@ _BRAIN_ACTION_CATEGORY: dict[str, Category] = {
     "wordstat": "technical",
     "ctr": "seo_content",
     "behavioral": "seo_content",
+    # SERP-driven competitor signals are competitive intelligence, not
+    # technical defects — route to "funnel" so they sort alongside
+    # other demand/competitor advice.
+    "serp": "funnel",
 }
 
 
@@ -295,6 +421,17 @@ def format_brain_action(action: Any) -> AdviceCard:
     category: Category = _BRAIN_ACTION_CATEGORY.get(prefix, "seo_content")
     # Brain severity is one of critical/high/medium/low — never info.
     severity: Severity = action.severity  # type: ignore[assignment]
+    examples = getattr(action, "examples", None) or []
+    first_example = examples[0] if examples else None
+    target = None
+    if isinstance(first_example, dict):
+        target = (
+            first_example.get("label")
+            or first_example.get("url")
+            or first_example.get("query")
+        )
+    evidence = getattr(action, "evidence", None)
+    evidence_lines = _brain_evidence_lines(evidence if isinstance(evidence, dict) else {})
     return AdviceCard(
         id=f"brain:{aid}",
         severity=severity,
@@ -307,6 +444,14 @@ def format_brain_action(action: Any) -> AdviceCard:
         cta_ru=action.link_label,
         sort_score=compute_sort_score(severity, category),
         source_module="brain",
+        why_ru="Правило Brain сработало на свежем снимке данных сайта.",
+        source_ru="Brain snapshot: индексация, запросы, рекомендации и события анализа",
+        target_ru=target or action.link_to,
+        evidence_ru=evidence_lines,
+        verification_ru=(
+            "После выполнения отметь совет как применённый: система "
+            "зафиксирует baseline и проверит изменение через 14 дней."
+        ),
     )
 
 
@@ -346,7 +491,11 @@ def format_funnel_top_raw(
         f"выбирают активность. Самый большой по объёму канал, "
         f"который сейчас не используется."
     )
-    expected = f"~{round(funnel_top_total_volume * 0.5 / 1000.0)} тыс посетителей/мес при выходе в топ-10"
+    expected = (
+        f"верхняя оценка спроса Wordstat: ~"
+        f"{round(funnel_top_total_volume * 0.5 / 1000.0)} тыс/мес "
+        "при топ-10, не прогноз кликов"
+    )
     return AdviceCard(
         id="funnel:top_gap_raw",
         severity="high",
@@ -365,10 +514,236 @@ def format_funnel_top_raw(
             expected_clicks_uplift=float(funnel_top_total_volume * 0.5),
         ),
         source_module="advisor.funnel",
+        why_ru=(
+            "В базе есть много запросов верхней воронки, но сайт почти "
+            "не ранжируется по ним в топ-20."
+        ),
+        source_ru="Wordstat + Webmaster/query_performance",
+        target_ru="Слой запросов: верх воронки",
+        evidence_ru=_evidence_lines(
+            f"Запросов funnel_top: {funnel_top_count}",
+            f"Суммарный Wordstat-спрос: {funnel_top_total_volume}/мес",
+            f"Запросов с позицией в топ-20: {funnel_top_with_ranking}",
+        ),
+        verification_ru=(
+            "После создания/доработки страниц проверяем через Webmaster: "
+            "должны появиться показы и позиции по запросам funnel_top."
+        ),
     )
 
 
-# ── 7. Metrica counter health ─────────────────────────────────────────
+# ── 6b. SERP-derived competitor dominance ────────────────────────────
+
+
+def format_competitor_dominance(
+    *,
+    domain: str,
+    top3_count: int,
+    top10_count: int,
+    total_probed_queries: int,
+    share_of_queries: float,
+    sample_queries: list[str] | None = None,
+) -> AdviceCard | None:
+    """Top competitor in our SERPs → owner-facing card.
+
+    Mirrors the brain rule's wording but exposed as a standalone
+    formatter so the aggregator (or tests) can build the same card
+    without re-running the rule layer. Stays silent if no real
+    dominance (share below ~30% threshold) or inputs are missing.
+    """
+    if not domain or total_probed_queries <= 0:
+        return None
+    share = float(share_of_queries or 0.0)
+    if share < 0.30:
+        return None
+    samples = list(sample_queries or [])
+
+    if share >= 0.60:
+        severity: Severity = "critical"
+    elif share >= 0.40:
+        severity = "high"
+    else:
+        severity = "medium"
+
+    share_pct = int(round(share * 100))
+    title = (
+        f"{domain} держит топ-3 по {top3_count} из {total_probed_queries} "
+        f"ценных запросов ({share_pct}%)"
+    )
+    body = (
+        f"По данным еженедельной выборки SERP, {domain} стабильно "
+        f"оказывается в топ-3 Яндекса по большой доле твоих ценных "
+        f"запросов. Это означает, что Яндекс видит именно их сильнее "
+        f"тебя по теме — самое полезное действие сейчас — изучить, "
+        f"что у них на посадочных страницах есть, чего нет у тебя."
+    )
+    action = (
+        f"Открой «Конкуренты», добавь {domain} (если ещё нет) и "
+        f"запусти глубокий разбор. Сравни длину текста, наличие "
+        f"цены/бронирования, фото, H2-структуру и закрой пробелы на "
+        f"своих конкурирующих страницах."
+    )
+    evidence_lines = _evidence_lines(
+        f"Top-3 присутствий: {top3_count} из {total_probed_queries}",
+        f"Доля топ-3: {share_pct}%",
+        f"В топ-10 хотя бы раз: {top10_count}",
+        (f"Пример запросов: {', '.join(samples[:3])}" if samples else None),
+    )
+    return AdviceCard(
+        id=f"serp:competitor_dominates:{domain}",
+        severity=severity,
+        category="funnel",
+        title_ru=title,
+        body_ru=body,
+        action_ru=action,
+        expected_impact_ru=None,
+        link="/studio/competitors",
+        cta_ru="К конкурентам",
+        sort_score=compute_sort_score(severity, "funnel"),
+        source_module="advisor.serp",
+        why_ru=(
+            "Еженедельная выборка SERP по самым ценным запросам показала "
+            "одного и того же конкурента в топ-3 — это сильный сигнал."
+        ),
+        source_ru="query_serp_snapshots (weekly probe)",
+        target_ru=domain,
+        evidence_ru=evidence_lines,
+        verification_ru=(
+            "После доработки своих страниц жди следующего еженедельного "
+            "опроса SERP — позиция и распределение конкурентов обновятся."
+        ),
+    )
+
+
+# ── 7. Query coverage action cards ───────────────────────────────────
+
+
+def format_query_action(
+    *,
+    query_id: str,
+    query_text: str,
+    relevance: str,
+    wordstat_volume: int | None,
+    last_position: float | None,
+    strategy_code: str,
+    strategy_label_ru: str,
+    strategy_action_ru: str,
+    coverage_status: str,
+    coverage_score: int,
+    coverage_reason_ru: str,
+    coverage_action_ru: str,
+    best_page_id: str | None,
+    best_page_url: str | None,
+    best_page_title: str | None,
+) -> AdviceCard | None:
+    """One concrete query → one concrete owner action.
+
+    Unlike aggregate funnel cards, this points to a specific phrase and
+    usually a specific page candidate. It stays silent when coverage is
+    already strong or the query is intentionally ignored.
+    """
+    if relevance in {"spam", "out_of_market"}:
+        return None
+    if coverage_status not in {"missing", "weak"}:
+        return None
+
+    volume = int(wordstat_volume or 0)
+    category: Category = "funnel" if relevance in {
+        "funnel_warm", "funnel_top", "adjacent",
+    } else "keywords"
+
+    if relevance in {"direct_product", "own"}:
+        severity: Severity = "high"
+    elif strategy_code == "mention_as_alternative":
+        severity = "medium" if volume < 1000 else "high"
+    elif relevance == "funnel_top":
+        severity = "medium" if volume < 1500 else "high"
+    else:
+        severity = "medium" if volume < 800 else "high"
+
+    if strategy_code == "mention_as_alternative":
+        title = f"Запрос «{query_text}» лучше встроить как альтернативу"
+    elif coverage_status == "missing":
+        title = f"Запрос «{query_text}» не закрыт страницей"
+    else:
+        title = f"Запрос «{query_text}» закрыт слабо"
+
+    facts: list[str] = []
+    if volume > 0:
+        facts.append(f"Wordstat: {volume}/мес")
+    if last_position is not None:
+        facts.append(f"позиция: {last_position:.1f}")
+    facts.append(f"покрытие: {coverage_score}/100")
+
+    page_part = ""
+    if best_page_url:
+        label = best_page_title or best_page_url
+        page_part = f" Лучший кандидат: {label}."
+
+    body = (
+        f"{'; '.join(facts)}. {coverage_reason_ru}."
+        f"{page_part} Это конкретная связка «совет → запрос → страница», "
+        "а не общий SEO-совет."
+    )
+
+    action = coverage_action_ru or strategy_action_ru
+    if strategy_code == "mention_as_alternative":
+        action = strategy_action_ru
+
+    if best_page_id:
+        link = f"/studio/pages/{best_page_id}"
+        cta = "Открыть страницу"
+    else:
+        link = f"/studio/queries?layer={relevance}"
+        cta = "Открыть запросы"
+
+    expected = None
+    if volume > 0:
+        expected = f"потенциал спроса Wordstat: {volume}/мес, не прогноз кликов"
+
+    # Conservative sorting lift: high-volume query actions bubble
+    # within their severity, but cannot outrank critical technical bugs.
+    sort_lift = min(float(volume) * 0.05, 1500.0)
+
+    return AdviceCard(
+        id=f"query_action:{query_id}",
+        severity=severity,
+        category=category,
+        title_ru=title,
+        body_ru=body,
+        action_ru=action,
+        expected_impact_ru=expected,
+        link=link,
+        cta_ru=cta,
+        sort_score=compute_sort_score(
+            severity,
+            category,
+            expected_clicks_uplift=sort_lift,
+        ),
+        source_module="advisor.query_coverage",
+        why_ru="Запрос релевантен бизнесу, но покрытие сайта по нему слабое или отсутствует.",
+        source_ru="Wordstat + Webmaster + deterministic page coverage",
+        target_ru=(
+            f"Запрос: «{query_text}»"
+            + (f" · страница: {best_page_url}" if best_page_url else "")
+        ),
+        evidence_ru=_evidence_lines(
+            f"Релевантность: {relevance}",
+            f"Стратегия: {strategy_label_ru}",
+            f"Wordstat: {volume}/мес" if volume > 0 else "Wordstat: данных по объёму нет",
+            f"Последняя позиция: {last_position:.1f}" if last_position is not None else None,
+            f"Покрытие страницы: {coverage_score}/100 ({coverage_status})",
+            coverage_reason_ru,
+        ),
+        verification_ru=(
+            "После правки отмечаем карточку как применённую: через 14 "
+            "дней сравниваем позицию/показы по этому запросу и обновляем "
+            "coverage, чтобы старый совет не повторялся."
+        ),
+    )
+
+
+# ── 8. Metrica counter health ─────────────────────────────────────────
 
 
 _METRICA_OK_STATUSES = {"CS_OK", None, ""}
@@ -415,6 +790,124 @@ def format_metrica_counter(
         cta_ru="К активности",
         sort_score=compute_sort_score("high", "health"),
         source_module="advisor.metrica",
+        why_ru="Без живой Метрики поведенческие и конверсионные советы недостоверны.",
+        source_ru="Yandex Metrica counter status в daily_metrics",
+        target_ru="Счётчик Яндекс.Метрики",
+        evidence_ru=_evidence_lines(
+            f"counter_status: {counter_status or 'нет данных'}",
+            f"counter_code_status: {counter_code_status or 'нет данных'}",
+        ),
+        verification_ru=(
+            "После установки кода перезапусти сбор Метрики: статус должен "
+            "стать CS_OK, а визиты начнут попадать в отчёты."
+        ),
+    )
+
+
+# ── 9. SERP-intel per-query gap ────────────────────────────────────────
+
+
+def format_serp_gap(
+    *,
+    query_text: str,
+    wordstat_volume: int,
+    our_position: int | None,
+    top_competitor_domain: str,
+    top_competitor_url: str,
+    site_id: Any,
+    query_id: Any,
+) -> AdviceCard | None:
+    """One card per query where we're outside top-5 but the same
+    competitor sits in top-3 — and the demand is non-trivial.
+
+    Filters (all must hold):
+      * our_position is None OR > 5
+      * top_competitor_domain is non-empty
+      * wordstat_volume >= 50 (below this the Wordstat signal is noisy
+        and the SERP page may be partly bot-traffic)
+
+    Otherwise → None. The aggregator picks the top-5 of these by
+    expected uplift so the home feed stays focused.
+
+    Severity:
+      high   → wordstat_volume >= 500
+      medium → wordstat_volume >= 100
+      low    → wordstat_volume >= 50
+    """
+    if wordstat_volume < 50:
+        return None
+    if our_position is not None and our_position <= 5:
+        return None
+    competitor = (top_competitor_domain or "").strip()
+    if not competitor:
+        return None
+
+    if wordstat_volume >= 500:
+        severity: Severity = "high"
+    elif wordstat_volume >= 100:
+        severity = "medium"
+    else:
+        severity = "low"
+
+    position_label = (
+        f"мы {our_position}-е место"
+        if our_position is not None
+        else "нас в топ-10 нет"
+    )
+    title = (
+        f"«{_short(query_text, 80)}» — {position_label}, "
+        f"в топ-3 сидит {competitor}"
+    )
+    body = (
+        f"По запросу «{query_text}» Wordstat показывает ~{wordstat_volume}/мес "
+        f"и {competitor} стабильно держится в топ-3. "
+        f"{position_label.capitalize()} — это ощутимая дыра в видимости "
+        f"на запрос, релевантный твоему бизнесу."
+    )
+    action = (
+        f"Открой запрос в разделе «Запросы», посмотри карточку SERP — "
+        f"там видна целевая страница конкурента ({_short(top_competitor_url, 120) or competitor}). "
+        f"Сравни её со своей по контенту, цене, отзывам и H2; "
+        f"добавь то, чего у тебя нет."
+    )
+
+    # Sort-lift: small fractional bump per volume so high-volume gaps
+    # bubble within their severity (capped to never overpower critical
+    # technical cards).
+    sort_lift = min(float(wordstat_volume) * 0.05, 1500.0)
+
+    return AdviceCard(
+        id=f"serp:gap:{query_id}",
+        severity=severity,
+        category="funnel",
+        title_ru=title,
+        body_ru=body,
+        action_ru=action,
+        expected_impact_ru=(
+            f"потенциал спроса Wordstat: {wordstat_volume}/мес, не прогноз кликов"
+        ),
+        link=f"/studio/queries?focus={query_id}",
+        cta_ru="Открыть запрос",
+        sort_score=compute_sort_score(
+            severity, "funnel", expected_clicks_uplift=sort_lift,
+        ),
+        source_module="advisor.serp_intel",
+        why_ru=(
+            "По важному запросу мы вне топ-5, а один и тот же конкурент "
+            "стоит в топ-3."
+        ),
+        source_ru="query_serp_snapshots (weekly Yandex Cloud Search probe)",
+        target_ru=f"Запрос: «{query_text}»",
+        evidence_ru=_evidence_lines(
+            f"Wordstat: {wordstat_volume}/мес",
+            f"Наша позиция: {our_position if our_position is not None else 'вне топ-10'}",
+            f"Топ-3 конкурент: {competitor}",
+            f"URL конкурента: {top_competitor_url}" if top_competitor_url else None,
+        ),
+        verification_ru=(
+            "После правки страница пересобирается через 14 дней: "
+            "если позиция выросла или мы вошли в топ-5 — карточка уйдёт."
+        ),
     )
 
 
@@ -425,5 +918,7 @@ __all__ = [
     "format_keyword_gaps",
     "format_brain_action",
     "format_funnel_top_raw",
+    "format_query_action",
     "format_metrica_counter",
+    "format_serp_gap",
 ]

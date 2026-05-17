@@ -11,19 +11,22 @@ from app.models.snapshot import Snapshot
 from app.models.seasonality import SeasonalityPattern
 from app.models.analysis_event import AnalysisEvent
 from app.models.outcome_snapshot import OutcomeSnapshot
+from app.models.advice_card_state import AdviceCardState
 from app.models.chat import ChatConversation, ChatMessage
 from app.fingerprint.models import PageFingerprint
 from app.intent.models import QueryIntent, PageIntentScore, CoverageDecision
 from app.core_audit.demand_map.models import TargetCluster, TargetQuery
 from app.models.lateral_query import LateralQuery
+from app.models.query_serp_snapshot import QuerySerpSnapshot
 
 __all__ = [
     "Tenant", "Site", "Page", "SearchQuery", "DailyMetric",
     "Issue", "Alert", "AgentRun", "Task", "Snapshot", "SeasonalityPattern",
-    "AnalysisEvent", "OutcomeSnapshot",
+    "AnalysisEvent", "OutcomeSnapshot", "AdviceCardState",
     "ChatConversation", "ChatMessage",
     "PageFingerprint",
     "QueryIntent", "PageIntentScore", "CoverageDecision",
     "TargetCluster", "TargetQuery",
     "LateralQuery",
+    "QuerySerpSnapshot",
 ]

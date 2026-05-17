@@ -614,6 +614,78 @@ export async function applyKeywordPlacement(args: {
   );
 }
 
+// — SERP intel per query — backend: core_audit/serp_intel/
+//
+// For each important query the system snapshots Yandex top-10 SERP
+// and stores who ranks + our position. UI shows the latest snapshot in
+// an expandable panel on /studio/queries, with a manual «refresh»
+// trigger that fires the same probe task.
+export interface SerpRanking {
+  position: number;
+  url: string;
+  domain: string;
+  title: string;
+  headline: string;
+}
+
+export interface QuerySerpTrendPoint {
+  taken_at: string;
+  our_position: number | null;
+}
+
+export interface QuerySerpResponse {
+  query_id: string;
+  query_text: string;
+  // Null when the query has never been probed (404 → null in the
+  // fetcher) is mapped at the wrapper layer; this field is the
+  // snapshot's own timestamp when the response IS present.
+  taken_at: string | null;
+  region: string;
+  our_position: number | null;
+  our_url: string | null;
+  top_competitor_domains: string[];
+  results: SerpRanking[];
+  // Non-null when the last probe failed (e.g. captcha, timeout). UI
+  // surfaces the tag verbatim in a red banner — no client-side mapping
+  // because backend owns the closed set.
+  error_tag: string | null;
+  trend: QuerySerpTrendPoint[];
+}
+
+export interface SerpRefreshResponse {
+  status: "queued" | "deduped";
+  task_id?: string;
+  run_id: string;
+}
+
+// 404 → null (query never probed). Lets the panel render its empty
+// state without conflating «no snapshot yet» with «backend error».
+export async function getQuerySerpSnapshot(
+  siteId: string,
+  queryId: string,
+): Promise<QuerySerpResponse | null> {
+  try {
+    return await apiFetch<QuerySerpResponse>(
+      `/studio/sites/${siteId}/queries/${queryId}/serp-snapshot`,
+      { base: "admin" },
+    );
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/^API 404\b/.test(msg)) return null;
+    throw e;
+  }
+}
+
+export async function refreshQuerySerpSnapshot(
+  siteId: string,
+  queryId: string,
+): Promise<SerpRefreshResponse> {
+  return apiFetch<SerpRefreshResponse>(
+    `/studio/sites/${siteId}/queries/${queryId}/serp-snapshot/refresh`,
+    { method: "POST", base: "admin" },
+  );
+}
+
 export const api = {
   // Health
   health: () => apiFetch<{ status: string; db: string; redis: string }>("/health"),

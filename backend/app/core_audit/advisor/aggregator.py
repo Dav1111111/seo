@@ -12,7 +12,8 @@ Sources currently wired:
   4. analysis_events:metrica (latest) → counter health card
   5. brain rules — every Action becomes a card
   6. Funnel raw signal — safety net when brain rule is silent
-  7. Schema audit per-page deep_extract → per-type «missing» cards
+  7. Query coverage → concrete query/page action cards
+  8. Schema audit per-page deep_extract → per-type «missing» cards
 
 The aggregator's only job is: pull data, dispatch to formatters, dedupe
 by `id`, sort by `sort_score` desc.
@@ -25,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core_audit.advisor.dto import AdviceCard, AdviceFeed
@@ -35,11 +36,20 @@ from app.core_audit.advisor.formatters import (
     format_health_failure,
     format_keyword_gaps,
     format_metrica_counter,
+    format_query_action,
     format_robots_critical,
     format_schema_missing,
+    format_serp_gap,
+)
+from app.core_audit.query_coverage import (
+    coverage_for_query,
+    query_strategy_for_row,
 )
 from app.models.analysis_event import AnalysisEvent
+from app.models.daily_metric import DailyMetric
+from app.models.page import Page
 from app.models.page_deep_extract import PageDeepExtract
+from app.models.search_query import SearchQuery
 from app.models.site import Site
 
 
@@ -107,8 +117,14 @@ async def collect_advice(db: AsyncSession, site_id: UUID) -> AdviceFeed:
     if funnel_card is not None:
         cards.append(funnel_card)
 
-    # ── 7. Schema audit per-type missing ─────────────────────────────
+    # ── 7. Concrete query→page action cards ──────────────────────────
+    cards.extend(await _collect_query_action_cards(db, site_id))
+
+    # ── 8. Schema audit per-type missing ─────────────────────────────
     cards.extend(await _collect_schema_missing(db, site_id))
+
+    # ── 9. SERP-intel per-query gaps ─────────────────────────────────
+    cards.extend(await _collect_serp_snapshots(db, site))
 
     # Dedupe by id (first wins — brain rule wording dominates over raw
     # safety-net formatters when the same signal surfaces twice).
@@ -388,6 +404,121 @@ async def _funnel_layer_pages_with_ranking(
     return int(rows or 0)
 
 
+async def _collect_query_action_cards(
+    db: AsyncSession, site_id: UUID,
+) -> list[AdviceCard]:
+    """Surface the top concrete query→page tasks for /studio.
+
+    This reads the same deterministic coverage helpers as
+    /studio/queries, but emits only actionable weak/missing cases so
+    the home feed becomes a work queue instead of another table.
+    """
+    query_rows = (await db.execute(
+        select(SearchQuery)
+        .where(
+            SearchQuery.site_id == site_id,
+            SearchQuery.relevance.in_([
+                "direct_product",
+                "funnel_warm",
+                "funnel_top",
+                "own",
+                "adjacent",
+                "disputed",
+            ]),
+        )
+        .order_by(SearchQuery.wordstat_volume.desc().nulls_last())
+        .limit(250)
+    )).scalars().all()
+    if not query_rows:
+        return []
+
+    page_rows = (await db.execute(
+        select(
+            Page.id,
+            Page.url,
+            Page.path,
+            Page.title,
+            Page.h1,
+            Page.meta_description,
+        )
+        .where(
+            Page.site_id == site_id,
+            or_(Page.http_status.is_(None), Page.http_status.between(200, 299)),
+        )
+        .limit(5000)
+    )).all()
+    pages_for_coverage: list[dict[str, Any]] = [
+        dict(row._mapping) for row in page_rows
+    ]
+
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=30)
+    query_ids = [q.id for q in query_rows]
+    metric_rows = (await db.execute(
+        select(DailyMetric)
+        .where(
+            DailyMetric.site_id == site_id,
+            DailyMetric.metric_type == "query_performance",
+            DailyMetric.dimension_id.in_(query_ids),
+            DailyMetric.date >= cutoff,
+        )
+        .order_by(DailyMetric.date.desc())
+        .limit(10000)
+    )).scalars().all()
+    latest_metric_by_qid: dict[UUID, DailyMetric] = {}
+    for metric in metric_rows:
+        if metric.dimension_id is None:
+            continue
+        latest_metric_by_qid.setdefault(metric.dimension_id, metric)
+
+    cards: list[AdviceCard] = []
+    for q in query_rows:
+        relevance = q.relevance or "unclassified"
+        metric = latest_metric_by_qid.get(q.id)
+        last_position = (
+            float(metric.avg_position)
+            if metric and metric.avg_position is not None
+            else None
+        )
+        strategy = query_strategy_for_row(
+            query_text=q.query_text,
+            relevance=relevance,
+            wordstat_volume=q.wordstat_volume,
+            last_position=last_position,
+        )
+        coverage = coverage_for_query(
+            query_text=q.query_text,
+            relevance=relevance,
+            strategy_code=strategy["strategy_code"],
+            last_position=last_position,
+            pages=pages_for_coverage,
+        )
+        card = format_query_action(
+            query_id=str(q.id),
+            query_text=q.query_text,
+            relevance=relevance,
+            wordstat_volume=q.wordstat_volume,
+            last_position=last_position,
+            strategy_code=strategy["strategy_code"],
+            strategy_label_ru=strategy["strategy_label_ru"],
+            strategy_action_ru=strategy["strategy_action_ru"],
+            coverage_status=coverage["coverage_status"],
+            coverage_score=int(coverage["coverage_score"] or 0),
+            coverage_reason_ru=coverage["coverage_reason_ru"],
+            coverage_action_ru=coverage["coverage_action_ru"],
+            best_page_id=(
+                str(coverage["best_page_id"])
+                if coverage.get("best_page_id") else None
+            ),
+            best_page_url=coverage.get("best_page_url"),
+            best_page_title=coverage.get("best_page_title"),
+        )
+        if card is not None:
+            cards.append(card)
+
+    cards.sort(key=lambda c: (-c.sort_score, c.id))
+    return cards[:8]
+
+
 async def _collect_schema_missing(
     db: AsyncSession, site_id: UUID,
 ) -> list[AdviceCard]:
@@ -470,6 +601,103 @@ async def _collect_schema_missing(
         if card is not None:
             out.append(card)
     return out
+
+
+# Cap on per-query SERP-gap cards so the feed stays focused even when
+# the site has dozens of probed queries falling out of top-5.
+_SERP_GAP_MAX_CARDS = 5
+
+
+async def _collect_serp_snapshots(
+    db: AsyncSession, site: Site,
+) -> list[AdviceCard]:
+    """Surface per-query SERP-intel gap cards.
+
+    Reads the LATEST non-errored snapshot per query (within last 14
+    days) and emits a `format_serp_gap` card for every query where
+    we're outside top-5 and the same competitor sits in top-3 and the
+    Wordstat volume crosses 50/мес. Capped at `_SERP_GAP_MAX_CARDS` by
+    expected uplift so the home feed stays focused.
+    """
+    from app.models.query_serp_snapshot import QuerySerpSnapshot
+    from app.models.search_query import SearchQuery
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+    # Order DESC by taken_at then dedup by query_id in Python — keeps
+    # the query portable across SQLite test backends (no DISTINCT ON).
+    rows = (await db.execute(
+        select(QuerySerpSnapshot)
+        .where(
+            QuerySerpSnapshot.site_id == site.id,
+            QuerySerpSnapshot.error_tag.is_(None),
+            QuerySerpSnapshot.taken_at >= cutoff,
+        )
+        .order_by(
+            QuerySerpSnapshot.query_id,
+            QuerySerpSnapshot.taken_at.desc(),
+        )
+    )).scalars().all()
+    if not rows:
+        return []
+
+    latest_by_query: dict[Any, QuerySerpSnapshot] = {}
+    for r in rows:
+        if r.query_id not in latest_by_query:
+            latest_by_query[r.query_id] = r
+    snapshots = list(latest_by_query.values())
+    if not snapshots:
+        return []
+
+    q_meta_rows = (await db.execute(
+        select(
+            SearchQuery.id, SearchQuery.query_text, SearchQuery.wordstat_volume,
+        )
+        .where(SearchQuery.id.in_({s.query_id for s in snapshots}))
+    )).all()
+    q_meta: dict[Any, tuple[str, int]] = {
+        qid: (qtext, int(vol or 0))
+        for qid, qtext, vol in q_meta_rows
+    }
+
+    candidates: list[tuple[int, AdviceCard]] = []
+    for snap in snapshots:
+        meta = q_meta.get(snap.query_id)
+        if meta is None:
+            continue
+        query_text, volume = meta
+        top_competitors = snap.top_competitor_domains or []
+        if not isinstance(top_competitors, list) or not top_competitors:
+            continue
+        top_domain = str(top_competitors[0] or "").strip()
+        if not top_domain:
+            continue
+        # Find the URL for that domain in the top-N results.
+        top_url = ""
+        for row in (snap.results or []):
+            if not isinstance(row, dict):
+                continue
+            dom = str(row.get("domain") or "").lower().lstrip(".")
+            if dom == top_domain:
+                top_url = str(row.get("url") or "")
+                break
+
+        card = format_serp_gap(
+            query_text=query_text,
+            wordstat_volume=volume,
+            our_position=snap.our_position,
+            top_competitor_domain=top_domain,
+            top_competitor_url=top_url,
+            site_id=site.id,
+            query_id=snap.query_id,
+        )
+        if card is None:
+            continue
+        candidates.append((volume, card))
+
+    if not candidates:
+        return []
+    candidates.sort(key=lambda x: (-x[0], x[1].id))
+    return [c for _v, c in candidates[:_SERP_GAP_MAX_CARDS]]
 
 
 __all__ = ["collect_advice"]

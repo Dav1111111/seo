@@ -268,6 +268,34 @@ class FunnelFacts:
 
 
 @dataclass
+class SerpFacts:
+    """Aggregated SERP intelligence — populated by `_serp_facts`.
+
+    Sourced from `query_serp_snapshots`, one row per probed query
+    (the weekly `serp_intel_probe_all` beat writes them via
+    `core_audit.serp_intel.collect_serp_snapshot_for_site`). Stays at
+    default («no data») on sites that haven't been probed yet — the
+    `_rule_serp_competitor_pressure` brain rule then silently skips.
+
+    Layout
+    ------
+    * `probed_queries`           — total queries whose LATEST snapshot
+                                   in the last 14 days is non-errored.
+    * `our_in_top10_count`       — of those, how many had us anywhere
+                                   in top-10.
+    * `top_competitor_by_queries`— DESC-sorted list of dicts:
+                                   {domain, queries_in_top3, sample_queries}.
+                                   The rule reads the first item.
+    """
+    probed_queries: int = 0
+    our_in_top10_count: int = 0
+    # DESC-sorted competitor tallies: each {domain, queries_in_top3,
+    # sample_queries[:5]} — populated from the LATEST snapshot per
+    # (site, query) over the last 14 days.
+    top_competitor_by_queries: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class MetricaFacts:
     latest_date: date | None = None
     visits_7d: int = 0
@@ -320,6 +348,10 @@ class BrainSnapshot:
     # nudges the owner to look.
     robots_critical_issues: int = 0
     robots_valid_for_yandex: bool = True
+    # SERP probe aggregate signal — populated by `_serp_facts(db, site)`.
+    # Default «no data» on sites that haven't been probed yet, in which
+    # case the dedicated rule stays silent.
+    serp: SerpFacts = field(default_factory=SerpFacts)
 
 
 # ── Loaders ──────────────────────────────────────────────────────────
@@ -1892,6 +1924,118 @@ async def _robots_audit_facts(
     return crit, valid
 
 
+async def _serp_facts(db: AsyncSession, site: Site) -> SerpFacts:
+    """Pull SERP intelligence from `query_serp_snapshots`.
+
+    Reads the LATEST non-errored snapshot per (site, query) within
+    the last 14 days, then tallies how many queries each non-our
+    domain holds in top-3. Returns a SerpFacts with the leaderboard
+    sorted DESC by queries_in_top3 — the brain rule reads the leader.
+
+    Never runs the SERP loader inline (CLAUDE.md rule 5): this is a
+    pure cache read of what `serp_intel_probe_for_site` wrote.
+    Always safe — any DB-side error gracefully returns the «no data»
+    default so the brain doesn't fall over when the SERP-intel beat
+    hasn't yet run.
+    """
+    try:
+        from app.models.query_serp_snapshot import QuerySerpSnapshot
+        from app.models.search_query import SearchQuery
+        from app.core_audit.serp_intel.snapshot import _canonicalise_host
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+        # Pull all recent rows; Python dedup to «latest per query_id»
+        # keeps the loader portable across SQLite test backends (no
+        # DISTINCT ON dependency).
+        rows = (await db.execute(
+            select(QuerySerpSnapshot)
+            .where(
+                QuerySerpSnapshot.site_id == site.id,
+                QuerySerpSnapshot.error_tag.is_(None),
+                QuerySerpSnapshot.taken_at >= cutoff,
+            )
+            .order_by(
+                QuerySerpSnapshot.query_id,
+                QuerySerpSnapshot.taken_at.desc(),
+            )
+        )).scalars().all()
+        if not rows:
+            return SerpFacts()
+
+        latest_by_query: dict = {}
+        for r in rows:
+            if r.query_id not in latest_by_query:
+                latest_by_query[r.query_id] = r
+        snapshots = list(latest_by_query.values())
+
+        our_in_top10 = sum(
+            1 for s in snapshots if s.our_position is not None
+        )
+
+        # query_id → query_text (for sample_queries on the leader)
+        q_text: dict = {}
+        if snapshots:
+            text_rows = (await db.execute(
+                select(SearchQuery.id, SearchQuery.query_text)
+                .where(SearchQuery.id.in_({s.query_id for s in snapshots}))
+            )).all()
+            for qid, txt in text_rows:
+                q_text[qid] = txt
+
+        our_host = _canonicalise_host(site.domain)
+
+        # Per-competitor tally: count queries where they appear in top-3
+        # AND are not us. Deduplicate per query (one site with 2 URLs in
+        # top-3 still counts as ONE «held query»).
+        top3_counts: dict[str, int] = {}
+        samples: dict[str, list[str]] = {}
+        for snap in snapshots:
+            results = snap.results or []
+            if not isinstance(results, list):
+                continue
+            top3_seen: set[str] = set()
+            for row in results:
+                if not isinstance(row, dict):
+                    continue
+                pos = row.get("position")
+                if pos is None or int(pos) > 3:
+                    continue
+                domain = _canonicalise_host(row.get("domain"))
+                if not domain:
+                    continue
+                if domain == our_host or domain.endswith("." + our_host):
+                    continue
+                if domain in top3_seen:
+                    continue
+                top3_seen.add(domain)
+                top3_counts[domain] = top3_counts.get(domain, 0) + 1
+                sample_list = samples.setdefault(domain, [])
+                if len(sample_list) < 5:
+                    qtext = q_text.get(snap.query_id)
+                    if qtext and qtext not in sample_list:
+                        sample_list.append(qtext)
+
+        leaderboard: list[dict[str, Any]] = [
+            {
+                "domain": d,
+                "queries_in_top3": c,
+                "sample_queries": list(samples.get(d, [])),
+            }
+            for d, c in sorted(
+                top3_counts.items(),
+                key=lambda x: (-x[1], x[0]),
+            )
+        ]
+
+        return SerpFacts(
+            probed_queries=len(snapshots),
+            our_in_top10_count=our_in_top10,
+            top_competitor_by_queries=leaderboard,
+        )
+    except Exception:  # noqa: BLE001 — never break the brain on SERP issues
+        return SerpFacts()
+
+
 async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
     """Pull every count the rules layer needs, in one round trip.
 
@@ -1916,6 +2060,7 @@ async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
     metrica = await _metrica(db, site_id)
     funnel = await _funnel(db, site_id)
     robots_critical, robots_valid = await _robots_audit_facts(db, site_id)
+    serp = await _serp_facts(db, site)
 
     return BrainSnapshot(
         site_id=str(site_id),
@@ -1933,6 +2078,7 @@ async def build_snapshot(db: AsyncSession, site: Site) -> BrainSnapshot:
         funnel=funnel,
         robots_critical_issues=robots_critical,
         robots_valid_for_yandex=robots_valid,
+        serp=serp,
     )
 
 
@@ -1948,6 +2094,7 @@ __all__ = [
     "BehavioralFacts",
     "MetricaFacts",
     "FunnelFacts",
+    "SerpFacts",
     "REVIEW_RECOMMENDATIONS_CONTEXT_LIMIT",
     "build_snapshot",
 ]

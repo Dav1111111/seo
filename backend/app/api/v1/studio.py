@@ -280,6 +280,11 @@ class QueryRow(BaseModel):
     # substring-matches any focus token. False when no focus is set
     # (i.e. site hasn't opted in) so the UI doesn't show pills.
     in_focus: bool = False
+    # SERP probe (2026-05-18, roadmap point 2): the most-recent latest
+    # snapshot's top non-owner domain. None when we haven't probed yet
+    # OR the probe errored (`error_reason` set) — UI shows nothing
+    # rather than fabricating a competitor name.
+    top_competitor_domain: str | None = None
 
 
 class QueriesResponse(BaseModel):
@@ -416,6 +421,48 @@ async def list_queries(
         dict(row._mapping) for row in page_rows
     ]
 
+    # SERP probe — pull every successful snapshot for this site once,
+    # then pick the most-recent per query in Python. We skip rows with
+    # `error_tag` so honest no-answer probes don't poison the UI.
+    # Owner host normalised once so the «top competitor» column doesn't
+    # accidentally surface a www. variant of the owner itself.
+    from app.core_audit.serp_intel.snapshot import _canonicalise_host
+    from app.models.query_serp_snapshot import QuerySerpSnapshot
+
+    owner_host = _canonicalise_host(site.domain)
+    snapshot_rows = (await db.execute(
+        select(QuerySerpSnapshot)
+        .where(
+            QuerySerpSnapshot.site_id == site_id,
+            QuerySerpSnapshot.error_tag.is_(None),
+        )
+        .order_by(
+            QuerySerpSnapshot.query_id,
+            QuerySerpSnapshot.taken_at.desc(),
+        )
+    )).scalars().all()
+    top_competitor_by_qid: dict[uuid.UUID, str | None] = {}
+    seen_qids: set[uuid.UUID] = set()
+    for snap in snapshot_rows:
+        if snap.query_id in seen_qids:
+            continue
+        seen_qids.add(snap.query_id)
+        top_dom: str | None = None
+        for d in (snap.top_competitor_domains or []):
+            host = _canonicalise_host(d)
+            if not host:
+                continue
+            # Defensive — the writer already excludes owner from
+            # top_competitor_domains, but a www. variant slipping through
+            # would be confusing in the UI.
+            if owner_host and (
+                host == owner_host or host.endswith("." + owner_host)
+            ):
+                continue
+            top_dom = host
+            break
+        top_competitor_by_qid[snap.query_id] = top_dom
+
     items: list[QueryRow] = []
     coverage = _empty_query_coverage()
 
@@ -494,6 +541,7 @@ async def list_queries(
                 **strategy,
                 **query_coverage,
                 in_focus=_text_in_focus(q.query_text, focus_tokens),
+                top_competitor_domain=top_competitor_by_qid.get(q.id),
             )
         )
 
@@ -923,6 +971,214 @@ async def patch_query_relevance(
         "relevance_set_by": "user",
         "relevance_set_at": now.isoformat(),
     }
+
+
+# ── Per-query SERP snapshot (roadmap point 2) ─────────────────────────
+
+
+class SerpRowItem(BaseModel):
+    """One row from the stored top-N SERP snapshot. Field names are
+    LOAD-BEARING — match `core_audit.serp_intel.SerpRanking` exactly
+    so the frontend reads either source with one mapper."""
+    position: int
+    domain: str
+    url: str
+    title: str
+    headline: str
+
+
+class SerpTrendPoint(BaseModel):
+    """One historical position observation for the position trend."""
+    taken_at: datetime
+    our_position: int | None
+
+
+class QuerySerpResponse(BaseModel):
+    """Latest SERP snapshot + small 14-day position trend for one query.
+
+    `error_tag` is the honest «we asked but couldn't get an answer»
+    signal — when set, `results` is empty and the UI should explain
+    rather than render a blank table.
+    """
+    query_id: uuid.UUID
+    query_text: str
+    taken_at: datetime | None
+    region: str | None
+    our_position: int | None
+    our_url: str | None
+    results: list[SerpRowItem]
+    top_competitor_domains: list[str]
+    error_tag: str | None
+    # Up to ~14 days of historical owner positions (most-recent first),
+    # so the UI can render a tiny sparkline. Each point comes from a
+    # distinct (successful) probe.
+    trend: list[SerpTrendPoint]
+
+
+class SerpRefreshResponse(BaseModel):
+    """Outcome of a manual `serp-snapshot/refresh` POST."""
+    status: str            # "queued" | "deduped"
+    task_id: str | None
+    run_id: str
+    deduped: bool = False
+
+
+@router.get(
+    "/sites/{site_id}/queries/{query_id}/serp-snapshot",
+    response_model=QuerySerpResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def get_query_serp_snapshot(
+    site_id: uuid.UUID,
+    query_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> QuerySerpResponse:
+    """Latest SERP snapshot for one query plus a short position trend.
+
+    Honest no-data: if the SERP probe has never run for this query, all
+    fields are empty / None except `query_id` and `query_text`. If the
+    last probe errored, `error_tag` is set and `results` is empty — the
+    UI distinguishes these from a real «we are not in top-N».
+
+    Spec source: serp_intel package; column names mirror the JSONB
+    `results` shape (position, url, domain, title, headline).
+    """
+    from app.models.query_serp_snapshot import QuerySerpSnapshot
+
+    site = await _site_or_404(db, site_id)
+    sq = (await db.execute(
+        select(SearchQuery)
+        .where(
+            SearchQuery.id == query_id,
+            SearchQuery.site_id == site.id,
+        )
+    )).scalar_one_or_none()
+    if sq is None:
+        raise HTTPException(status_code=404, detail="query not found")
+
+    # Last 14 days of probes for this query (includes errored rows so
+    # the trend honestly shows "we tried but failed").
+    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+    history = (await db.execute(
+        select(QuerySerpSnapshot)
+        .where(
+            QuerySerpSnapshot.site_id == site.id,
+            QuerySerpSnapshot.query_id == query_id,
+            QuerySerpSnapshot.taken_at >= cutoff,
+        )
+        .order_by(QuerySerpSnapshot.taken_at.desc())
+        .limit(20)
+    )).scalars().all()
+
+    if not history:
+        return QuerySerpResponse(
+            query_id=query_id,
+            query_text=sq.query_text,
+            taken_at=None,
+            region=None,
+            our_position=None,
+            our_url=None,
+            results=[],
+            top_competitor_domains=[],
+            error_tag=None,
+            trend=[],
+        )
+
+    latest = history[0]
+    items: list[SerpRowItem] = []
+    for row in (latest.results or []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            items.append(SerpRowItem(
+                position=int(row.get("position") or 0),
+                domain=str(row.get("domain") or ""),
+                url=str(row.get("url") or ""),
+                title=str(row.get("title") or ""),
+                headline=str(row.get("headline") or ""),
+            ))
+        except (TypeError, ValueError):
+            # Schema drift in older snapshot — skip silently rather than
+            # 500 the whole endpoint.
+            continue
+
+    trend = [
+        SerpTrendPoint(
+            taken_at=h.taken_at,
+            our_position=h.our_position,
+        )
+        for h in history
+    ]
+
+    return QuerySerpResponse(
+        query_id=query_id,
+        query_text=sq.query_text,
+        taken_at=latest.taken_at,
+        region=latest.region,
+        our_position=latest.our_position,
+        our_url=latest.our_url,
+        results=items,
+        top_competitor_domains=list(latest.top_competitor_domains or []),
+        error_tag=latest.error_tag,
+        trend=trend,
+    )
+
+
+@router.post(
+    "/sites/{site_id}/queries/{query_id}/serp-snapshot/refresh",
+    response_model=SerpRefreshResponse,
+    dependencies=[Depends(_require_admin)],
+)
+async def trigger_query_serp_snapshot_refresh(
+    site_id: uuid.UUID,
+    query_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> SerpRefreshResponse:
+    """Manually kick the SERP-intel probe for this site.
+
+    We don't have a per-query Celery task (the Cloud Search quota is
+    site-wide and the selector already picks the top-N most-valuable
+    queries every time), so this triggers `serp_intel_probe_for_site`
+    on the whole site. The endpoint exists so the owner can refresh
+    on demand without waiting for Thursday's beat — useful right after
+    relevance reclassification.
+
+    Idempotent: if a SERP-intel run started recently the trigger is
+    deduped and returns the existing run_id.
+    """
+    site = await _site_or_404(db, site_id)
+    # Confirm the query belongs to this site so the URL contract is
+    # honest (404 instead of silently triggering a site-wide probe).
+    sq = (await db.execute(
+        select(SearchQuery.id)
+        .where(
+            SearchQuery.id == query_id,
+            SearchQuery.site_id == site.id,
+        )
+    )).scalar_one_or_none()
+    if sq is None:
+        raise HTTPException(status_code=404, detail="query not found")
+
+    run_id = str(uuid.uuid4())
+
+    recent = await _recent_started_event(db, site_id, "serp_intel")
+    if recent is not None:
+        return SerpRefreshResponse(
+            status="deduped",
+            task_id=None,
+            run_id=str(recent.run_id) if recent.run_id else run_id,
+            deduped=True,
+        )
+
+    from app.collectors.tasks import serp_intel_probe_for_site
+
+    task = serp_intel_probe_for_site.delay(str(site_id), run_id=run_id)
+    return SerpRefreshResponse(
+        status="queued",
+        task_id=task.id,
+        run_id=run_id,
+        deduped=False,
+    )
 
 
 @router.post(

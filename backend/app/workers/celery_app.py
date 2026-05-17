@@ -187,6 +187,26 @@ celery_app.conf.beat_schedule = {
         "task": "verify_unverified_daily",
         "schedule": crontab(hour=9, minute=0),
     },
+    # SERP-intel probe — weekly (Thursday 06:00 UTC / 09:00 MSK).
+    # Picks the 30 most-valuable queries per site via
+    # `serp_intel.selector.pick_queries_to_probe` and stores a snapshot
+    # per query. Thursday keeps it OFF the Tuesday Wordstat refresh
+    # and Wednesday Wordstat discovery — those already lean on the
+    # shared Yandex Cloud quota. The per-site task itself sleeps
+    # between queries.
+    "serp-intel-probe-weekly": {
+        "task": "serp_intel_probe_all",
+        "schedule": crontab(hour=6, minute=0, day_of_week=4),
+    },
+    # Deterministic cluster assignment — daily (07:30 UTC / 10:30 MSK).
+    # Pure-Python lemma signature, no API calls; runs after intent
+    # classification so freshly classified queries pick up a cluster
+    # the same morning. Cheap enough to run daily so a change in
+    # target_config synonyms reflects in cluster ids quickly.
+    "cluster-queries-daily": {
+        "task": "assign_query_clusters_all",
+        "schedule": crontab(hour=7, minute=30),
+    },
     # Queue depth watchdog — runs every 2 minutes, writes an alert event
     # to every active site if Redis queue > STUCK_THRESHOLD. Makes worker
     # outages visible on the dashboard instead of silent "nothing happens".

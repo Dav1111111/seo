@@ -783,6 +783,109 @@ def _rule_ctr_gap(
     )
 
 
+def _rule_serp_competitor_pressure(
+    snap: BrainSnapshot, focus_tokens: list[str],
+) -> Action | None:
+    """One competitor holds top-3 across ≥3 of our top-priority queries
+    — that's a structural threat, not random variance.
+
+    Source: the weekly `serp_intel_probe_all` Celery beat fills
+    `query_serp_snapshots`. The brain loader picks the LATEST snapshot
+    per (site, query) over the last 14 days and tallies, for each
+    competitor domain, how many queries they sit in top-3 on.
+
+    Severity:
+      critical → ≥5 queries lost to the same competitor
+      high     → ≥3 queries lost to the same competitor
+      silent   → 0-2 queries (or no SERP probes yet) — too noisy
+
+    Category = "funnel" — this is competitive intelligence, not a
+    technical defect. We never recommend penalising the competitor;
+    instead the action points to /studio/competitors so the owner can
+    review what they're doing right and copy the structural advantages
+    (length, price, FAQ, schema) to their own pages.
+    """
+    serp = snap.serp
+    if not serp.top_competitor_by_queries:
+        return None
+
+    # `top_competitor_by_queries` is a sorted list of
+    # {domain, queries_in_top3, sample_queries} dicts, descending on
+    # queries_in_top3. Pick the leader.
+    leader = serp.top_competitor_by_queries[0]
+    if not isinstance(leader, dict):
+        return None
+    domain = str(leader.get("domain") or "").strip()
+    if not domain:
+        return None
+    queries_in_top3 = int(leader.get("queries_in_top3") or 0)
+    if queries_in_top3 < 3:
+        # 0-2 — too noisy to surface as a rule.
+        return None
+
+    if queries_in_top3 >= 5:
+        sev: Severity = "critical"
+    else:
+        sev = "high"
+
+    sample_queries: list[str] = [
+        str(q) for q in (leader.get("sample_queries") or []) if q
+    ]
+
+    word_q = _ru_plural(queries_in_top3, ("запросу", "запросам", "запросам"))
+    word_q_noun = _ru_plural(queries_in_top3, ("запрос", "запроса", "запросов"))
+    total_probed = int(serp.probed_queries or 0)
+
+    title = (
+        f"{domain} держит топ-3 по {queries_in_top3} "
+        f"твоим ценным {word_q_noun}"
+    )
+    body = (
+        f"Я раз в неделю опрашиваю Яндекс по самым ценным твоим "
+        f"запросам (всего проверено {total_probed}). По "
+        f"{queries_in_top3} {word_q} в топ-3 регулярно сидит "
+        f"{domain} — это конкурент №1 в твоей нише. Это "
+        f"структурная угроза: один сайт перетягивает ощутимую долю "
+        f"твоего ценного спроса."
+    )
+    what_to_do = (
+        f"Открой «Конкуренты», добавь {domain} в список (если ещё нет) "
+        f"и запусти глубокий разбор. На каждой их топ-странице сравни: "
+        f"длина текста, цены, бронирование, отзывы, H2-структура, "
+        f"schema.org-разметка. На своей конкурирующей странице добавь "
+        f"то, что у тебя слабее."
+    )
+
+    examples: list[dict[str, str]] = []
+    for q_text in sample_queries[:5]:
+        examples.append({
+            "query": q_text,
+            "details": f"{domain} в топ-3",
+        })
+
+    in_focus = False
+    if focus_tokens and sample_queries:
+        in_focus = _signals_in_focus(sample_queries, focus_tokens)
+
+    return Action(
+        id=f"serp:competitor_pressure:{domain}",
+        severity=sev,
+        title=title,
+        body_ru=body,
+        what_to_do_ru=what_to_do,
+        link_to="/studio/competitors",
+        link_label="К конкурентам",
+        examples=examples,
+        evidence={
+            "competitor_domain": domain,
+            "queries_in_top3": queries_in_top3,
+            "total_probed_queries": total_probed,
+            "our_in_top10_count": serp.our_in_top10_count,
+        },
+        in_focus=in_focus,
+    )
+
+
 def _rule_robots_critical(
     snap: BrainSnapshot, focus_tokens: list[str],
 ) -> Action | None:
@@ -1160,6 +1263,7 @@ _RULES = (
     _rule_missing_landings,
     _rule_funnel_top_gap,
     _rule_funnel_warm_underserved,
+    _rule_serp_competitor_pressure,
     _rule_pages_without_review,
     _rule_pending_recs,
     _rule_followup_due,

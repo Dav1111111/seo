@@ -3336,3 +3336,266 @@ def verify_unverified_daily(self):
         return {"requeued": len(rows)}
 
     return _run_async(_run())
+
+
+# ── SERP probing + deterministic clustering (roadmap point 2) ──────────
+
+
+# Hard cap so a single run can't burn the Yandex Cloud Search shared
+# quota (≈100 calls/day across all sites). At 30 queries × 1 site we
+# stay well under, but two sites onboarding the same day still fit.
+SERP_INTEL_MAX_QUERIES_PER_RUN = 30
+
+
+@celery_app.task(name="serp_intel_probe_for_site", bind=True, max_retries=1)
+def serp_intel_probe_for_site(
+    self, site_id: str, run_id: str | None = None,
+):
+    """Probe SERP for the site's top-N important queries, store snapshots.
+
+    Stage = "serp_intel". CLAUDE.md rule 1 (pipeline cascade invariant):
+    `started` + a terminal (`done` / `failed` / `skipped`) on every
+    code path. CLAUDE.md rule 2: `task_session()` for the DB handle.
+    CLAUDE.md rule 3: `run_id` propagates into every event for the
+    activity feed.
+
+    Heavy lifting lives in `core_audit.serp_intel.collect_serp_snapshot_for_site`;
+    this task is just the Celery wrapper that wires up events.
+    """
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.core_audit.serp_intel import collect_serp_snapshot_for_site
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if site is None:
+                await emit_terminal(
+                    db, site_id, "serp_intel", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "serp_intel",
+                    "error": "Site not found",
+                }
+
+            await log_event(
+                db, site_id, "serp_intel", "started",
+                f"Снимаю SERP по самым ценным запросам "
+                f"(до {SERP_INTEL_MAX_QUERIES_PER_RUN} штук)…",
+                run_id=run_id,
+            )
+
+            result = await collect_serp_snapshot_for_site(
+                db, UUID(site_id),
+                max_queries=SERP_INTEL_MAX_QUERIES_PER_RUN,
+            )
+
+            await db.commit()
+
+            total = result.queries_probed + result.queries_failed
+
+            if total == 0:
+                await emit_terminal(
+                    db, site_id, "serp_intel", "skipped",
+                    "Нет запросов для пробы — сначала классифицируй "
+                    "запросы и собери Wordstat.",
+                    extra={
+                        "queries_probed": 0,
+                        "queries_failed": 0,
+                        "reason": "no_eligible_queries",
+                    },
+                    run_id=run_id,
+                )
+                return {
+                    "status": "skipped",
+                    "stage": "serp_intel",
+                    "reason": "no_eligible_queries",
+                }
+
+            extra = {
+                "queries_probed": result.queries_probed,
+                "queries_failed": result.queries_failed,
+                "queries_total": total,
+            }
+
+            if result.queries_probed == 0:
+                # All probes failed — Search API likely unavailable.
+                await emit_terminal(
+                    db, site_id, "serp_intel", "failed",
+                    f"Search API вернул ошибки на всех {total} запросах. "
+                    f"Проверь YANDEX_SEARCH_API_KEY и квоту.",
+                    extra=extra,
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "serp_intel",
+                    **extra,
+                }
+
+            in_top_n = sum(
+                1 for s in result.snapshots
+                if isinstance(s, dict) and s.get("our_position") is not None
+            )
+            extra["our_in_top_n_count"] = in_top_n
+            message = (
+                f"SERP собран по {result.queries_probed}/{total} "
+                f"запросам, мы в топ-10 на {in_top_n}."
+            )
+            await emit_terminal(
+                db, site_id, "serp_intel", "done", message,
+                extra=extra,
+                run_id=run_id,
+            )
+            return {
+                "status": "done",
+                "stage": "serp_intel",
+                **extra,
+            }
+
+    return _run_async(_run())
+
+
+@celery_app.task(name="assign_query_clusters", bind=True, max_retries=1)
+def assign_query_clusters(
+    self, site_id: str, run_id: str | None = None,
+):
+    """Recompute deterministic cluster_id for every SearchQuery on a site.
+
+    Cheap (no API calls): the clustering signature is a pure-Python
+    lemma normalisation. Idempotent — running twice with the same
+    inputs produces the same `cluster` values.
+
+    We only WRITE when the value changed, so an unchanged row doesn't
+    bump `updated_at`. Counts both attempted rows and rows that
+    actually got a new cluster id so the activity feed reflects the
+    real diff.
+
+    Stage = "cluster_queries". Started + terminal on every code path.
+    """
+    from app.core_audit.activity import emit_terminal, log_event
+    from app.core_audit.clustering import cluster_id_for
+
+    async def _run():
+        async with task_session() as db:
+            site = (await db.execute(
+                select(Site).where(Site.id == UUID(site_id))
+            )).scalar_one_or_none()
+            if site is None:
+                await emit_terminal(
+                    db, site_id, "cluster_queries", "failed",
+                    "Сайт не найден в базе.",
+                    run_id=run_id,
+                )
+                return {
+                    "status": "failed",
+                    "stage": "cluster_queries",
+                    "error": "Site not found",
+                }
+
+            await log_event(
+                db, site_id, "cluster_queries", "started",
+                "Раздаю запросам кластерные подписи по леммам…",
+                run_id=run_id,
+            )
+
+            rows = (await db.execute(
+                select(SearchQuery).where(SearchQuery.site_id == UUID(site_id))
+            )).scalars().all()
+
+            if not rows:
+                await emit_terminal(
+                    db, site_id, "cluster_queries", "skipped",
+                    "Нет запросов для кластеризации.",
+                    extra={"total": 0, "updated": 0, "clusters": 0},
+                    run_id=run_id,
+                )
+                return {
+                    "status": "skipped",
+                    "stage": "cluster_queries",
+                    "reason": "no_queries",
+                }
+
+            updated = 0
+            cluster_set: set[str] = set()
+            unclustered = 0
+            for q in rows:
+                new_cluster = cluster_id_for(q.query_text)
+                if new_cluster is None:
+                    unclustered += 1
+                else:
+                    cluster_set.add(new_cluster)
+                if q.cluster != new_cluster:
+                    q.cluster = new_cluster
+                    updated += 1
+
+            await db.commit()
+
+            extra = {
+                "total": len(rows),
+                "updated": updated,
+                "clusters": len(cluster_set),
+                "unclustered": unclustered,
+            }
+            message = (
+                f"Кластеризовал {len(rows)} запросов в {len(cluster_set)} "
+                f"групп ({updated} изменений, {unclustered} без кластера)."
+            )
+            await emit_terminal(
+                db, site_id, "cluster_queries", "done", message,
+                extra=extra,
+                run_id=run_id,
+            )
+            return {
+                "status": "done",
+                "stage": "cluster_queries",
+                **extra,
+            }
+
+    return _run_async(_run())
+
+
+@celery_app.task(name="serp_intel_probe_all", bind=True, max_retries=0)
+def serp_intel_probe_all(self):
+    """Thursday-morning fan-out: probe important queries for every
+    active site. Spaced 60s apart so we don't burn the SERP quota in
+    one minute (each per-site task itself sleeps between queries).
+    """
+    logger.info("Starting weekly SERP-intel probe for all active sites")
+    sites = _run_async(_get_active_sites())
+    queued: list[str] = []
+    for i, site in enumerate(sites):
+        sid = site.get("id")
+        if not sid:
+            continue
+        serp_intel_probe_for_site.apply_async(
+            args=[str(sid)],
+            countdown=i * 60,
+        )
+        queued.append(site["domain"])
+    return {"queued": queued}
+
+
+@celery_app.task(name="assign_query_clusters_all", bind=True, max_retries=0)
+def assign_query_clusters_all(self):
+    """Daily fan-out for deterministic clustering. Cheap — runs in
+    milliseconds per site — but we still stagger by 5 seconds so the
+    activity feed is readable.
+    """
+    logger.info("Starting daily cluster reassignment for all active sites")
+    sites = _run_async(_get_active_sites())
+    queued: list[str] = []
+    for i, site in enumerate(sites):
+        sid = site.get("id")
+        if not sid:
+            continue
+        assign_query_clusters.apply_async(
+            args=[str(sid)],
+            countdown=i * 5,
+        )
+        queued.append(site["domain"])
+    return {"queued": queued}
